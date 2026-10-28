@@ -1,0 +1,523 @@
+{
+ "kir_version": 1,
+ "kernel": "init_role_static_waiter",
+ "source": "tests/lean/init_role_static_waiter.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "K_TILES",
+   "type": "i32"
+  },
+  {
+   "name": "SHORT",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "a",
+   "kind": "desc",
+   "elem_bytes": 2,
+   "shape": [
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false,
+   "box": [
+    64,
+    32
+   ]
+  },
+  {
+   "name": "out",
+   "kind": "desc",
+   "elem_bytes": 2,
+   "shape": [
+    {
+     "e": "const",
+     "v": 64,
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 16,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 16,
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "output",
+   "metadata": false,
+   "box": [
+    64,
+    16
+   ]
+  }
+ ],
+ "barriers": [
+  {
+   "name": "full",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   }
+  },
+  {
+   "name": "empty",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "consumer",
+   "warps": 4,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "bar_init",
+     "loc": "init_role.py:3",
+     "bar": "full",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "count": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "bar_init",
+     "loc": "init_role.py:3",
+     "bar": "full",
+     "idx": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "count": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "bar_init",
+     "loc": "init_role.py:3",
+     "bar": "empty",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "count": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "bar_init",
+     "loc": "init_role.py:3",
+     "bar": "empty",
+     "idx": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "count": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     }
+    },
+    {
+     "op": "for",
+     "var": "k",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "bin",
+      "o": "sub",
+      "a": {
+       "e": "var",
+       "name": "K_TILES",
+       "w": 32
+      },
+      "b": {
+       "e": "var",
+       "name": "SHORT",
+       "w": 32
+      },
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "let",
+       "var": "s",
+       "expr": {
+        "e": "bin",
+        "o": "srem",
+        "a": {
+         "e": "var",
+         "name": "k",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 2,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "let",
+       "var": "ph",
+       "expr": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "bin",
+         "o": "sdiv",
+         "a": {
+          "e": "var",
+          "name": "k",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 2,
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "init_role.py:21",
+       "bar": "full",
+       "idx": {
+        "e": "var",
+        "name": "s",
+        "w": 32
+       },
+       "parity": {
+        "e": "var",
+        "name": "ph",
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "init_role.py:22",
+       "bar": "empty",
+       "idx": {
+        "e": "var",
+        "name": "s",
+        "w": 32
+       }
+      }
+     ],
+     "loc": "init_role.py:20"
+    },
+    {
+     "op": "event",
+     "ev": "tma_store",
+     "loc": "init_role.py:30",
+     "desc": "out",
+     "coords": [
+      {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "producer",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "k",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "K_TILES",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "let",
+       "var": "s",
+       "expr": {
+        "e": "bin",
+        "o": "srem",
+        "a": {
+         "e": "var",
+         "name": "k",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 2,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "let",
+       "var": "ph",
+       "expr": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "bin",
+         "o": "sdiv",
+         "a": {
+          "e": "var",
+          "name": "k",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 2,
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "init_role.py:12",
+       "bar": "empty",
+       "idx": {
+        "e": "var",
+        "name": "s",
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "xor",
+        "a": {
+         "e": "var",
+         "name": "ph",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "expect_tx",
+       "loc": "init_role.py:13",
+       "bar": "full",
+       "idx": {
+        "e": "var",
+        "name": "s",
+        "w": 32
+       },
+       "bytes": {
+        "e": "const",
+        "v": 4096,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "init_role.py:13",
+       "bar": "full",
+       "idx": {
+        "e": "var",
+        "name": "s",
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "tma_load",
+       "loc": "init_role.py:14",
+       "desc": "a",
+       "coords": [
+        {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        {
+         "e": "bin",
+         "o": "mul",
+         "a": {
+          "e": "var",
+          "name": "k",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 32,
+          "w": 32
+         },
+         "w": 32,
+         "addr": true
+        }
+       ],
+       "bar": "full",
+       "idx": {
+        "e": "var",
+        "name": "s",
+        "w": 32
+       }
+      }
+     ],
+     "loc": "init_role.py:11"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "init_role_static_waiter",
+  "inputs": [
+   {
+    "name": "consumer_short",
+    "params": {
+     "K_TILES": 1,
+     "SHORT": 1
+    },
+    "intended_writes": {
+     "out": "all"
+    }
+   },
+   {
+    "name": "consumer_full",
+    "params": {
+     "K_TILES": 1,
+     "SHORT": 0
+    },
+    "intended_writes": {
+     "out": "all"
+    }
+   }
+  ]
+ }
+}

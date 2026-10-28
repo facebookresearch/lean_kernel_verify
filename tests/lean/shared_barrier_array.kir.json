@@ -1,0 +1,276 @@
+{
+  "kir_version": 1,
+  "kernel": "shared_barrier_array",
+  "source": "tests/lean/shared_barrier_array.kir.json",
+  "ir": "cute-mlir",
+  "grid": [
+    {
+      "e": "bin",
+      "o": "sdiv",
+      "a": {
+        "e": "bin",
+        "o": "add",
+        "a": {"e": "var", "name": "N", "w": 32},
+        "b": {"e": "const", "v": 63, "w": 32},
+        "w": 32
+      },
+      "b": {"e": "const", "v": 64, "w": 32},
+      "w": 32
+    },
+    {"e": "const", "v": 1, "w": 32},
+    {"e": "const", "v": 1, "w": 32}
+  ],
+  "params": [{"name": "N", "type": "i32"}, {"name": "K_TILES", "type": "i32"}, {"name": "SKIP", "type": "i32"}],
+  "tensors": [
+    {
+      "name": "a",
+      "kind": "desc",
+      "elem_bytes": 2,
+      "shape": [
+        {"e": "var", "name": "N", "w": 32},
+        {
+          "e": "bin",
+          "o": "mul",
+          "a": {"e": "var", "name": "K_TILES", "w": 32},
+          "b": {"e": "const", "v": 32, "w": 32},
+          "w": 32
+        }
+      ],
+      "strides": [
+        {
+          "e": "bin",
+          "o": "mul",
+          "a": {"e": "var", "name": "K_TILES", "w": 32},
+          "b": {"e": "const", "v": 32, "w": 32},
+          "w": 32
+        },
+        {"e": "const", "v": 1, "w": 32}
+      ],
+      "segments": null,
+      "role": "input",
+      "metadata": false,
+      "box": [64, 32]
+    },
+    {
+      "name": "out",
+      "kind": "desc",
+      "elem_bytes": 2,
+      "shape": [{"e": "var", "name": "N", "w": 32}, {"e": "const", "v": 16, "w": 32}],
+      "strides": [{"e": "const", "v": 16, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+      "segments": null,
+      "role": "output",
+      "metadata": false,
+      "box": [64, 16]
+    }
+  ],
+  "barriers": [{"name": "mbar", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 4, "w": 32}}],
+  "roles": [
+    {
+      "name": "producer",
+      "warps": 1,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "let",
+          "var": "m0",
+          "expr": {
+            "e": "bin",
+            "o": "mul",
+            "a": {"e": "pid", "axis": 0, "w": 32},
+            "b": {"e": "const", "v": 64, "w": 32},
+            "w": 32,
+            "addr": true
+          }
+        },
+        {
+          "op": "for",
+          "var": "k",
+          "loc": "shared_barrier_array.py:10",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {"e": "var", "name": "K_TILES", "w": 32},
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "let",
+              "var": "s",
+              "expr": {
+                "e": "bin",
+                "o": "srem",
+                "a": {"e": "var", "name": "k", "w": 32},
+                "b": {"e": "const", "v": 2, "w": 32},
+                "w": 32
+              }
+            },
+            {
+              "op": "let",
+              "var": "ph",
+              "expr": {
+                "e": "bin",
+                "o": "and",
+                "a": {
+                  "e": "bin",
+                  "o": "sdiv",
+                  "a": {"e": "var", "name": "k", "w": 32},
+                  "b": {"e": "const", "v": 2, "w": 32},
+                  "w": 32
+                },
+                "b": {"e": "const", "v": 1, "w": 32},
+                "w": 32
+              }
+            },
+            {
+              "op": "event",
+              "ev": "wait",
+              "loc": "shared_barrier_array.py:12",
+              "bar": "mbar",
+              "idx": {
+                "e": "bin",
+                "o": "add",
+                "a": {"e": "const", "v": 2, "w": 32},
+                "b": {"e": "var", "name": "s", "w": 32},
+                "w": 32
+              },
+              "parity": {
+                "e": "bin",
+                "o": "xor",
+                "a": {"e": "var", "name": "ph", "w": 32},
+                "b": {"e": "const", "v": 1, "w": 32},
+                "w": 32
+              }
+            },
+            {
+              "op": "event",
+              "ev": "expect_tx",
+              "loc": "shared_barrier_array.py:13",
+              "bar": "mbar",
+              "idx": {"e": "var", "name": "s", "w": 32},
+              "bytes": {"e": "const", "v": 4096, "w": 32}
+            },
+            {
+              "op": "event",
+              "ev": "arrive",
+              "loc": "shared_barrier_array.py:13",
+              "bar": "mbar",
+              "idx": {"e": "var", "name": "s", "w": 32}
+            },
+            {
+              "op": "event",
+              "ev": "tma_load",
+              "loc": "shared_barrier_array.py:14",
+              "desc": "a",
+              "bar": "mbar",
+              "idx": {"e": "var", "name": "s", "w": 32},
+              "coords": [
+                {"e": "var", "name": "m0", "w": 32},
+                {
+                  "e": "bin",
+                  "o": "mul",
+                  "a": {"e": "var", "name": "k", "w": 32},
+                  "b": {"e": "const", "v": 32, "w": 32},
+                  "w": 32,
+                  "addr": true
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "consumer",
+      "warps": 4,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "for",
+          "var": "k",
+          "loc": "shared_barrier_array.py:20",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {
+            "e": "bin",
+            "o": "sub",
+            "a": {"e": "var", "name": "K_TILES", "w": 32},
+            "b": {"e": "var", "name": "SKIP", "w": 32},
+            "w": 32
+          },
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "let",
+              "var": "s",
+              "expr": {
+                "e": "bin",
+                "o": "srem",
+                "a": {"e": "var", "name": "k", "w": 32},
+                "b": {"e": "const", "v": 2, "w": 32},
+                "w": 32
+              }
+            },
+            {
+              "op": "let",
+              "var": "ph",
+              "expr": {
+                "e": "bin",
+                "o": "and",
+                "a": {
+                  "e": "bin",
+                  "o": "sdiv",
+                  "a": {"e": "var", "name": "k", "w": 32},
+                  "b": {"e": "const", "v": 2, "w": 32},
+                  "w": 32
+                },
+                "b": {"e": "const", "v": 1, "w": 32},
+                "w": 32
+              }
+            },
+            {
+              "op": "event",
+              "ev": "wait",
+              "loc": "shared_barrier_array.py:21",
+              "bar": "mbar",
+              "idx": {"e": "var", "name": "s", "w": 32},
+              "parity": {"e": "var", "name": "ph", "w": 32}
+            },
+            {
+              "op": "event",
+              "ev": "arrive",
+              "loc": "shared_barrier_array.py:22",
+              "bar": "mbar",
+              "idx": {
+                "e": "bin",
+                "o": "add",
+                "a": {"e": "const", "v": 2, "w": 32},
+                "b": {"e": "var", "name": "s", "w": 32},
+                "w": 32
+              }
+            }
+          ]
+        },
+        {
+          "op": "event",
+          "ev": "tma_store",
+          "loc": "shared_barrier_array.py:24",
+          "desc": "out",
+          "coords": [
+            {
+              "e": "bin",
+              "o": "mul",
+              "a": {"e": "pid", "axis": 0, "w": 32},
+              "b": {"e": "const", "v": 64, "w": 32},
+              "w": 32,
+              "addr": true
+            },
+            {"e": "const", "v": 0, "w": 32}
+          ]
+        }
+      ]
+    }
+  ],
+  "case": {
+    "name": "shared",
+    "inputs": [
+      {"name": "two_tiles_k3", "params": {"N": 100, "K_TILES": 3, "SKIP": 0}, "intended_writes": {"out": "all"}},
+      {"name": "one_tile_skipped", "params": {"N": 64, "K_TILES": 1, "SKIP": 1}, "intended_writes": {"out": "all"}}
+    ]
+  }
+}

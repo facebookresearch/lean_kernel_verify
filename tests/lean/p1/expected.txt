@@ -1,0 +1,72 @@
+# Expected P1-1 verdicts of every (fixture, input) of tests/lean/p1 (P1 KIR, written by
+# make_fixtures.py); run_all.sh compares them with the VERDICT lines KV.runP1 prints and
+# with the native_decide theorems. An undecided input (out-of-bounds metadata load, an
+# unordered pair under an inconsistent named barrier, or a pair ordered only under the
+# lockstep contents) is a refuted theorem: FAIL here.
+# fixture              input                       P1-1
+s2t_race               one_mblock                  PASS
+s2t_race               two_mblocks                 FAIL
+s2t_race               three_mblocks               FAIL
+s2t_drain              one_mblock                  PASS
+s2t_drain              two_mblocks                 PASS
+s2t_drain              three_mblocks               PASS
+drain_before_wait_ld   one_mblock                  PASS
+drain_before_wait_ld   two_mblocks                 FAIL
+drain_before_wait_ld   three_mblocks               FAIL
+drain_not_waited       one_mblock                  PASS
+drain_not_waited       two_mblocks                 FAIL
+drain_not_waited       three_mblocks               FAIL
+handoff                commit_then_wait            PASS
+handoff                plain_arrive_after_commit   FAIL
+handoff                mixed_commit_slot           FAIL
+handoff                wait_st_after_cp            FAIL
+handoff                ld_without_wait             FAIL
+handoff                ld_with_wait                PASS
+handoff_mixed          commit_and_plain            FAIL
+handoff_mixed          two_commits                 PASS
+split_drain            two_mblocks                 PASS
+split_drain            three_mblocks               PASS
+lockstep_only          credit_two_mblocks          FAIL
+lockstep_only          credit_three_mblocks        FAIL
+lockstep_only          commit_landing              FAIL
+lockstep_only          waited_credit               PASS
+lockstep_only          credit_and_race             FAIL
+named_bars             bar_sync                    PASS
+named_bars             bar_arrive_sync             PASS
+named_bars             no_barrier                  FAIL
+named_bars             inconsistent                FAIL
+same_role              pipelined                   PASS
+same_role              cp_cp                       PASS
+same_role              mma_d_cp                    PASS
+same_role              mma_d_commit_cp             PASS
+cross_warp             no_sync                     PASS
+cross_warp             bar_sync                    PASS
+partial_issue          one_thread_arrives          FAIL
+partial_issue          bar_sync_then_one_arrives   PASS
+partial_issue          one_thread_waits            FAIL
+partial_event          credit_two                  FAIL
+partial_event          count_one                   FAIL
+partial_event_control  all_warps_needed            PASS
+partial_event_control  credit_three                FAIL
+partial_sync           credit_two                  FAIL
+partial_sync           credit_one                  FAIL
+partial_sync           no_credit                   PASS
+partial_split          run_ahead_one               FAIL
+partial_split          one_each                    PASS
+partial_named          x_twice                     FAIL
+partial_named          x_once                      PASS
+stale_handoff          toggled_two_tiles           PASS
+stale_handoff          stale_two_tiles             FAIL
+stale_handoff          stale_one_tile              PASS
+ranges                 in_range                    PASS
+ranges                 col_out_of_range            FAIL
+ranges                 lane_quarter                FAIL
+ranges_relative        in_range                    PASS
+ranges_relative        col_out_of_range            FAIL
+meta_oob_p1            in_bounds                   PASS
+meta_oob_p1            oob                         FAIL
+hang_vacuous           blocked                     FAIL
+cluster_pair           ordered                     PASS
+cluster_pair           last_unwaited               FAIL
+cluster_pair           last_unwaited_one_block     PASS
+cluster_pair           leader_only_release         FAIL

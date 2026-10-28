@@ -1,0 +1,724 @@
+{
+ "kir_version": 1,
+ "kernel": "drain_before_wait_ld",
+ "source": "tests/lean/p1/drain_before_wait_ld.kir.json",
+ "ir": "cute-mlir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "M",
+   "type": "i32"
+  },
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "S_full",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "S_empty",
+   "count": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "dS_full",
+   "count": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "dQ_full",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "S_drain",
+   "count": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "mma",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "m",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "M",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "sge",
+        "a": {
+         "e": "var",
+         "name": "m",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "drain_before_wait_ld.py:10",
+         "bar": "S_empty",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "bin",
+          "o": "and",
+          "a": {
+           "e": "bin",
+           "o": "sub",
+           "a": {
+            "e": "var",
+            "name": "m",
+            "w": 32
+           },
+           "b": {
+            "e": "const",
+            "v": 1,
+            "w": 32
+           },
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "drain_before_wait_ld.py:10"
+      },
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "drain_before_wait_ld.py:11",
+       "inst": "mma",
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "d",
+         "write": true,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "ncols": 128
+        },
+        {
+         "use": "sf",
+         "write": false,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 400,
+          "w": 32
+         },
+         "ncols": 4
+        },
+        {
+         "use": "sf",
+         "write": false,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 404,
+          "w": 32
+         },
+         "ncols": 4
+        }
+       ],
+       "site": "drain_before_wait_ld.py:11"
+      },
+      {
+       "op": "event",
+       "ev": "commit_arrive",
+       "loc": "drain_before_wait_ld.py:12",
+       "bar": "S_full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "sge",
+        "a": {
+         "e": "var",
+         "name": "m",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "drain_before_wait_ld.py:13",
+         "bar": "dS_full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "bin",
+          "o": "and",
+          "a": {
+           "e": "bin",
+           "o": "sub",
+           "a": {
+            "e": "var",
+            "name": "m",
+            "w": 32
+           },
+           "b": {
+            "e": "const",
+            "v": 1,
+            "w": 32
+           },
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 32
+         }
+        },
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "drain_before_wait_ld.py:14",
+         "bar": "S_drain",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "bin",
+          "o": "and",
+          "a": {
+           "e": "var",
+           "name": "m",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 32
+         }
+        },
+        {
+         "op": "event",
+         "ev": "tmem",
+         "loc": "drain_before_wait_ld.py:15",
+         "inst": "cp",
+         "warp": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "rects": [
+          {
+           "use": "data",
+           "write": true,
+           "lane": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           },
+           "nlanes": 128,
+           "col": {
+            "e": "const",
+            "v": 80,
+            "w": 32
+           },
+           "ncols": 4
+          }
+         ]
+        },
+        {
+         "op": "event",
+         "ev": "tmem",
+         "loc": "drain_before_wait_ld.py:16",
+         "inst": "mma",
+         "warp": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "rects": [
+          {
+           "use": "d",
+           "write": true,
+           "lane": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           },
+           "nlanes": 128,
+           "col": {
+            "e": "const",
+            "v": 256,
+            "w": 32
+           },
+           "ncols": 128
+          },
+          {
+           "use": "sf",
+           "write": false,
+           "lane": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           },
+           "nlanes": 128,
+           "col": {
+            "e": "const",
+            "v": 80,
+            "w": 32
+           },
+           "ncols": 4
+          },
+          {
+           "use": "sf",
+           "write": false,
+           "lane": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           },
+           "nlanes": 128,
+           "col": {
+            "e": "const",
+            "v": 80,
+            "w": 32
+           },
+           "ncols": 4
+          }
+         ],
+         "site": "drain_before_wait_ld.py:16"
+        },
+        {
+         "op": "event",
+         "ev": "commit_arrive",
+         "loc": "drain_before_wait_ld.py:17",
+         "bar": "dQ_full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "drain_before_wait_ld.py:13"
+      }
+     ],
+     "loc": "drain_before_wait_ld.py:9"
+    }
+   ]
+  },
+  {
+   "name": "compute",
+   "warps": 2,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "m",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "M",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "drain_before_wait_ld.py:20",
+       "bar": "S_full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "var",
+         "name": "m",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "for",
+       "var": "w",
+       "lb": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "ub": {
+        "e": "const",
+        "v": 4,
+        "w": 32
+       },
+       "step": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "body": [
+        {
+         "op": "event",
+         "ev": "tmem",
+         "loc": "drain_before_wait_ld.py:21",
+         "inst": "ld",
+         "warp": {
+          "e": "var",
+          "name": "w",
+          "w": 32
+         },
+         "rects": [
+          {
+           "use": "data",
+           "write": false,
+           "lane": {
+            "e": "bin",
+            "o": "mul",
+            "a": {
+             "e": "bin",
+             "o": "urem",
+             "a": {
+              "e": "var",
+              "name": "w",
+              "w": 32
+             },
+             "b": {
+              "e": "const",
+              "v": 4,
+              "w": 32
+             },
+             "w": 32
+            },
+            "b": {
+             "e": "const",
+             "v": 32,
+             "w": 32
+            },
+            "w": 32
+           },
+           "nlanes": 32,
+           "col": {
+            "e": "const",
+            "v": 64,
+            "w": 32
+           },
+           "ncols": 32
+          }
+         ]
+        }
+       ],
+       "loc": "drain_before_wait_ld.py:21"
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "drain_before_wait_ld.py:24",
+       "bar": "S_drain",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "per_warp": true
+      },
+      {
+       "op": "event",
+       "ev": "tmem_wait",
+       "loc": "drain_before_wait_ld.py:22",
+       "ld": true
+      },
+      {
+       "op": "for",
+       "var": "w",
+       "lb": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "ub": {
+        "e": "const",
+        "v": 4,
+        "w": 32
+       },
+       "step": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "body": [
+        {
+         "op": "event",
+         "ev": "tmem",
+         "loc": "drain_before_wait_ld.py:25",
+         "inst": "st",
+         "warp": {
+          "e": "var",
+          "name": "w",
+          "w": 32
+         },
+         "rects": [
+          {
+           "use": "data",
+           "write": true,
+           "lane": {
+            "e": "bin",
+            "o": "mul",
+            "a": {
+             "e": "bin",
+             "o": "urem",
+             "a": {
+              "e": "var",
+              "name": "w",
+              "w": 32
+             },
+             "b": {
+              "e": "const",
+              "v": 4,
+              "w": 32
+             },
+             "w": 32
+            },
+            "b": {
+             "e": "const",
+             "v": 32,
+             "w": 32
+            },
+            "w": 32
+           },
+           "nlanes": 32,
+           "col": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           },
+           "ncols": 8
+          }
+         ]
+        }
+       ],
+       "loc": "drain_before_wait_ld.py:25"
+      },
+      {
+       "op": "event",
+       "ev": "tmem_wait",
+       "loc": "drain_before_wait_ld.py:26",
+       "ld": false
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "drain_before_wait_ld.py:27",
+       "bar": "dS_full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "per_warp": true
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "drain_before_wait_ld.py:28",
+       "bar": "S_empty",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "per_warp": true
+      }
+     ],
+     "loc": "drain_before_wait_ld.py:19"
+    }
+   ]
+  }
+ ],
+ "tmem": {
+  "cols": 512,
+  "base": "zero"
+ },
+ "case": {
+  "name": "drain_before_wait_ld",
+  "inputs": [
+   {
+    "name": "one_mblock",
+    "params": {
+     "M": 1,
+     "MODE": 0
+    }
+   },
+   {
+    "name": "two_mblocks",
+    "params": {
+     "M": 2,
+     "MODE": 0
+    }
+   },
+   {
+    "name": "three_mblocks",
+    "params": {
+     "M": 3,
+     "MODE": 0
+    }
+   }
+  ]
+ }
+}

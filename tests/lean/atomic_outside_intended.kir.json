@@ -1,0 +1,91 @@
+{
+  "kir_version": 1,
+  "kernel": "atomic_outside_intended",
+  "source": "tests/lean/atomic_outside_intended.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "ATOMIC_ROWS", "type": "i32"}, {"name": "R0", "type": "i32"}],
+  "tensors": [
+    {
+      "name": "y",
+      "kind": "global",
+      "elem_bytes": 4,
+      "shape": [{"e": "const", "v": 128, "w": 32}],
+      "strides": [{"e": "const", "v": 1, "w": 32}],
+      "segments": null,
+      "role": "output",
+      "metadata": false
+    },
+    {
+      "name": "z",
+      "kind": "desc",
+      "elem_bytes": 4,
+      "shape": [{"e": "const", "v": 128, "w": 32}, {"e": "const", "v": 16, "w": 32}],
+      "strides": [{"e": "const", "v": 16, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+      "segments": null,
+      "role": "output",
+      "metadata": false,
+      "box": [64, 16]
+    }
+  ],
+  "barriers": [],
+  "roles": [
+    {
+      "name": "default",
+      "warps": 4,
+      "threads_per_issue": 128,
+      "body": [
+        {
+          "op": "event",
+          "ev": "gstore",
+          "tensor": "y",
+          "loc": "atomic_outside_intended.py:8",
+          "mask": null,
+          "offsets": {"t": "range", "start": 0, "end": 64, "shape": [64], "w": 32}
+        },
+        {
+          "op": "event",
+          "ev": "gatomic",
+          "tensor": "y",
+          "loc": "atomic_outside_intended.py:9",
+          "offsets": {"t": "range", "start": 0, "end": 192, "shape": [192], "w": 32},
+          "mask": {
+            "t": "cmp",
+            "o": "slt",
+            "shape": [192],
+            "w": 1,
+            "a": {"t": "range", "start": 0, "end": 192, "shape": [192], "w": 32},
+            "b": {"t": "splat", "shape": [192], "w": 32, "a": {"e": "var", "name": "ATOMIC_ROWS", "w": 32}}
+          }
+        },
+        {
+          "op": "event",
+          "ev": "tma_store",
+          "desc": "z",
+          "loc": "atomic_outside_intended.py:11",
+          "coords": [{"e": "const", "v": 0, "w": 32}, {"e": "const", "v": 0, "w": 32}]
+        },
+        {
+          "op": "event",
+          "ev": "tma_reduce",
+          "desc": "z",
+          "loc": "atomic_outside_intended.py:12",
+          "coords": [{"e": "var", "name": "R0", "w": 32}, {"e": "const", "v": 0, "w": 32}]
+        }
+      ]
+    }
+  ],
+  "case": {
+    "name": "atomics",
+    "inputs": [
+      {"name": "inside", "params": {"ATOMIC_ROWS": 64, "R0": 0}, "intended_writes": {"y": [[0, 64]], "z": [[0, 64]]}},
+      {"name": "outside", "params": {"ATOMIC_ROWS": 100, "R0": 64}, "intended_writes": {"y": [[0, 64]], "z": [[0, 64]]}},
+      {"name": "atomic_oob", "params": {"ATOMIC_ROWS": 160, "R0": 0}, "intended_writes": {"y": [[0, 64]], "z": [[0, 64]]}},
+      {
+        "name": "store_outside",
+        "params": {"ATOMIC_ROWS": 64, "R0": 0},
+        "intended_writes": {"y": [[0, 64]], "z": [[0, 32]]}
+      }
+    ]
+  }
+}

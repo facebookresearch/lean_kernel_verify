@@ -1,0 +1,109 @@
+{
+  "kir_version": 1,
+  "kernel": "arrival_counts",
+  "source": "tests/lean/arrival_counts.kir.json",
+  "ir": "cute-mlir",
+  "grid": [{"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "TILES", "type": "i32"}, {"name": "EPI_COUNT", "type": "i32"}, {"name": "INIT", "type": "i32"}],
+  "tensors": [],
+  "barriers": [
+    {"name": "epi_done", "count": {"e": "var", "name": "EPI_COUNT", "w": 32}, "num": {"e": "const", "v": 1, "w": 32}},
+    {"name": "warp_done", "count": {"e": "const", "v": 4, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}}
+  ],
+  "roles": [
+    {
+      "name": "mma",
+      "warps": 1,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "event",
+          "ev": "bar_init",
+          "bar": "epi_done",
+          "loc": "arrival_counts.py:5",
+          "idx": {"e": "const", "v": 0, "w": 32},
+          "count": {"e": "var", "name": "INIT", "w": 32}
+        },
+        {
+          "op": "for",
+          "var": "t",
+          "loc": "arrival_counts.py:10",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {"e": "var", "name": "TILES", "w": 32},
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "event",
+              "ev": "wait",
+              "bar": "epi_done",
+              "loc": "arrival_counts.py:11",
+              "idx": {"e": "const", "v": 0, "w": 32},
+              "parity": {
+                "e": "bin",
+                "o": "and",
+                "w": 32,
+                "a": {"e": "var", "name": "t", "w": 32},
+                "b": {"e": "const", "v": 1, "w": 32}
+              }
+            },
+            {
+              "op": "event",
+              "ev": "wait",
+              "bar": "warp_done",
+              "loc": "arrival_counts.py:12",
+              "idx": {"e": "const", "v": 0, "w": 32},
+              "parity": {
+                "e": "bin",
+                "o": "and",
+                "w": 32,
+                "a": {"e": "var", "name": "t", "w": 32},
+                "b": {"e": "const", "v": 1, "w": 32}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "epilogue",
+      "warps": 4,
+      "threads_per_issue": 128,
+      "body": [
+        {
+          "op": "for",
+          "var": "t",
+          "loc": "arrival_counts.py:20",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {"e": "var", "name": "TILES", "w": 32},
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "event",
+              "ev": "arrive",
+              "bar": "epi_done",
+              "loc": "arrival_counts.py:21",
+              "idx": {"e": "const", "v": 0, "w": 32}
+            },
+            {
+              "op": "event",
+              "ev": "arrive",
+              "bar": "warp_done",
+              "loc": "arrival_counts.py:22",
+              "idx": {"e": "const", "v": 0, "w": 32},
+              "per_warp": true
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "case": {
+    "name": "counts",
+    "inputs": [
+      {"name": "count_128", "params": {"TILES": 2, "EPI_COUNT": 128, "INIT": 128}},
+      {"name": "count_32", "params": {"TILES": 2, "EPI_COUNT": 32, "INIT": 32}},
+      {"name": "count_96", "params": {"TILES": 2, "EPI_COUNT": 96, "INIT": 96}},
+      {"name": "init_mismatch", "params": {"TILES": 2, "EPI_COUNT": 128, "INIT": 64}}
+    ]
+  }
+}

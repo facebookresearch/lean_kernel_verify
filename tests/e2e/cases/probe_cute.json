@@ -1,0 +1,16 @@
+{
+ "name": "probe_cute",
+ "description": "CuTe DSL probe kernel (128 threads, thread t updates element t) through the CuTe frontend. n100 runs 28 threads past the end of the tensor and n0 (an empty tensor) all 128: P0-1 must fail on them. The host rejects n200 (more than 128 elements): it is listed as rejected, without verdicts.",
+ "source": {"package": "lkv_e2e_probe_cute.py", "src": "../kernels"},
+ "entry": "lkv_e2e_probe_cute:run",
+ "builder": "../kernels/lkv_e2e_probe_cute.py:args",
+ "num_sms": 2,
+ "max_iters": 4096,
+ "kernels": {"host": {"intended_writes": {"m": "all"}}},
+ "inputs": [
+  {"name": "n128", "n": 128},
+  {"name": "n100", "n": 100},
+  {"name": "n0", "n": 0},
+  {"name": "n200", "n": 200}
+ ]
+}

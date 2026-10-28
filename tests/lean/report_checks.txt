@@ -1,0 +1,49 @@
+# Report lines run_all.sh checks besides expected_messages.txt (which the e2e test also files
+# as counterexample or note texts): <fixture> <text> must occur in the fixture's Lean output,
+# <fixture> !<text> must not occur in it (the fixture name is the first word; the text is the
+# rest of the line after one space).
+full_tiles_fast_path == full_tiles_fast_path / input partial (flags FULL_TILES=true)
+full_tiles_fast_path elision flag(s) FULL_TILES set: the P0-1 and P0-3 checks of this input are reported under P0-5
+full_tiles_fast_path grid (1,1,1): 1 CTA(s) x 1 role(s), 2 events; elision flag(s) EVEN_N set
+full_tiles_fast_path NOTES unchecked P0-5 1
+full_tiles_fast_path !NOTES unchecked P0-3
+full_tiles_fast_path !elision flag(s) USE_TMA
+meta_oob_elided 2 CTA(s) x 2 role(s), 3 events; 1 role trace(s) stop at an out-of-bounds metadata load, so P0-2..P0-5 are not decided; elision flag(s) FAST set
+meta_oob_elided !r7.py:9: cta (1,0,0)
+meta_oob_load !never written by a plain store
+meta_masked_load !r6.py:5: cta
+redundant_rewait !needs 5 completions
+positive_share_preferred !the wait hangs
+nonuniform_contents !this wait never returns
+stale_presumed_hang !role c (consumer convention, 3 waits) needs 3 completions
+meta_oob_load UNDECIDED out_of_range P0-2
+meta_oob_load !UNDECIDED out_of_range P0-1
+meta_oob_load !UNDECIDED out_of_range P0-3
+meta_oob_elided !UNDECIDED out_of_range P0-2
+meta_oob_elided UNDECIDED out_of_range P0-3
+eval_errors !UNDECIDED meta_oob P0-1
+eval_errors UNDECIDED meta_oob P0-2
+eval_errors !UNDECIDED ok
+segment_edges !UNDECIDED
+eval_errors evaluation error (kernel error): eval_errors.py:5: cta (0,0,0) role default: device assert failed
+eval_errors (a certain error of the kernel on this input: every spec FAILs)
+eval_errors evaluation error (kernel error): eval_errors.py:11: cta (0,0,0) role default: barrier index
+eval_errors evaluation error (kernel error): eval_errors.py:12: cta (0,0,0) role default: for k: non-positive step 0 from 0 below 1: the loop never ends
+eval_errors evaluation error (kernel error): ?: host: negative grid
+eval_errors evaluation error (model limit): eval_errors.py:6: cta (0,0,0) role default: division by zero
+eval_errors evaluation error (model limit): eval_errors.py:13: cta (0,0,0) role default: division by zero in tensor
+eval_errors (a limit of the model: no spec is decided on this input; not an error)
+eval_errors evaluation error (unexpected): eval_errors.py:8: cta (0,0,0) role default: while loop exceeds max_iters = 10
+eval_errors evaluation error (unexpected): ?: host: barrier b: negative num -1
+eval_errors (the case or LKV needs a fix: no spec is decided on this input)
+eval_errors !UNDECIDED assert_fail
+eval_errors !UNDECIDED barrier_index
+eval_errors !UNDECIDED for_step_zero
+eval_errors !UNDECIDED negative_grid
+eval_errors UNDECIDED div_zero P0-1
+eval_errors UNDECIDED tensor_div_zero_masked P0-5
+eval_errors UNDECIDED while_bound P0-3
+eval_errors UNDECIDED negative_barrier_num P0-4
+segmented_gload evaluation error (unexpected): ?: host: segmented tensor
+cluster_pair_tma grid (2,1,1) in clusters (2,1,1): 2 CTA(s) x 3 role(s), 9 events
+cluster_launch grid (4,1,1) in clusters (2,1,1): 4 CTA(s) x 1 role(s), 0 events

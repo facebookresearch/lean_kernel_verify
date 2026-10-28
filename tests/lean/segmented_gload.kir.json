@@ -1,0 +1,415 @@
+{
+  "kir_version": 1,
+  "kernel": "segmented_gload",
+  "source": "tests/lean/segmented_gload.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "const", "v": 2, "w": 32}, {"e": "var", "name": "B", "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [
+    {"name": "B", "type": "i32"},
+    {"name": "TOTAL", "type": "i32"},
+    {"name": "ROW_STRIDE", "type": "i32"},
+    {"name": "STRAY", "type": "i32"},
+    {"name": "MASK_TOTAL", "type": "i32"},
+    {"name": "WRITE", "type": "i32"}
+  ],
+  "tensors": [
+    {
+      "name": "cu_seqlens",
+      "kind": "global",
+      "elem_bytes": 4,
+      "shape": [
+        {"e": "bin", "o": "add", "w": 32, "a": {"e": "var", "name": "B", "w": 32}, "b": {"e": "const", "v": 1, "w": 32}}
+      ],
+      "strides": [{"e": "const", "v": 1, "w": 32}],
+      "segments": null,
+      "role": "input",
+      "metadata": true
+    },
+    {
+      "name": "x",
+      "kind": "global",
+      "elem_bytes": 2,
+      "shape": [{"e": "var", "name": "TOTAL", "w": 32}, {"e": "const", "v": 16, "w": 32}],
+      "strides": [{"e": "var", "name": "ROW_STRIDE", "w": 32}, {"e": "const", "v": 1, "w": 32}],
+      "segments": {"dim": 0, "offsets": "cu_seqlens", "per": "batch"},
+      "role": "input",
+      "metadata": false
+    },
+    {
+      "name": "y",
+      "kind": "global",
+      "elem_bytes": 2,
+      "shape": [{"e": "var", "name": "TOTAL", "w": 32}, {"e": "const", "v": 16, "w": 32}],
+      "strides": [{"e": "var", "name": "ROW_STRIDE", "w": 32}, {"e": "const", "v": 1, "w": 32}],
+      "segments": {"dim": 0, "offsets": "cu_seqlens", "per": "batch"},
+      "role": "output",
+      "metadata": false
+    }
+  ],
+  "barriers": [],
+  "roles": [
+    {
+      "name": "worker",
+      "warps": 4,
+      "threads_per_issue": 128,
+      "body": [
+        {"op": "let", "var": "b", "expr": {"e": "pid", "axis": 1, "w": 32}},
+        {
+          "op": "let",
+          "var": "start",
+          "loc": "segmented_gload.py:10",
+          "expr": {"e": "load", "tensor": "cu_seqlens", "w": 32, "index": [{"e": "var", "name": "b", "w": 32}]}
+        },
+        {
+          "op": "let",
+          "var": "end",
+          "loc": "segmented_gload.py:11",
+          "expr": {
+            "e": "load",
+            "tensor": "cu_seqlens",
+            "w": 32,
+            "index": [
+              {
+                "e": "bin",
+                "o": "add",
+                "w": 32,
+                "a": {"e": "var", "name": "b", "w": 32},
+                "b": {"e": "const", "v": 1, "w": 32}
+              }
+            ]
+          }
+        },
+        {
+          "op": "let",
+          "var": "row0",
+          "loc": "segmented_gload.py:12",
+          "expr": {
+            "e": "bin",
+            "o": "add",
+            "w": 32,
+            "addr": true,
+            "a": {"e": "var", "name": "start", "w": 32},
+            "b": {
+              "e": "bin",
+              "o": "mul",
+              "w": 32,
+              "addr": true,
+              "a": {"e": "pid", "axis": 0, "w": 32},
+              "b": {"e": "const", "v": 64, "w": 32}
+            }
+          }
+        },
+        {
+          "op": "let",
+          "var": "limit",
+          "loc": "segmented_gload.py:13",
+          "expr": {
+            "e": "select",
+            "w": 32,
+            "c": {
+              "e": "cmp",
+              "o": "ne",
+              "w": 1,
+              "a": {"e": "var", "name": "MASK_TOTAL", "w": 32},
+              "b": {"e": "const", "v": 0, "w": 32}
+            },
+            "a": {"e": "var", "name": "TOTAL", "w": 32},
+            "b": {"e": "var", "name": "end", "w": 32}
+          }
+        },
+        {
+          "op": "event",
+          "ev": "work",
+          "loc": "segmented_gload.py:14",
+          "fields": {"batch": {"e": "var", "name": "b", "w": 32}}
+        },
+        {
+          "op": "if",
+          "loc": "segmented_gload.py:15",
+          "cond": {
+            "e": "cmp",
+            "o": "ne",
+            "a": {"e": "var", "name": "WRITE", "w": 32},
+            "b": {"e": "const", "v": 0, "w": 32},
+            "w": 1
+          },
+          "then": [
+            {
+              "op": "event",
+              "ev": "gstore",
+              "tensor": "y",
+              "loc": "segmented_gload.py:17",
+              "offsets": {
+                "t": "bin",
+                "o": "add",
+                "shape": [64, 16],
+                "w": 32,
+                "addr": true,
+                "a": {
+                  "t": "bcast",
+                  "axis": 1,
+                  "shape": [64, 16],
+                  "w": 32,
+                  "a": {
+                    "t": "bin",
+                    "o": "mul",
+                    "shape": [64, 1],
+                    "w": 32,
+                    "addr": true,
+                    "a": {
+                      "t": "expand",
+                      "axis": 1,
+                      "shape": [64, 1],
+                      "w": 32,
+                      "a": {
+                        "t": "bin",
+                        "o": "add",
+                        "shape": [64],
+                        "w": 32,
+                        "addr": true,
+                        "a": {"t": "splat", "shape": [64], "w": 32, "a": {"e": "var", "name": "row0", "w": 32}},
+                        "b": {"t": "range", "start": 0, "end": 64, "shape": [64], "w": 32}
+                      }
+                    },
+                    "b": {"t": "splat", "shape": [64, 1], "w": 32, "a": {"e": "var", "name": "ROW_STRIDE", "w": 32}}
+                  }
+                },
+                "b": {
+                  "t": "bcast",
+                  "axis": 0,
+                  "shape": [64, 16],
+                  "w": 32,
+                  "a": {
+                    "t": "expand",
+                    "axis": 0,
+                    "shape": [1, 16],
+                    "w": 32,
+                    "a": {"t": "range", "start": 0, "end": 16, "shape": [16], "w": 32}
+                  }
+                }
+              },
+              "mask": {
+                "t": "cmp",
+                "o": "slt",
+                "shape": [64, 16],
+                "w": 1,
+                "a": {
+                  "t": "bcast",
+                  "axis": 1,
+                  "shape": [64, 16],
+                  "w": 32,
+                  "a": {
+                    "t": "expand",
+                    "axis": 1,
+                    "shape": [64, 1],
+                    "w": 32,
+                    "a": {
+                      "t": "bin",
+                      "o": "add",
+                      "shape": [64],
+                      "w": 32,
+                      "addr": true,
+                      "a": {"t": "splat", "shape": [64], "w": 32, "a": {"e": "var", "name": "row0", "w": 32}},
+                      "b": {"t": "range", "start": 0, "end": 64, "shape": [64], "w": 32}
+                    }
+                  }
+                },
+                "b": {"t": "splat", "shape": [64, 16], "w": 32, "a": {"e": "var", "name": "limit", "w": 32}}
+              }
+            }
+          ],
+          "else": [
+            {
+              "op": "event",
+              "ev": "gload",
+              "tensor": "x",
+              "loc": "segmented_gload.py:15",
+              "offsets": {
+                "t": "bin",
+                "o": "add",
+                "shape": [64, 16],
+                "w": 32,
+                "addr": true,
+                "a": {
+                  "t": "bcast",
+                  "axis": 1,
+                  "shape": [64, 16],
+                  "w": 32,
+                  "a": {
+                    "t": "bin",
+                    "o": "mul",
+                    "shape": [64, 1],
+                    "w": 32,
+                    "addr": true,
+                    "a": {
+                      "t": "expand",
+                      "axis": 1,
+                      "shape": [64, 1],
+                      "w": 32,
+                      "a": {
+                        "t": "bin",
+                        "o": "add",
+                        "shape": [64],
+                        "w": 32,
+                        "addr": true,
+                        "a": {"t": "splat", "shape": [64], "w": 32, "a": {"e": "var", "name": "row0", "w": 32}},
+                        "b": {"t": "range", "start": 0, "end": 64, "shape": [64], "w": 32}
+                      }
+                    },
+                    "b": {"t": "splat", "shape": [64, 1], "w": 32, "a": {"e": "var", "name": "ROW_STRIDE", "w": 32}}
+                  }
+                },
+                "b": {
+                  "t": "bcast",
+                  "axis": 0,
+                  "shape": [64, 16],
+                  "w": 32,
+                  "a": {
+                    "t": "expand",
+                    "axis": 0,
+                    "shape": [1, 16],
+                    "w": 32,
+                    "a": {"t": "range", "start": 0, "end": 16, "shape": [16], "w": 32}
+                  }
+                }
+              },
+              "mask": {
+                "t": "cmp",
+                "o": "slt",
+                "shape": [64, 16],
+                "w": 1,
+                "a": {
+                  "t": "bcast",
+                  "axis": 1,
+                  "shape": [64, 16],
+                  "w": 32,
+                  "a": {
+                    "t": "expand",
+                    "axis": 1,
+                    "shape": [64, 1],
+                    "w": 32,
+                    "a": {
+                      "t": "bin",
+                      "o": "add",
+                      "shape": [64],
+                      "w": 32,
+                      "addr": true,
+                      "a": {"t": "splat", "shape": [64], "w": 32, "a": {"e": "var", "name": "row0", "w": 32}},
+                      "b": {"t": "range", "start": 0, "end": 64, "shape": [64], "w": 32}
+                    }
+                  }
+                },
+                "b": {"t": "splat", "shape": [64, 16], "w": 32, "a": {"e": "var", "name": "limit", "w": 32}}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "stray",
+      "warps": 1,
+      "threads_per_issue": 32,
+      "body": [
+        {
+          "op": "if",
+          "loc": "segmented_gload.py:30",
+          "cond": {
+            "e": "cmp",
+            "o": "ne",
+            "w": 1,
+            "a": {"e": "var", "name": "STRAY", "w": 32},
+            "b": {"e": "const", "v": 0, "w": 32}
+          },
+          "then": [
+            {
+              "op": "if",
+              "loc": "segmented_gload.py:31",
+              "cond": {
+                "e": "cmp",
+                "o": "ne",
+                "a": {"e": "var", "name": "WRITE", "w": 32},
+                "b": {"e": "const", "v": 0, "w": 32},
+                "w": 1
+              },
+              "then": [
+                {
+                  "op": "event",
+                  "ev": "gstore",
+                  "tensor": "y",
+                  "loc": "segmented_gload.py:33",
+                  "mask": null,
+                  "offsets": {"t": "range", "start": 0, "end": 16, "shape": [16], "w": 32}
+                }
+              ],
+              "else": [
+                {
+                  "op": "event",
+                  "ev": "gload",
+                  "tensor": "x",
+                  "loc": "segmented_gload.py:31",
+                  "mask": null,
+                  "offsets": {"t": "range", "start": 0, "end": 16, "shape": [16], "w": 32}
+                }
+              ]
+            }
+          ],
+          "else": []
+        }
+      ]
+    }
+  ],
+  "case": {
+    "name": "varlen",
+    "inputs": [
+      {
+        "name": "ok",
+        "params": {"B": 2, "TOTAL": 164, "ROW_STRIDE": 16, "STRAY": 0, "MASK_TOTAL": 0, "WRITE": 0},
+        "metadata": {"cu_seqlens": [0, 100, 164]},
+        "intended_writes": {"y": "unchecked"}
+      },
+      {
+        "name": "mask_total",
+        "params": {"B": 2, "TOTAL": 164, "ROW_STRIDE": 16, "STRAY": 0, "MASK_TOTAL": 1, "WRITE": 0},
+        "metadata": {"cu_seqlens": [0, 100, 164]},
+        "intended_writes": {"y": "unchecked"}
+      },
+      {
+        "name": "stray",
+        "params": {"B": 2, "TOTAL": 164, "ROW_STRIDE": 16, "STRAY": 1, "MASK_TOTAL": 0, "WRITE": 0},
+        "metadata": {"cu_seqlens": [0, 100, 164]},
+        "intended_writes": {"y": "unchecked"}
+      },
+      {
+        "name": "bad_layout",
+        "params": {"B": 2, "TOTAL": 164, "ROW_STRIDE": 8, "STRAY": 0, "MASK_TOTAL": 0, "WRITE": 0},
+        "metadata": {"cu_seqlens": [0, 100, 164]},
+        "intended_writes": {"y": "unchecked"}
+      },
+      {
+        "name": "store_ok",
+        "params": {"B": 2, "TOTAL": 164, "ROW_STRIDE": 16, "STRAY": 0, "MASK_TOTAL": 0, "WRITE": 1},
+        "metadata": {"cu_seqlens": [0, 100, 164]},
+        "intended_writes": {"y": "all_rows_of_segments"}
+      },
+      {
+        "name": "store_spill",
+        "params": {"B": 2, "TOTAL": 164, "ROW_STRIDE": 16, "STRAY": 0, "MASK_TOTAL": 1, "WRITE": 1},
+        "metadata": {"cu_seqlens": [0, 100, 164]},
+        "intended_writes": {"y": "all_rows_of_segments"}
+      },
+      {
+        "name": "store_stray",
+        "params": {"B": 2, "TOTAL": 164, "ROW_STRIDE": 16, "STRAY": 1, "MASK_TOTAL": 0, "WRITE": 1},
+        "metadata": {"cu_seqlens": [0, 100, 164]},
+        "intended_writes": {"y": "unchecked"}
+      },
+      {
+        "name": "no_intent",
+        "params": {"B": 2, "TOTAL": 164, "ROW_STRIDE": 16, "STRAY": 0, "MASK_TOTAL": 0, "WRITE": 1},
+        "metadata": {"cu_seqlens": [0, 100, 164]},
+        "intended_writes": {}
+      }
+    ]
+  }
+}

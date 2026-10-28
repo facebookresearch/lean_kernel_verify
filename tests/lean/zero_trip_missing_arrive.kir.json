@@ -1,0 +1,49 @@
+{
+  "kir_version": 1,
+  "kernel": "zero_trip_missing_arrive",
+  "source": "tests/lean/zero_trip_missing_arrive.kir.json",
+  "ir": "ttgir",
+  "grid": [
+    {"e": "bin", "o": "sdiv", "w": 32,
+     "a": {"e": "bin", "o": "add", "w": 32, "a": {"e": "var", "name": "N", "w": 32}, "b": {"e": "const", "v": 63, "w": 32}},
+     "b": {"e": "const", "v": 64, "w": 32}},
+    {"e": "const", "v": 1, "w": 32},
+    {"e": "const", "v": 1, "w": 32}
+  ],
+  "params": [{"name": "N", "type": "i32"}, {"name": "N_K", "type": "i32"}],
+  "tensors": [
+    {"name": "out", "kind": "desc", "elem_bytes": 4,
+     "shape": [{"e": "var", "name": "N", "w": 32}, {"e": "const", "v": 16, "w": 32}],
+     "strides": [{"e": "const", "v": 16, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+     "segments": null, "role": "output", "metadata": false, "box": [64, 16]}
+  ],
+  "barriers": [
+    {"name": "acc_full", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}}
+  ],
+  "roles": [
+    {"name": "mma", "warps": 1, "threads_per_issue": 1, "body": [
+      {"op": "for", "var": "k", "loc": "zero_trip_missing_arrive.py:30",
+       "lb": {"e": "const", "v": 0, "w": 32}, "ub": {"e": "var", "name": "N_K", "w": 32}, "step": {"e": "const", "v": 1, "w": 32},
+       "body": [
+        {"op": "if", "loc": "zero_trip_missing_arrive.py:31",
+         "cond": {"e": "cmp", "o": "eq", "w": 1, "a": {"e": "var", "name": "k", "w": 32},
+                  "b": {"e": "bin", "o": "sub", "w": 32, "a": {"e": "var", "name": "N_K", "w": 32}, "b": {"e": "const", "v": 1, "w": 32}}},
+         "then": [
+          {"op": "event", "ev": "commit_arrive", "bar": "acc_full", "loc": "zero_trip_missing_arrive.py:32", "idx": {"e": "const", "v": 0, "w": 32}}
+         ],
+         "else": []}
+      ]}
+    ]},
+    {"name": "epilogue", "warps": 4, "threads_per_issue": 1, "body": [
+      {"op": "event", "ev": "wait", "bar": "acc_full", "loc": "zero_trip_missing_arrive.py:40",
+       "idx": {"e": "const", "v": 0, "w": 32}, "parity": {"e": "const", "v": 0, "w": 32}},
+      {"op": "event", "ev": "tma_store", "desc": "out", "loc": "zero_trip_missing_arrive.py:41",
+       "coords": [{"e": "bin", "o": "mul", "w": 32, "addr": true, "a": {"e": "pid", "axis": 0, "w": 32}, "b": {"e": "const", "v": 64, "w": 32}},
+                  {"e": "const", "v": 0, "w": 32}]}
+    ]}
+  ],
+  "case": {"name": "zero_trip", "inputs": [
+    {"name": "n_k_2", "params": {"N": 128, "N_K": 2}, "intended_writes": {"out": "all"}},
+    {"name": "n_k_0", "params": {"N": 128, "N_K": 0}, "intended_writes": {"out": "all"}}
+  ]}
+}

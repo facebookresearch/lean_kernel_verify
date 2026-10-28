@@ -1,0 +1,161 @@
+{
+ "kir_version": 1,
+ "kernel": "hang_vacuous",
+ "source": "tests/lean/p1/hang_vacuous.kir.json",
+ "ir": "cute-mlir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "M",
+   "type": "i32"
+  },
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "never",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "w",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "hang_vacuous.py:10",
+     "bar": "never",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "tmem",
+     "loc": "hang_vacuous.py:11",
+     "inst": "cp",
+     "warp": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "rects": [
+      {
+       "use": "data",
+       "write": true,
+       "lane": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "nlanes": 128,
+       "col": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "ncols": 4
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "r",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "tmem",
+     "loc": "hang_vacuous.py:20",
+     "inst": "ld",
+     "warp": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "rects": [
+      {
+       "use": "data",
+       "write": false,
+       "lane": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "nlanes": 32,
+       "col": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "ncols": 32
+      }
+     ]
+    },
+    {
+     "op": "event",
+     "ev": "tmem_wait",
+     "loc": "hang_vacuous.py:21",
+     "ld": true
+    }
+   ]
+  }
+ ],
+ "tmem": {
+  "cols": 512,
+  "base": "zero"
+ },
+ "case": {
+  "name": "hang_vacuous",
+  "inputs": [
+   {
+    "name": "blocked",
+    "params": {
+     "M": 0,
+     "MODE": 0
+    }
+   }
+  ]
+ }
+}

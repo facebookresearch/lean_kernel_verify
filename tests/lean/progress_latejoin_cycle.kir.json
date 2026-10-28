@@ -1,0 +1,207 @@
+{
+ "kir_version": 1,
+ "kernel": "progress_latejoin_cycle",
+ "source": "tests/lean/progress_latejoin_cycle.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "PARITY",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "x",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "y",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "s",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "p",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r1.py:3",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r1.py:4",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r1.py:5",
+     "bar": "s",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r1.py:6",
+     "bar": "y",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r1.py:7",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "c",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r1.py:10",
+     "bar": "s",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r1.py:11",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "var",
+      "name": "PARITY",
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r1.py:12",
+     "bar": "y",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "progress_latejoin_cycle",
+  "inputs": [
+   {
+    "name": "parity0_deadlock",
+    "params": {
+     "PARITY": 0
+    }
+   },
+   {
+    "name": "parity1_ok",
+    "params": {
+     "PARITY": 1
+    }
+   }
+  ]
+ }
+}

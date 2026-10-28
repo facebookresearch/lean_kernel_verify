@@ -1,0 +1,44 @@
+{
+  "kir_version": 1,
+  "kernel": "unmasked_load_oob",
+  "source": "tests/lean/unmasked_load_oob.kir.json",
+  "ir": "ttgir",
+  "grid": [
+    {"e": "bin", "o": "sdiv", "w": 32,
+     "a": {"e": "bin", "o": "add", "w": 32, "a": {"e": "var", "name": "N", "w": 32}, "b": {"e": "const", "v": 127, "w": 32}},
+     "b": {"e": "const", "v": 128, "w": 32}},
+    {"e": "const", "v": 1, "w": 32},
+    {"e": "const", "v": 1, "w": 32}
+  ],
+  "params": [{"name": "N", "type": "i32"}],
+  "tensors": [
+    {"name": "x", "kind": "global", "elem_bytes": 4, "shape": [{"e": "var", "name": "N", "w": 32}],
+     "strides": [{"e": "const", "v": 1, "w": 32}], "segments": null, "role": "input", "metadata": false},
+    {"name": "y", "kind": "global", "elem_bytes": 4, "shape": [{"e": "var", "name": "N", "w": 32}],
+     "strides": [{"e": "const", "v": 1, "w": 32}], "segments": null, "role": "output", "metadata": false}
+  ],
+  "barriers": [],
+  "roles": [
+    {"name": "default", "warps": 4, "threads_per_issue": 32, "body": [
+      {"op": "let", "var": "base", "loc": "unmasked_load_oob.py:6",
+       "expr": {"e": "bin", "o": "mul", "w": 32, "addr": true, "a": {"e": "pid", "axis": 0, "w": 32}, "b": {"e": "const", "v": 128, "w": 32}}},
+      {"op": "event", "ev": "gload", "tensor": "x", "loc": "unmasked_load_oob.py:8", "mask": null,
+       "offsets": {"t": "bin", "o": "add", "shape": [128], "w": 32, "addr": true,
+                   "a": {"t": "splat", "shape": [128], "w": 32, "a": {"e": "var", "name": "base", "w": 32}},
+                   "b": {"t": "range", "start": 0, "end": 128, "shape": [128], "w": 32}}},
+      {"op": "event", "ev": "gstore", "tensor": "y", "loc": "unmasked_load_oob.py:9",
+       "offsets": {"t": "bin", "o": "add", "shape": [128], "w": 32, "addr": true,
+                   "a": {"t": "splat", "shape": [128], "w": 32, "a": {"e": "var", "name": "base", "w": 32}},
+                   "b": {"t": "range", "start": 0, "end": 128, "shape": [128], "w": 32}},
+       "mask": {"t": "cmp", "o": "slt", "shape": [128], "w": 1,
+                "a": {"t": "bin", "o": "add", "shape": [128], "w": 32, "addr": true,
+                      "a": {"t": "splat", "shape": [128], "w": 32, "a": {"e": "var", "name": "base", "w": 32}},
+                      "b": {"t": "range", "start": 0, "end": 128, "shape": [128], "w": 32}},
+                "b": {"t": "splat", "shape": [128], "w": 32, "a": {"e": "var", "name": "N", "w": 32}}}}
+    ]}
+  ],
+  "case": {"name": "oob", "inputs": [
+    {"name": "n256", "params": {"N": 256}, "intended_writes": {"y": "all"}},
+    {"name": "n200", "params": {"N": 200}, "intended_writes": {"y": "all"}}
+  ]}
+}

@@ -1,0 +1,187 @@
+{
+ "kir_version": 1,
+ "kernel": "meta_oob_elided",
+ "source": "tests/lean/meta_oob_elided.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "N_META",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "meta",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "var",
+     "name": "N_META",
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": true
+  }
+ ],
+ "barriers": [
+  {
+   "name": "b",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "default",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "let",
+     "var": "v",
+     "expr": {
+      "e": "load",
+      "tensor": "meta",
+      "index": [
+       {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       }
+      ],
+      "w": 32
+     },
+     "loc": "r7.py:4"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "sgt",
+      "a": {
+       "e": "var",
+       "name": "v",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 100,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "r7.py:6",
+       "bar": "b",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": [],
+     "loc": "r7.py:5"
+    }
+   ]
+  },
+  {
+   "name": "waiter",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r7.py:9",
+     "bar": "b",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "meta_oob_elided",
+  "inputs": [
+   {
+    "name": "in_range",
+    "params": {
+     "N_META": 2
+    },
+    "metadata": {
+     "meta": [
+      3,
+      500
+     ]
+    },
+    "flags": {
+     "FAST": true
+    }
+   },
+   {
+    "name": "out_of_range",
+    "params": {
+     "N_META": 1
+    },
+    "metadata": {
+     "meta": [
+      3
+     ]
+    },
+    "flags": {
+     "FAST": true
+    }
+   }
+  ],
+  "elision_flags": [
+   "FAST"
+  ]
+ }
+}

@@ -1,0 +1,43 @@
+{
+  "kir_version": 1,
+  "kernel": "expect_tx_mismatch",
+  "source": "tests/lean/expect_tx_mismatch.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "K_TILES", "type": "i32"}],
+  "tensors": [
+    {"name": "a", "kind": "desc", "elem_bytes": 2,
+     "shape": [{"e": "const", "v": 64, "w": 32}, {"e": "const", "v": 1024, "w": 32}],
+     "strides": [{"e": "const", "v": 1024, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+     "segments": null, "role": "input", "metadata": false, "box": [64, 32]}
+  ],
+  "barriers": [
+    {"name": "full", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}}
+  ],
+  "roles": [
+    {"name": "producer", "warps": 1, "threads_per_issue": 1, "body": [
+      {"op": "for", "var": "k", "loc": "expect_tx_mismatch.py:10",
+       "lb": {"e": "const", "v": 0, "w": 32}, "ub": {"e": "var", "name": "K_TILES", "w": 32}, "step": {"e": "const", "v": 1, "w": 32},
+       "body": [
+        {"op": "event", "ev": "expect_tx", "bar": "full", "loc": "expect_tx_mismatch.py:11", "idx": {"e": "const", "v": 0, "w": 32},
+         "bytes": {"e": "bin", "o": "mul", "w": 32, "a": {"e": "const", "v": 64, "w": 32}, "b": {"e": "const", "v": 32, "w": 32}}},
+        {"op": "event", "ev": "arrive", "bar": "full", "loc": "expect_tx_mismatch.py:11", "idx": {"e": "const", "v": 0, "w": 32}},
+        {"op": "event", "ev": "tma_load", "desc": "a", "bar": "full", "loc": "expect_tx_mismatch.py:12", "idx": {"e": "const", "v": 0, "w": 32},
+         "coords": [{"e": "const", "v": 0, "w": 32},
+                    {"e": "bin", "o": "mul", "w": 32, "addr": true, "a": {"e": "var", "name": "k", "w": 32}, "b": {"e": "const", "v": 32, "w": 32}}]}
+      ]}
+    ]},
+    {"name": "consumer", "warps": 4, "threads_per_issue": 1, "body": [
+      {"op": "for", "var": "k", "loc": "expect_tx_mismatch.py:20",
+       "lb": {"e": "const", "v": 0, "w": 32}, "ub": {"e": "var", "name": "K_TILES", "w": 32}, "step": {"e": "const", "v": 1, "w": 32},
+       "body": [
+        {"op": "event", "ev": "wait", "bar": "full", "loc": "expect_tx_mismatch.py:21", "idx": {"e": "const", "v": 0, "w": 32},
+         "parity": {"e": "bin", "o": "and", "w": 32, "a": {"e": "var", "name": "k", "w": 32}, "b": {"e": "const", "v": 1, "w": 32}}}
+      ]}
+    ]}
+  ],
+  "case": {"name": "bytes", "inputs": [
+    {"name": "zero_k", "params": {"K_TILES": 0}},
+    {"name": "k2", "params": {"K_TILES": 2}}
+  ]}
+}

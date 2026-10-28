@@ -1,0 +1,97 @@
+{
+  "kir_version": 1,
+  "kernel": "trunc_offset_wrap",
+  "source": "tests/lean/trunc_offset_wrap.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "ROW", "type": "i32"}, {"name": "ROWS", "type": "i32"}],
+  "tensors": [
+    {
+      "name": "x",
+      "kind": "global",
+      "elem_bytes": 4,
+      "shape": [{"e": "var", "name": "ROWS", "w": 32}, {"e": "const", "v": 1048576, "w": 32}],
+      "strides": [{"e": "const", "v": 1048576, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+      "segments": null,
+      "role": "input",
+      "metadata": false
+    }
+  ],
+  "barriers": [],
+  "roles": [
+    {
+      "name": "default",
+      "warps": 4,
+      "threads_per_issue": 32,
+      "body": [
+        {
+          "op": "let",
+          "var": "off64",
+          "expr": {
+            "e": "bin",
+            "o": "mul",
+            "a": {"e": "ext", "signed": true, "a": {"e": "var", "name": "ROW", "w": 32}, "w": 64},
+            "b": {"e": "const", "v": 1048576, "w": 64},
+            "w": 64,
+            "addr": true
+          },
+          "loc": "trunc_offset_wrap.py:7"
+        },
+        {
+          "op": "let",
+          "var": "base",
+          "expr": {"e": "trunc", "a": {"e": "var", "name": "off64", "w": 64}, "w": 32, "addr": true},
+          "loc": "trunc_offset_wrap.py:8"
+        },
+        {
+          "op": "event",
+          "ev": "gload",
+          "loc": "trunc_offset_wrap.py:9",
+          "tensor": "x",
+          "offsets": {
+            "t": "bin",
+            "o": "add",
+            "a": {"t": "splat", "a": {"e": "var", "name": "base", "w": 32}, "shape": [128], "w": 32},
+            "b": {"t": "range", "start": 0, "end": 128, "shape": [128], "w": 32},
+            "shape": [128],
+            "w": 32,
+            "addr": true
+          },
+          "mask": null
+        },
+        {
+          "op": "event",
+          "ev": "gload",
+          "loc": "trunc_offset_wrap.py:11",
+          "tensor": "x",
+          "mask": null,
+          "offsets": {
+            "t": "trunc",
+            "a": {
+              "t": "bin",
+              "o": "add",
+              "a": {"t": "splat", "a": {"e": "var", "name": "off64", "w": 64}, "shape": [128], "w": 64},
+              "b": {
+                "t": "ext",
+                "signed": true,
+                "a": {"t": "range", "start": 0, "end": 128, "shape": [128], "w": 32},
+                "shape": [128],
+                "w": 64
+              },
+              "shape": [128],
+              "w": 64,
+              "addr": true
+            },
+            "shape": [128],
+            "w": 32,
+            "addr": true
+          }
+        }
+      ]
+    }
+  ],
+  "case": {
+    "name": "trunc",
+    "inputs": [{"name": "fits", "params": {"ROW": 1, "ROWS": 2}}, {"name": "lossy", "params": {"ROW": 4096, "ROWS": 2}}]
+  }
+}

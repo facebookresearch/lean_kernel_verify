@@ -1,0 +1,362 @@
+{
+ "kir_version": 1,
+ "kernel": "ambiguous_tx_shares",
+ "source": "tests/lean/ambiguous_tx_shares.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "NLOAD",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "a",
+   "kind": "desc",
+   "elem_bytes": 2,
+   "shape": [
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false,
+   "box": [
+    64,
+    32
+   ]
+  }
+ ],
+ "barriers": [
+  {
+   "name": "x",
+   "count": {
+    "e": "const",
+    "v": 4,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "b",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "const",
+      "v": 4,
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "slt",
+        "a": {
+         "e": "var",
+         "name": "t",
+         "w": 32
+        },
+        "b": {
+         "e": "var",
+         "name": "NLOAD",
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "expect_tx",
+         "loc": "r4.py:5",
+         "bar": "x",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "bytes": {
+          "e": "const",
+          "v": 4096,
+          "w": 32
+         }
+        },
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "r4.py:5",
+         "bar": "x",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        },
+        {
+         "op": "event",
+         "ev": "tma_load",
+         "loc": "r4.py:6",
+         "desc": "a",
+         "coords": [
+          {
+           "e": "const",
+           "v": 0,
+           "w": 32
+          },
+          {
+           "e": "bin",
+           "o": "mul",
+           "a": {
+            "e": "var",
+            "name": "t",
+            "w": 32
+           },
+           "b": {
+            "e": "const",
+            "v": 32,
+            "w": 32
+           },
+           "w": 32,
+           "addr": true
+          }
+         ],
+         "bar": "x",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ],
+       "else": [
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "r4.py:8",
+         "bar": "x",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ],
+       "loc": "r4.py:4"
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "r4.py:9",
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "r4.py:3"
+    }
+   ]
+  },
+  {
+   "name": "a",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "const",
+      "v": 4,
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "r4.py:12",
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "r4.py:11"
+    }
+   ]
+  },
+  {
+   "name": "c",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "const",
+      "v": 4,
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "r4.py:15",
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "r4.py:14"
+    }
+   ]
+  },
+  {
+   "name": "w",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r4.py:18",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r4.py:19",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     }
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "ambiguous_tx_shares",
+  "inputs": [
+   {
+    "name": "one_load",
+    "params": {
+     "NLOAD": 1
+    }
+   },
+   {
+    "name": "two_loads",
+    "params": {
+     "NLOAD": 2
+    }
+   },
+   {
+    "name": "three_loads",
+    "params": {
+     "NLOAD": 3
+    }
+   }
+  ]
+ }
+}

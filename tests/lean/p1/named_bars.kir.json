@@ -1,0 +1,348 @@
+{
+ "kir_version": 1,
+ "kernel": "named_bars",
+ "source": "tests/lean/p1/named_bars.kir.json",
+ "ir": "cute-mlir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "M",
+   "type": "i32"
+  },
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "a",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "tmem",
+     "loc": "named_bars.py:10",
+     "inst": "ld",
+     "warp": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "rects": [
+      {
+       "use": "data",
+       "write": false,
+       "lane": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "nlanes": 32,
+       "col": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "ncols": 32
+      }
+     ]
+    },
+    {
+     "op": "event",
+     "ev": "tmem_wait",
+     "loc": "named_bars.py:11",
+     "ld": true
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "sle",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "named_bar",
+       "loc": "named_bars.py:12",
+       "id": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "count": {
+        "e": "const",
+        "v": 64,
+        "w": 32
+       },
+       "sync": true
+      }
+     ],
+     "else": [],
+     "loc": "named_bars.py:12"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "named_bar",
+       "loc": "named_bars.py:13",
+       "id": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "count": {
+        "e": "const",
+        "v": 64,
+        "w": 32
+       },
+       "sync": false
+      }
+     ],
+     "else": [],
+     "loc": "named_bars.py:13"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 3,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "named_bar",
+       "loc": "named_bars.py:14",
+       "id": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "count": {
+        "e": "const",
+        "v": 64,
+        "w": 32
+       },
+       "sync": true
+      }
+     ],
+     "else": [],
+     "loc": "named_bars.py:14"
+    }
+   ]
+  },
+  {
+   "name": "b",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "sle",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "named_bar",
+       "loc": "named_bars.py:20",
+       "id": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "count": {
+        "e": "const",
+        "v": 64,
+        "w": 32
+       },
+       "sync": true
+      }
+     ],
+     "else": [],
+     "loc": "named_bars.py:20"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 3,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "named_bar",
+       "loc": "named_bars.py:21",
+       "id": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "count": {
+        "e": "const",
+        "v": 96,
+        "w": 32
+       },
+       "sync": true
+      }
+     ],
+     "else": [],
+     "loc": "named_bars.py:21"
+    },
+    {
+     "op": "event",
+     "ev": "tmem",
+     "loc": "named_bars.py:22",
+     "inst": "st",
+     "warp": {
+      "e": "const",
+      "v": 4,
+      "w": 32
+     },
+     "rects": [
+      {
+       "use": "data",
+       "write": true,
+       "lane": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "nlanes": 32,
+       "col": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "ncols": 32
+      }
+     ]
+    },
+    {
+     "op": "event",
+     "ev": "tmem_wait",
+     "loc": "named_bars.py:23",
+     "ld": false
+    }
+   ]
+  }
+ ],
+ "tmem": {
+  "cols": 512,
+  "base": "zero"
+ },
+ "case": {
+  "name": "named_bars",
+  "inputs": [
+   {
+    "name": "bar_sync",
+    "params": {
+     "M": 0,
+     "MODE": 0
+    }
+   },
+   {
+    "name": "bar_arrive_sync",
+    "params": {
+     "M": 0,
+     "MODE": 1
+    }
+   },
+   {
+    "name": "no_barrier",
+    "params": {
+     "M": 0,
+     "MODE": 2
+    }
+   },
+   {
+    "name": "inconsistent",
+    "params": {
+     "M": 0,
+     "MODE": 3
+    }
+   }
+  ]
+ }
+}

@@ -1,0 +1,206 @@
+{
+ "kir_version": 1,
+ "kernel": "late_first_wait",
+ "source": "tests/lean/late_first_wait.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "PARITY",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "slot",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "sig",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "producer",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "k",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "const",
+      "v": 2,
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "late.py:5",
+       "bar": "slot",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "late.py:4"
+    }
+   ]
+  },
+  {
+   "name": "observer",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "late.py:8",
+     "bar": "slot",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "late.py:9",
+     "bar": "slot",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "late.py:10",
+     "bar": "sig",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "late",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "late.py:13",
+     "bar": "sig",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "late.py:15",
+     "bar": "slot",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "var",
+      "name": "PARITY",
+      "w": 32
+     }
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "late_first_wait",
+  "inputs": [
+   {
+    "name": "parity0_hangs",
+    "params": {
+     "PARITY": 0
+    }
+   },
+   {
+    "name": "parity1_ok",
+    "params": {
+     "PARITY": 1
+    }
+   }
+  ]
+ }
+}

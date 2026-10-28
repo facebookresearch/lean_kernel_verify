@@ -1,0 +1,466 @@
+{
+ "kir_version": 1,
+ "kernel": "cluster_pair_tma",
+ "source": "tests/lean/cluster_pair_tma.kir.json",
+ "ir": "cute-mlir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "cluster": [
+  2,
+  1,
+  1
+ ],
+ "params": [
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "a",
+   "kind": "desc",
+   "elem_bytes": 2,
+   "shape": [
+    {
+     "e": "const",
+     "v": 128,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false,
+   "box": [
+    64
+   ]
+  }
+ ],
+ "barriers": [
+  {
+   "name": "full",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "done",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "producer",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "bin",
+       "o": "urem",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "expect_tx",
+       "loc": "cluster.py:10",
+       "bar": "full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "bytes": {
+        "e": "select",
+        "c": {
+         "e": "cmp",
+         "o": "eq",
+         "a": {
+          "e": "var",
+          "name": "MODE",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 3,
+          "w": 32
+         },
+         "w": 1
+        },
+        "a": {
+         "e": "const",
+         "v": 128,
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 256,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "cluster.py:10",
+       "bar": "full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": []
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "bin",
+      "o": "and",
+      "w": 1,
+      "a": {
+       "e": "cmp",
+       "o": "eq",
+       "a": {
+        "e": "var",
+        "name": "MODE",
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "w": 1
+      },
+      "b": {
+       "e": "cmp",
+       "o": "eq",
+       "a": {
+        "e": "bin",
+        "o": "urem",
+        "a": {
+         "e": "pid",
+         "axis": 0,
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 2,
+         "w": 32
+        },
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "w": 1
+      }
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "tma_load",
+       "loc": "cluster.py:12",
+       "desc": "a",
+       "coords": [
+        {
+         "e": "bin",
+         "o": "mul",
+         "a": {
+          "e": "bin",
+          "o": "urem",
+          "a": {
+           "e": "pid",
+           "axis": 0,
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 2,
+           "w": 32
+          },
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 64,
+          "w": 32
+         },
+         "w": 32
+        }
+       ],
+       "bar": "full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": [
+      {
+       "op": "event",
+       "ev": "tma_load",
+       "loc": "cluster.py:12",
+       "desc": "a",
+       "coords": [
+        {
+         "e": "bin",
+         "o": "mul",
+         "a": {
+          "e": "bin",
+          "o": "urem",
+          "a": {
+           "e": "pid",
+           "axis": 0,
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 2,
+           "w": 32
+          },
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 64,
+          "w": 32
+         },
+         "w": 32
+        }
+       ],
+       "bar": "full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "leader": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "mma",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "bin",
+       "o": "urem",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "cluster.py:20",
+       "bar": "full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "eq",
+        "a": {
+         "e": "var",
+         "name": "MODE",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 2,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "commit_arrive",
+         "loc": "cluster.py:21",
+         "bar": "done",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ],
+       "else": [
+        {
+         "op": "event",
+         "ev": "commit_arrive",
+         "loc": "cluster.py:21",
+         "bar": "done",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "cta_mask": {
+          "e": "const",
+          "v": 3,
+          "w": 32
+         }
+        }
+       ]
+      }
+     ],
+     "else": []
+    }
+   ]
+  },
+  {
+   "name": "epilogue",
+   "warps": 4,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "cluster.py:30",
+     "bar": "done",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "cluster_pair_tma",
+  "inputs": [
+   {
+    "name": "ok",
+    "params": {
+     "MODE": 0
+    }
+   },
+   {
+    "name": "follower_no_leader",
+    "params": {
+     "MODE": 1
+    }
+   },
+   {
+    "name": "commit_leader_only",
+    "params": {
+     "MODE": 2
+    }
+   },
+   {
+    "name": "leader_expects_half",
+    "params": {
+     "MODE": 3
+    }
+   }
+  ]
+ }
+}

@@ -1,0 +1,73 @@
+{
+  "kir_version": 1,
+  "kernel": "padded_column_overrun",
+  "source": "tests/lean/padded_column_overrun.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "var", "name": "G", "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "ROWS", "type": "i32"}, {"name": "G", "type": "i32"}, {"name": "COLS", "type": "i32"}],
+  "tensors": [
+    {
+      "name": "x",
+      "kind": "global",
+      "elem_bytes": 4,
+      "shape": [{"e": "var", "name": "ROWS", "w": 32}, {"e": "const", "v": 100, "w": 32}],
+      "strides": [{"e": "const", "v": 128, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+      "segments": null,
+      "role": "input",
+      "metadata": false
+    }
+  ],
+  "barriers": [],
+  "roles": [
+    {
+      "name": "default",
+      "warps": 4,
+      "threads_per_issue": 128,
+      "body": [
+        {
+          "op": "let",
+          "var": "base",
+          "expr": {
+            "e": "bin",
+            "o": "mul",
+            "a": {"e": "pid", "axis": 0, "w": 32},
+            "b": {"e": "const", "v": 128, "w": 32},
+            "w": 32,
+            "addr": true
+          }
+        },
+        {
+          "op": "event",
+          "ev": "gload",
+          "loc": "padded_column_overrun.py:8",
+          "tensor": "x",
+          "offsets": {
+            "t": "bin",
+            "o": "add",
+            "a": {"t": "splat", "a": {"e": "var", "name": "base", "w": 32}, "shape": [128], "w": 32},
+            "b": {"t": "range", "start": 0, "end": 128, "shape": [128], "w": 32},
+            "shape": [128],
+            "w": 32,
+            "addr": true
+          },
+          "mask": {
+            "t": "cmp",
+            "o": "slt",
+            "a": {"t": "range", "start": 0, "end": 128, "shape": [128], "w": 32},
+            "b": {"t": "splat", "a": {"e": "var", "name": "COLS", "w": 32}, "shape": [128], "w": 32},
+            "shape": [128],
+            "w": 1
+          }
+        }
+      ]
+    }
+  ],
+  "case": {
+    "name": "pad",
+    "inputs": [
+      {"name": "masked", "params": {"ROWS": 4, "G": 4, "COLS": 100}},
+      {"name": "inner_overrun", "params": {"ROWS": 4, "G": 3, "COLS": 128}},
+      {"name": "last_row_overrun", "params": {"ROWS": 4, "G": 4, "COLS": 128}}
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+ "name": "probe_tlx",
+ "description": "TLX probe kernel (masked load/store + one mbarrier handoff between two partitions) through the TTGIR frontend, BLOCK = 128. partial_floor and below_block_floor launch n // BLOCK programs: P0-3 must fail on them. empty launches no program. The host rejects two_dim (not 1-D) and makes no launch for empty_skipped: both are listed as rejected, without verdicts.",
+ "src_root": "../kernels",
+ "source": "tests/e2e/kernels/lkv_e2e_probe_tlx.py",
+ "module": "lkv_e2e_probe_tlx",
+ "entry": "run",
+ "kernel": "probe",
+ "num_sms": 2,
+ "intended_writes": {"x_ptr": "all"},
+ "inputs": [
+  {"name": "aligned", "args": {"x": {"dtype": "float32", "shape": [256]}}},
+  {"name": "partial", "args": {"x": {"dtype": "float32", "shape": [300]}}},
+  {"name": "partial_floor", "args": {"x": {"dtype": "float32", "shape": [300]}, "floor_grid": true}},
+  {"name": "empty", "args": {"x": {"dtype": "float32", "shape": [0]}}},
+  {"name": "below_block", "args": {"x": {"dtype": "float32", "shape": [100]}}},
+  {"name": "below_block_floor", "args": {"x": {"dtype": "float32", "shape": [100]}, "floor_grid": true}},
+  {"name": "two_dim", "args": {"x": {"dtype": "float32", "shape": [2, 128]}}},
+  {"name": "empty_skipped", "args": {"x": {"dtype": "float32", "shape": [0]}, "skip_empty": true}}
+ ]
+}

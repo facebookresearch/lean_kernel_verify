@@ -1,0 +1,28 @@
+{
+  "kir_version": 1,
+  "kernel": "segment_edges",
+  "source": "tests/lean/segment_edges.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "Z", "type": "i32"}],
+  "tensors": [
+    {"name": "cu", "kind": "global", "elem_bytes": 4, "shape": [{"e": "const", "v": 2, "w": 32}],
+     "strides": [{"e": "const", "v": 1, "w": 32}], "segments": null, "role": "input", "metadata": true},
+    {"name": "y", "kind": "global", "elem_bytes": 4, "shape": [{"e": "const", "v": 64, "w": 32}],
+     "strides": [{"e": "const", "v": 1, "w": 32}], "segments": {"dim": 0, "offsets": "cu", "per": "batch"},
+     "role": "output", "metadata": false}
+  ],
+  "barriers": [],
+  "roles": [
+    {"name": "default", "warps": 2, "threads_per_issue": 64, "body": [
+      {"op": "event", "ev": "work", "loc": "seg.py:5", "fields": {"batch": {"e": "var", "name": "Z", "w": 32}}},
+      {"op": "event", "ev": "gstore", "tensor": "y", "loc": "seg.py:6", "mask": null,
+       "offsets": {"t": "range", "start": 0, "end": 64, "shape": [64], "w": 32}}
+    ]}
+  ],
+  "case": {"name": "segment_edges", "inputs": [
+    {"name": "in_segment", "params": {"Z": 0}, "metadata": {"cu": [0, 64]}, "intended_writes": {"y": "all_rows_of_segments"}},
+    {"name": "no_segment", "params": {"Z": 1}, "metadata": {"cu": [0, 64]}, "intended_writes": {"y": "all_rows_of_segments"}},
+    {"name": "intended_past_extent", "params": {"Z": 0}, "metadata": {"cu": [0, 64]}, "intended_writes": {"y": [[0, 80]]}}
+  ]}
+}

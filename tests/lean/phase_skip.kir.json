@@ -1,0 +1,530 @@
+{
+ "kir_version": 1,
+ "kernel": "phase_skip",
+ "source": "tests/lean/phase_skip.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "T",
+   "type": "i32"
+  },
+  {
+   "name": "ORDERED",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "full",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "rel",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "ack",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "mma",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "loc": "phase_skip.py:3",
+     "body": [
+      {
+       "op": "for",
+       "var": "j",
+       "lb": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "ub": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "step": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "loc": "phase_skip.py:4",
+       "body": [
+        {
+         "op": "if",
+         "cond": {
+          "e": "cmp",
+          "o": "eq",
+          "a": {
+           "e": "var",
+           "name": "j",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 1
+         },
+         "loc": "phase_skip.py:5",
+         "else": [],
+         "then": [
+          {
+           "op": "event",
+           "ev": "wait",
+           "loc": "phase_skip.py:6",
+           "bar": "rel",
+           "idx": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           },
+           "parity": {
+            "e": "bin",
+            "o": "and",
+            "a": {
+             "e": "bin",
+             "o": "sub",
+             "a": {
+              "e": "bin",
+              "o": "add",
+              "a": {
+               "e": "bin",
+               "o": "mul",
+               "a": {
+                "e": "var",
+                "name": "t",
+                "w": 32
+               },
+               "b": {
+                "e": "const",
+                "v": 2,
+                "w": 32
+               },
+               "w": 32
+              },
+              "b": {
+               "e": "var",
+               "name": "j",
+               "w": 32
+              },
+              "w": 32
+             },
+             "b": {
+              "e": "const",
+              "v": 1,
+              "w": 32
+             },
+             "w": 32
+            },
+            "b": {
+             "e": "const",
+             "v": 1,
+             "w": 32
+            },
+            "w": 32
+           }
+          }
+         ]
+        },
+        {
+         "op": "if",
+         "cond": {
+          "e": "cmp",
+          "o": "sgt",
+          "a": {
+           "e": "bin",
+           "o": "add",
+           "a": {
+            "e": "bin",
+            "o": "mul",
+            "a": {
+             "e": "var",
+             "name": "t",
+             "w": 32
+            },
+            "b": {
+             "e": "const",
+             "v": 2,
+             "w": 32
+            },
+            "w": 32
+           },
+           "b": {
+            "e": "var",
+            "name": "j",
+            "w": 32
+           },
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 0,
+           "w": 32
+          },
+          "w": 1
+         },
+         "loc": "phase_skip.py:7",
+         "else": [],
+         "then": [
+          {
+           "op": "event",
+           "ev": "wait",
+           "loc": "phase_skip.py:8",
+           "bar": "ack",
+           "idx": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           },
+           "parity": {
+            "e": "bin",
+            "o": "and",
+            "a": {
+             "e": "bin",
+             "o": "sub",
+             "a": {
+              "e": "bin",
+              "o": "add",
+              "a": {
+               "e": "bin",
+               "o": "mul",
+               "a": {
+                "e": "var",
+                "name": "t",
+                "w": 32
+               },
+               "b": {
+                "e": "const",
+                "v": 2,
+                "w": 32
+               },
+               "w": 32
+              },
+              "b": {
+               "e": "var",
+               "name": "j",
+               "w": 32
+              },
+              "w": 32
+             },
+             "b": {
+              "e": "const",
+              "v": 1,
+              "w": 32
+             },
+             "w": 32
+            },
+            "b": {
+             "e": "const",
+             "v": 1,
+             "w": 32
+            },
+            "w": 32
+           }
+          }
+         ]
+        },
+        {
+         "op": "event",
+         "ev": "commit_arrive",
+         "loc": "phase_skip.py:9",
+         "bar": "full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ]
+      }
+     ]
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "phase_skip.py:10",
+     "bar": "ack",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "phase_skip.py:11",
+     "bar": "rel",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "compute",
+   "warps": 4,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "loc": "phase_skip.py:13",
+     "body": [
+      {
+       "op": "for",
+       "var": "j",
+       "lb": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "ub": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "step": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "loc": "phase_skip.py:14",
+       "body": [
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "phase_skip.py:15",
+         "bar": "full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "bin",
+          "o": "and",
+          "a": {
+           "e": "bin",
+           "o": "add",
+           "a": {
+            "e": "bin",
+            "o": "mul",
+            "a": {
+             "e": "var",
+             "name": "t",
+             "w": 32
+            },
+            "b": {
+             "e": "const",
+             "v": 2,
+             "w": 32
+            },
+            "w": 32
+           },
+           "b": {
+            "e": "var",
+            "name": "j",
+            "w": 32
+           },
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 32
+         }
+        },
+        {
+         "op": "if",
+         "cond": {
+          "e": "cmp",
+          "o": "ne",
+          "a": {
+           "e": "var",
+           "name": "ORDERED",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 0,
+           "w": 32
+          },
+          "w": 1
+         },
+         "loc": "phase_skip.py:16",
+         "then": [
+          {
+           "op": "event",
+           "ev": "arrive",
+           "loc": "phase_skip.py:16",
+           "bar": "rel",
+           "idx": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           }
+          },
+          {
+           "op": "event",
+           "ev": "arrive",
+           "loc": "phase_skip.py:17",
+           "bar": "ack",
+           "idx": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           }
+          }
+         ],
+         "else": [
+          {
+           "op": "event",
+           "ev": "arrive",
+           "loc": "phase_skip.py:17",
+           "bar": "ack",
+           "idx": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           }
+          },
+          {
+           "op": "event",
+           "ev": "arrive",
+           "loc": "phase_skip.py:16",
+           "bar": "rel",
+           "idx": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           }
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "phase_skip",
+  "inputs": [
+   {
+    "name": "ordered",
+    "params": {
+     "T": 2,
+     "ORDERED": 1
+    }
+   },
+   {
+    "name": "unordered",
+    "params": {
+     "T": 2,
+     "ORDERED": 0
+    }
+   }
+  ]
+ }
+}

@@ -1,0 +1,112 @@
+{
+  "kir_version": 1,
+  "kernel": "m5_arriver_disagree",
+  "source": "tests/lean/m5_arriver_disagree.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "TILES", "type": "i32"}, {"name": "X", "type": "i32"}],
+  "tensors": [],
+  "barriers": [
+    {"name": "done", "count": {"e": "const", "v": 2, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}}
+  ],
+  "roles": [
+    {
+      "name": "a",
+      "warps": 1,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "for",
+          "var": "t",
+          "loc": "m5.py:4",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {
+            "e": "bin",
+            "o": "add",
+            "w": 32,
+            "a": {"e": "var", "name": "TILES", "w": 32},
+            "b": {"e": "var", "name": "X", "w": 32}
+          },
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "event",
+              "ev": "arrive",
+              "loc": "m5.py:5",
+              "bar": "done",
+              "idx": {"e": "const", "v": 0, "w": 32}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "b",
+      "warps": 1,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "for",
+          "var": "t",
+          "loc": "m5.py:8",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {
+            "e": "bin",
+            "o": "sub",
+            "w": 32,
+            "a": {"e": "var", "name": "TILES", "w": 32},
+            "b": {"e": "var", "name": "X", "w": 32}
+          },
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "event",
+              "ev": "arrive",
+              "loc": "m5.py:9",
+              "bar": "done",
+              "idx": {"e": "const", "v": 0, "w": 32}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "w",
+      "warps": 1,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "for",
+          "var": "t",
+          "loc": "m5.py:12",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {"e": "var", "name": "TILES", "w": 32},
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "event",
+              "ev": "wait",
+              "loc": "m5.py:13",
+              "bar": "done",
+              "idx": {"e": "const", "v": 0, "w": 32},
+              "parity": {
+                "e": "bin",
+                "o": "and",
+                "w": 32,
+                "a": {"e": "var", "name": "t", "w": 32},
+                "b": {"e": "const", "v": 1, "w": 32}
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "case": {
+    "name": "m5",
+    "inputs": [
+      {"name": "agree", "params": {"TILES": 2, "X": 0}},
+      {"name": "disagree", "params": {"TILES": 2, "X": 1}}
+    ]
+  }
+}

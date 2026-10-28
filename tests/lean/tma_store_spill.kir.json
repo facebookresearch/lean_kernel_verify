@@ -1,0 +1,52 @@
+{
+  "kir_version": 1,
+  "kernel": "tma_store_spill",
+  "source": "tests/lean/tma_store_spill.kir.json",
+  "ir": "cute-mlir",
+  "grid": [{"e": "var", "name": "MAX_TILES", "w": 32}, {"e": "var", "name": "B", "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "B", "type": "i32"}, {"name": "MAX_TILES", "type": "i32"}, {"name": "TOTAL", "type": "i32"}],
+  "tensors": [
+    {"name": "cu_seqlens", "kind": "global", "elem_bytes": 4,
+     "shape": [{"e": "bin", "o": "add", "w": 32, "a": {"e": "var", "name": "B", "w": 32}, "b": {"e": "const", "v": 1, "w": 32}}],
+     "strides": [{"e": "const", "v": 1, "w": 32}],
+     "segments": null, "role": "input", "metadata": true},
+    {"name": "out", "kind": "desc", "elem_bytes": 2,
+     "shape": [{"e": "var", "name": "TOTAL", "w": 32}, {"e": "const", "v": 16, "w": 32}],
+     "strides": [{"e": "const", "v": 16, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+     "segments": {"dim": 0, "offsets": "cu_seqlens", "per": "batch"},
+     "role": "output", "metadata": false, "box": [64, 16]}
+  ],
+  "barriers": [],
+  "roles": [
+    {"name": "epilogue", "warps": 4, "threads_per_issue": 1, "body": [
+      {"op": "let", "var": "b", "loc": "tma_store_spill.py:20", "expr": {"e": "pid", "axis": 1, "w": 32}},
+      {"op": "let", "var": "start", "loc": "tma_store_spill.py:21",
+       "expr": {"e": "load", "tensor": "cu_seqlens", "w": 32, "index": [{"e": "var", "name": "b", "w": 32}]}},
+      {"op": "let", "var": "end", "loc": "tma_store_spill.py:22",
+       "expr": {"e": "load", "tensor": "cu_seqlens", "w": 32,
+                "index": [{"e": "bin", "o": "add", "w": 32, "a": {"e": "var", "name": "b", "w": 32}, "b": {"e": "const", "v": 1, "w": 32}}]}},
+      {"op": "let", "var": "m0", "loc": "tma_store_spill.py:23",
+       "expr": {"e": "bin", "o": "mul", "w": 32, "addr": true, "a": {"e": "pid", "axis": 0, "w": 32}, "b": {"e": "const", "v": 64, "w": 32}}},
+      {"op": "if", "loc": "tma_store_spill.py:24",
+       "cond": {"e": "cmp", "o": "slt", "w": 1, "a": {"e": "var", "name": "m0", "w": 32},
+                "b": {"e": "bin", "o": "sub", "w": 32, "a": {"e": "var", "name": "end", "w": 32}, "b": {"e": "var", "name": "start", "w": 32}}},
+       "then": [
+        {"op": "event", "ev": "work", "loc": "tma_store_spill.py:25", "fields": {"batch": {"e": "var", "name": "b", "w": 32}}},
+        {"op": "event", "ev": "tma_store", "desc": "out", "loc": "tma_store_spill.py:27",
+         "coords": [{"e": "bin", "o": "add", "w": 32, "addr": true, "a": {"e": "var", "name": "start", "w": 32}, "b": {"e": "var", "name": "m0", "w": 32}},
+                    {"e": "const", "v": 0, "w": 32}]}
+       ],
+       "else": []}
+    ]}
+  ],
+  "case": {"name": "varlen", "inputs": [
+    {"name": "aligned", "params": {"B": 2, "MAX_TILES": 2, "TOTAL": 192},
+     "metadata": {"cu_seqlens": [0, 64, 192]}, "intended_writes": {"out": "all_rows_of_segments"}},
+    {"name": "partial_last", "params": {"B": 2, "MAX_TILES": 2, "TOTAL": 100},
+     "metadata": {"cu_seqlens": [0, 64, 100]}, "intended_writes": {"out": "all_rows_of_segments"}},
+    {"name": "empty_segment", "params": {"B": 3, "MAX_TILES": 1, "TOTAL": 128},
+     "metadata": {"cu_seqlens": [0, 64, 64, 128]}, "intended_writes": {"out": "all_rows_of_segments"}},
+    {"name": "partial_middle", "params": {"B": 2, "MAX_TILES": 2, "TOTAL": 164},
+     "metadata": {"cu_seqlens": [0, 100, 164]}, "intended_writes": {"out": "all_rows_of_segments"}}
+  ]}
+}

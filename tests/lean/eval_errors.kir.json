@@ -1,0 +1,61 @@
+{
+  "kir_version": 1,
+  "kernel": "eval_errors",
+  "source": "tests/lean/eval_errors.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "var", "name": "G", "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "X", "type": "i32"}, {"name": "G", "type": "i32"}, {"name": "NUM", "type": "i32"},
+             {"name": "IDX", "type": "i32"}, {"name": "STEP", "type": "i32"}, {"name": "MS", "type": "i32"},
+             {"name": "D", "type": "i32"}, {"name": "LB", "type": "i32"}],
+  "tensors": [
+    {"name": "meta", "kind": "global", "elem_bytes": 4, "shape": [{"e": "const", "v": 6, "w": 32}],
+     "strides": [{"e": "var", "name": "MS", "w": 32}], "segments": null, "role": "input", "metadata": true},
+    {"name": "x", "kind": "global", "elem_bytes": 4, "shape": [{"e": "const", "v": 4, "w": 32}],
+     "strides": [{"e": "const", "v": 1, "w": 32}], "segments": null, "role": "input", "metadata": false}
+  ],
+  "barriers": [{"name": "b", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "var", "name": "NUM", "w": 32}}],
+  "roles": [
+    {"name": "default", "warps": 1, "threads_per_issue": 1, "body": [
+      {"op": "assert", "msg": "X must not be 7", "loc": "eval_errors.py:5",
+       "cond": {"e": "cmp", "o": "ne", "w": 1, "a": {"e": "var", "name": "X", "w": 32}, "b": {"e": "const", "v": 7, "w": 32}}},
+      {"op": "let", "var": "q", "loc": "eval_errors.py:6",
+       "expr": {"e": "bin", "o": "sdiv", "w": 32, "a": {"e": "const", "v": 100, "w": 32},
+                "b": {"e": "bin", "o": "sub", "w": 32, "a": {"e": "var", "name": "X", "w": 32}, "b": {"e": "const", "v": 3, "w": 32}}}},
+      {"op": "let", "var": "i", "expr": {"e": "const", "v": 0, "w": 32}},
+      {"op": "while", "max_iters": 10, "loc": "eval_errors.py:8",
+       "cond": {"e": "cmp", "o": "slt", "w": 1, "a": {"e": "var", "name": "i", "w": 32}, "b": {"e": "var", "name": "X", "w": 32}},
+       "body": [
+        {"op": "let", "var": "i", "expr": {"e": "bin", "o": "add", "w": 32, "a": {"e": "var", "name": "i", "w": 32}, "b": {"e": "const", "v": 1, "w": 32}}}
+       ]},
+      {"op": "let", "var": "m", "loc": "eval_errors.py:10",
+       "expr": {"e": "load", "tensor": "meta", "w": 32, "index": [{"e": "var", "name": "X", "w": 32}]}},
+      {"op": "event", "ev": "arrive", "bar": "b", "loc": "eval_errors.py:11", "idx": {"e": "var", "name": "IDX", "w": 32}},
+      {"op": "for", "var": "k", "loc": "eval_errors.py:12", "lb": {"e": "var", "name": "LB", "w": 32},
+       "ub": {"e": "const", "v": 1, "w": 32}, "step": {"e": "var", "name": "STEP", "w": 32}, "body": []},
+      {"op": "event", "ev": "gload", "tensor": "x", "loc": "eval_errors.py:13",
+       "offsets": {"t": "bin", "o": "sdiv", "shape": [4], "w": 32,
+                   "a": {"t": "range", "start": 0, "end": 4, "shape": [4], "w": 32},
+                   "b": {"t": "bin", "o": "sub", "shape": [4], "w": 32,
+                         "a": {"t": "range", "start": 0, "end": 4, "shape": [4], "w": 32},
+                         "b": {"t": "splat", "shape": [4], "w": 32, "a": {"e": "var", "name": "D", "w": 32}}}},
+       "mask": {"t": "cmp", "o": "ne", "shape": [4], "w": 1,
+                "a": {"t": "range", "start": 0, "end": 4, "shape": [4], "w": 32},
+                "b": {"t": "splat", "shape": [4], "w": 32, "a": {"e": "var", "name": "D", "w": 32}}}}
+    ]}
+  ],
+  "case": {"name": "errors", "inputs": [
+    {"name": "ok", "params": {"X": 5, "G": 1, "NUM": 1, "IDX": 0, "STEP": 1, "MS": 1, "D": -1, "LB": 0}, "metadata": {"meta": [0, 1, 2, 3, 4, 5]}},
+    {"name": "assert_fail", "params": {"X": 7, "G": 1, "NUM": 1, "IDX": 0, "STEP": 1, "MS": 1, "D": -1, "LB": 0}, "metadata": {"meta": [0, 1, 2, 3, 4, 5]}},
+    {"name": "div_zero", "params": {"X": 3, "G": 1, "NUM": 1, "IDX": 0, "STEP": 1, "MS": 1, "D": -1, "LB": 0}, "metadata": {"meta": [0, 1, 2, 3, 4, 5]}},
+    {"name": "while_bound", "params": {"X": 11, "G": 1, "NUM": 1, "IDX": 0, "STEP": 1, "MS": 1, "D": -1, "LB": 0}, "metadata": {"meta": [0, 1, 2, 3, 4, 5]}},
+    {"name": "meta_oob", "params": {"X": 8, "G": 1, "NUM": 1, "IDX": 0, "STEP": 1, "MS": 1, "D": -1, "LB": 0}, "metadata": {"meta": [0, 1, 2, 3, 4, 5]}},
+    {"name": "meta_missing_value", "params": {"X": 5, "G": 1, "NUM": 1, "IDX": 0, "STEP": 1, "MS": 1, "D": -1, "LB": 0}, "metadata": {"meta": [0, 1, 2, 3, 4]}},
+    {"name": "meta_negative_offset", "params": {"X": 5, "G": 1, "NUM": 1, "IDX": 0, "STEP": 1, "MS": -1, "D": -1, "LB": 0}, "metadata": {"meta": [0, 1, 2, 3, 4, 5]}},
+    {"name": "barrier_index", "params": {"X": 5, "G": 1, "NUM": 1, "IDX": 1, "STEP": 1, "MS": 1, "D": -1, "LB": 0}, "metadata": {"meta": [0, 1, 2, 3, 4, 5]}},
+    {"name": "for_step_zero", "params": {"X": 5, "G": 1, "NUM": 1, "IDX": 0, "STEP": 0, "MS": 1, "D": -1, "LB": 0}, "metadata": {"meta": [0, 1, 2, 3, 4, 5]}},
+    {"name": "for_step_zero_no_trips", "params": {"X": 5, "G": 1, "NUM": 1, "IDX": 0, "STEP": 0, "MS": 1, "D": -1, "LB": 1}, "metadata": {"meta": [0, 1, 2, 3, 4, 5]}},
+    {"name": "tensor_div_zero_masked", "params": {"X": 5, "G": 1, "NUM": 1, "IDX": 0, "STEP": 1, "MS": 1, "D": 0, "LB": 0}, "metadata": {"meta": [0, 1, 2, 3, 4, 5]}},
+    {"name": "negative_grid", "params": {"X": 5, "G": -1, "NUM": 1, "IDX": 0, "STEP": 1, "MS": 1, "D": -1, "LB": 0}, "metadata": {"meta": [0, 1, 2, 3, 4, 5]}},
+    {"name": "negative_barrier_num", "params": {"X": 5, "G": 1, "NUM": -1, "IDX": 0, "STEP": 1, "MS": 1, "D": -1, "LB": 0}, "metadata": {"meta": [0, 1, 2, 3, 4, 5]}}
+  ]}
+}

@@ -1,0 +1,302 @@
+{
+ "kir_version": 1,
+ "kernel": "lap_shift",
+ "source": "tests/lean/lap_shift.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "T",
+   "type": "i32"
+  },
+  {
+   "name": "LATE_SIG",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "released",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "tile",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "compute",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lap.py:5",
+       "bar": "released",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lap.py:6",
+       "bar": "released",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "eq",
+        "a": {
+         "e": "var",
+         "name": "LATE_SIG",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "lap.py:7",
+         "bar": "tile",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "lap.py:7"
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lap.py:8",
+       "bar": "released",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "ne",
+        "a": {
+         "e": "var",
+         "name": "LATE_SIG",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "lap.py:9",
+         "bar": "tile",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "lap.py:9"
+      }
+     ],
+     "loc": "lap.py:4"
+    }
+   ]
+  },
+  {
+   "name": "mma",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "lap.py:13",
+       "bar": "tile",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "var",
+         "name": "t",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "lap.py:14",
+       "bar": "released",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "xor",
+        "a": {
+         "e": "bin",
+         "o": "and",
+         "a": {
+          "e": "var",
+          "name": "t",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 1,
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      }
+     ],
+     "loc": "lap.py:12"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "lap_shift",
+  "inputs": [
+   {
+    "name": "odd_phases_per_tile",
+    "params": {
+     "T": 3,
+     "LATE_SIG": 0
+    }
+   },
+   {
+    "name": "lap_past_end",
+    "params": {
+     "T": 3,
+     "LATE_SIG": 1
+    }
+   }
+  ]
+ }
+}

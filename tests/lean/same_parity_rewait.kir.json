@@ -1,0 +1,48 @@
+{
+  "kir_version": 1,
+  "kernel": "same_parity_rewait",
+  "source": "tests/lean/same_parity_rewait.kir.json",
+  "ir": "cute-mlir",
+  "grid": [{"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "TILES", "type": "i32"}, {"name": "TAIL", "type": "i32"}],
+  "tensors": [],
+  "barriers": [
+    {"name": "acc", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}}
+  ],
+  "roles": [
+    {"name": "mma", "warps": 1, "threads_per_issue": 1, "body": [
+      {"op": "for", "var": "t", "loc": "same_parity_rewait.py:10",
+       "lb": {"e": "const", "v": 0, "w": 32}, "ub": {"e": "var", "name": "TILES", "w": 32}, "step": {"e": "const", "v": 1, "w": 32},
+       "body": [
+        {"op": "event", "ev": "commit_arrive", "bar": "acc", "loc": "same_parity_rewait.py:11", "idx": {"e": "const", "v": 0, "w": 32}}
+      ]},
+      {"op": "if", "loc": "same_parity_rewait.py:13",
+       "cond": {"e": "cmp", "o": "sgt", "w": 1, "a": {"e": "var", "name": "TAIL", "w": 32}, "b": {"e": "const", "v": 0, "w": 32}},
+       "then": [
+        {"op": "event", "ev": "commit_arrive", "bar": "acc", "loc": "same_parity_rewait.py:14", "idx": {"e": "const", "v": 0, "w": 32}}
+       ],
+       "else": []}
+    ]},
+    {"name": "epilogue", "warps": 4, "threads_per_issue": 1, "body": [
+      {"op": "for", "var": "t", "loc": "same_parity_rewait.py:20",
+       "lb": {"e": "const", "v": 0, "w": 32}, "ub": {"e": "var", "name": "TILES", "w": 32}, "step": {"e": "const", "v": 1, "w": 32},
+       "body": [
+        {"op": "event", "ev": "wait", "bar": "acc", "loc": "same_parity_rewait.py:21", "idx": {"e": "const", "v": 0, "w": 32},
+         "parity": {"e": "bin", "o": "and", "w": 32, "a": {"e": "var", "name": "t", "w": 32}, "b": {"e": "const", "v": 1, "w": 32}}}
+      ]},
+      {"op": "if", "loc": "same_parity_rewait.py:23",
+       "cond": {"e": "cmp", "o": "sgt", "w": 1, "a": {"e": "var", "name": "TAIL", "w": 32}, "b": {"e": "const", "v": 0, "w": 32}},
+       "then": [
+        {"op": "event", "ev": "wait", "bar": "acc", "loc": "same_parity_rewait.py:24", "idx": {"e": "const", "v": 0, "w": 32},
+         "parity": {"e": "bin", "o": "and", "w": 32,
+                    "a": {"e": "bin", "o": "sub", "w": 32, "a": {"e": "var", "name": "TILES", "w": 32}, "b": {"e": "const", "v": 1, "w": 32}},
+                    "b": {"e": "const", "v": 1, "w": 32}}}
+       ],
+       "else": []}
+    ]}
+  ],
+  "case": {"name": "tail", "inputs": [
+    {"name": "no_tail", "params": {"TILES": 2, "TAIL": 0}},
+    {"name": "with_tail", "params": {"TILES": 2, "TAIL": 1}}
+  ]}
+}

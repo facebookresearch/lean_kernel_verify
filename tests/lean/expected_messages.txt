@@ -1,0 +1,130 @@
+# Counterexample and note text each fixture's report must contain: <fixture> <substring>
+# (the fixture name is the first word; the substring is the rest of the line after one space).
+zero_trip_missing_arrive zero_trip_missing_arrive.py:40: cta (0,0,0) slot acc_full[0]: role epilogue (consumer convention, 1 waits) needs 1 completions but the slot completes 0 times
+stale_tail_parity stale_tail_parity.py:22: cta (0,0,0) slot full[0] role consumer: wait #3 has parity 0, expected 1
+same_parity_rewait same_parity_rewait.py:24: cta (0,0,0) slot acc[0] role epilogue: wait #2 has parity 1, expected 0
+parity_two parity_two.py:21: cta (0,0,0) slot ready[0] role consumer: wait parity 2 (only 0 and 1 exist)
+floor_tile_tail tensor out: 576 intended element(s) never written by a plain store: rows [64, 100)
+floor_tile_tail tensor out: 640 intended element(s) never written by a plain store: rows [0, 40)
+tma_store_spill tma_store_spill.py:27: cta (1,0,0) role epilogue: tma_store out box at [64, 0] (box [64, 16]): rows [100, 128) outside segment batch=0 is rows [0, 100)
+tma_store_spill written more than once by plain stores (rows [100, 128))
+unmasked_load_oob unmasked_load_oob.py:8: cta (1,0,0) role default: gload x: 56 lane(s) outside allocation [0, 199]: offsets [200, 256)
+i32_offset_overflow i32_offset_overflow.py:8: cta (1,0,0) role default: i32 wrap in address arithmetic: mul(2048, 1048576) = -2147483648
+full_tiles_fast_path full_tiles_fast_path.py:7: cta (1,0,0) role default: gload x: 56 lane(s) outside allocation [0, 199]
+full_tiles_fast_path full_tiles_fast_path.py:8: cta (1,0,0) role default: gstore y: 56 element(s) outside the intended region (rows [200, 256))
+full_tiles_fast_path ?: tensor y: 72 intended element(s) never written by a plain store: rows [128, 200)
+full_tiles_fast_path note: ?: tensor y: intended_writes is "unchecked": its coverage is not checked
+eval_errors eval_errors.py:5: cta (0,0,0) role default: device assert failed: X must not be 7
+eval_errors eval_errors.py:6: cta (0,0,0) role default: division by zero: sdiv(100, 0)
+eval_errors eval_errors.py:8: cta (0,0,0) role default: while loop exceeds max_iters = 10
+eval_errors eval_errors.py:10: cta (0,0,0) role default: load meta[8] outside the metadata tensor (shape [6]): an out-of-bounds global read
+eval_errors eval_errors.py:10: cta (0,0,0) role default: not decided on this input: 1 role trace(s) stop at an out-of-bounds metadata load (P0-1)
+eval_errors eval_errors.py:10: cta (0,0,0) role default: load meta[5]: offset 5, but the input gives 5 values
+eval_errors eval_errors.py:10: cta (0,0,0) role default: load meta[5]: negative offset -5
+eval_errors eval_errors.py:11: cta (0,0,0) role default: barrier index b[1] out of range (num 1)
+eval_errors eval_errors.py:12: cta (0,0,0) role default: for k: non-positive step 0
+eval_errors eval_errors.py:13: cta (0,0,0) role default: division by zero in tensor sdiv
+eval_errors host: negative grid [-1, 1, 1]
+eval_errors host: barrier b: negative num -1
+segmented_gload host: segmented tensor x: strides [8, 1] for shape [164, 16] give no unique dim 0 coordinate per offset
+pipeline_ok note: pipeline_ok.py:12: cta (0,0,0) slot empty[0]: role producer (producer convention, 2 waits) waits for phases up to 1 but the slot completes 2 times (2 arrivals / count 1): phase 2 completes after its last wait
+expect_tx_mismatch expect_tx_mismatch.py:11: cta (0,0,0) slot full[0]: phase 1: expect_tx 2048 bytes != tma_load 4096 bytes landing in it
+expect_tx_mismatch expect_tx_mismatch.py:12: cta (0,0,0) slot full[0] role producer: tma_load not covered by an earlier expect_tx of this role in phase 2 (2048 bytes uncovered)
+i32_offset_overflow i32_offset_overflow.py:8: cta (0,0,0) role default: i32 wrap in address arithmetic: mul(4096, 1048576) = 0
+arrival_counts arrival_counts.py:5: cta (0,0,0) slot epi_done[0]: bar_init count 64 != declared count 128
+arrival_counts the arrivals of the 2 waited phase(s) do not split into per-role shares that sum to the count 96 and end at arrive events (role epilogue: 256 arrivals, reaching [128, 256])
+arrival_counts note: arrival_counts.py:11: cta (0,0,0) slot epi_done[0]: role mma (consumer convention, 2 waits) waits for phases up to 4 but the slot completes 8 times (256 arrivals / count 32): phases 5..8 complete after its last wait
+arrival_counts note: arrival_counts.py:11: cta (0,0,0) slot epi_done[0] role mma: wait #1 (parity 1, consumer convention) synchronizes with phase 4, not phase 2 after its previous wait: phase 3 surely completed before it (the arrivals that surely precede it reach the phase at role epilogue's arrive at arrival_counts.py:21)
+arrival_counts note: arrival_counts.py:5: cta (0,0,0) slot epi_done[0]: 256 arrivals is not a multiple of the count 96: phase 3 gets 64 arrival(s) and never completes; nobody waits for it
+atomic_outside_intended note: atomic_outside_intended.py:9: cta (0,0,0) role default: gatomic y: 36 element(s) outside the intended region (rows [64, 100)); harmless only if the reduction leaves the values there unchanged (e.g. it adds zero)
+atomic_outside_intended note: atomic_outside_intended.py:12: cta (0,0,0) role default: tma_reduce z: 1024 element(s) outside the intended region (rows [64, 128)); harmless only if the reduction leaves the values there unchanged (e.g. it adds zero)
+atomic_outside_intended atomic_outside_intended.py:11: cta (0,0,0) role default: tma_store z: 512 element(s) outside the intended region (rows [32, 64))
+segmented_gload note: segmented_gload.py:15: cta (1,0,0) role worker: gload x: read spill: rows [100, 128) outside segment batch=0 is rows [0, 100); harmless only if the values are masked before use
+segmented_gload note: segmented_gload.py:31: cta (0,0,0) role stray: gload x: read spill: no current work item defines 'batch'
+segmented_gload segmented_gload.py:17: cta (1,0,0) role worker: gstore y: rows [100, 128) outside segment batch=0 is rows [0, 100)
+segmented_gload segmented_gload.py:33: cta (0,0,0) role stray: gstore y: no current work item defines 'batch'
+segmented_gload tensor y: output tensor without an intended_writes entry in this input
+segmented_gload note: ?: tensor y: intended_writes is "unchecked": its coverage is not checked
+padded_column_overrun padded_column_overrun.py:8: cta (0,0,0) role default: gload x: 28 lane(s) inside [0, 483] but at no element of shape [4, 100] strides [128, 1] (a coordinate outside its extent): offsets [100, 128)
+padded_column_overrun padded_column_overrun.py:8: cta (3,0,0) role default: gload x: 28 lane(s) outside allocation [0, 483]: offsets [484, 512)
+trunc_offset_wrap trunc_offset_wrap.py:8: cta (0,0,0) role default: i32 wrap in address arithmetic: trunc(4294967296) = 0
+trunc_offset_wrap trunc_offset_wrap.py:11: cta (0,0,0) role default: i32 wrap in address arithmetic: trunc(4294967296) = 0
+producer_tail note: producer_tail.py:24: cta (0,0,0) slot full[0]: role consumer (consumer convention, 2 waits) waits for phases up to 2 but the slot completes 3 times (3 arrivals / count 1): phase 3 completes after its last wait
+producer_tail note: producer_tail.py:19: cta (0,0,0) slot full[0]: phase 3: expect_tx 4096 bytes != tma_load 0 bytes, and nobody waits for this phase
+producer_tail note: producer_tail.py:19: cta (0,0,0) slot full[0]: expect_tx 4096 bytes != tma_load 0 bytes, and nobody waits on the slot
+producer_tail producer_tail.py:19: cta (0,0,0) slot full[1]: phase 2: expect_tx 4096 bytes != tma_load 0 bytes landing in it
+lockstep_shares note: lockstep_shares.py:5: cta (0,0,0) slot done[0]: 5 arrivals is not a multiple of the count 2: phase 3 gets 1 arrival(s) and never completes; nobody waits for it
+lockstep_shares note: lockstep_shares.py:13: cta (0,0,0) slot done[0]: role w (consumer convention, 2 waits) waits for phases up to 2 but the slot completes 3 times (6 arrivals / count 2): phase 3 completes after its last wait
+tx_skip_confirmed tx_skip_confirmed.py:31: cta (0,0,0) slot full[0] role consumer: wait #1 has parity 0, expected 1 (consumer convention, sequence [0, 0])
+tx_skip_confirmed note: tx_skip_confirmed.py:20: cta (0,0,0) slot sig2[0]: role consumer waits on sig2 in its code but has no wait, arrival or transaction event on sig2[0] in this run (a bar_init does not count)
+phase_skip phase_skip.py:6: cta (0,0,0) slot rel[0] role mma: wait #1 has parity 0, expected 1 (consumer convention, sequence [0, 0, 1])
+redundant_rewait redundant_rewait.py:5: cta (0,0,0) slot empty[0] role mma: wait #1 has parity 1, expected 0 (producer convention, sequence [1, 1])
+m1_consumer_start_parity pipeline_ok.py:21: cta (0,0,0) slot full[0] role consumer: first wait has parity 1 on a slot that receives TMA bytes
+m2_tx_skip m2.py:25: cta (0,0,0) slot full[0] role consumer: wait #1 has parity 0, expected 1 (consumer convention, sequence [0, 0])
+m2b_commit_skip m2.py:25: cta (0,0,0) slot full[0] role consumer: wait #1 has parity 0, expected 1 (consumer convention, sequence [0, 0])
+m3_missing_wait note: zero_trip_missing_arrive.py:32: cta (0,0,0) slot acc_full[0]: role epilogue waits on acc_full in its code but has no wait, arrival or transaction event on acc_full[0] in this run (a bar_init does not count), while the slot completes 1 times
+m4_shl_wrap i32_offset_overflow.py:8: cta (0,0,0) role default: i32 wrap in address arithmetic: shl(4096, 20) = 0
+m5_arriver_disagree m5.py:5: cta (0,0,0) slot done[0]: the arrivals of the 2 waited phase(s) do not split into per-role shares that sum to the count 2 and end at arrive events (role a: 3 arrivals, reaching [1, 2, 3]; role b: 1 arrivals, reaching [1])
+m6_expect_phase_shift pipeline_ok.py:13: cta (0,0,0) slot full[0]: phase 1: expect_tx 8192 bytes != tma_load 4096 bytes landing in it
+m6_expect_phase_shift pipeline_ok.py:14: cta (0,0,0) slot full[0] role producer: tma_load not covered by an earlier expect_tx of this role in phase 2 (4096 bytes uncovered)
+c1_consumer_short pipeline_ok.py:13: cta (0,0,0) slot full[0]: role consumer waits on full in its code but has no wait, arrival or transaction event on full[0] in this run (a bar_init does not count), while the slot completes 1 times (1 arrivals / count 1) and receives 4096 TMA bytes (a data-ready barrier)
+c1_consumer_short note: pipeline_ok.py:21: cta (0,0,0) slot full[0]: role consumer (consumer convention, 1 waits) waits for phases up to 1 but the slot completes 2 times
+shared_barrier_array shared_barrier_array.py:13: cta (0,0,0) slot mbar[0]: role consumer waits on mbar in its code but has no wait, arrival or transaction event on mbar[0] in this run (a bar_init does not count), while the slot completes 1 times (1 arrivals / count 1) and receives 4096 TMA bytes (a data-ready barrier)
+distinct_locs distinct_locs.py:8: cta (12,0,0) role default: gload x: 1 lane(s) outside allocation [0, 15]
+distinct_locs note: distinct_locs.py:9: cta (12,0,0) role default: gatomic y: 1 element(s) outside the intended region
+inner_segment_ext inner_segment_ext.py:10: cta (0,0,0) role default: gstore m: rows [40, 64) outside segment batch=0 is rows [0, 40)
+inner_segment_ext inner_segment_ext.py:8: cta (0,0,0) role default: i32 wrap in address arithmetic: add(2147483600, 48) = -2147483648
+c1_consumer_short pipeline_ok.py:13: cta (0,0,0) slot full[0]: phase 2: 4096 TMA bytes land in it, but the waits observe phases up to 1: no wait synchronizes with the load
+c1_consumer_short pipeline_ok.py:13: cta (0,0,0) slot full[0]: 4096 TMA bytes land on the slot, but nobody waits on it: no wait synchronizes with the loads
+shared_barrier_array shared_barrier_array.py:13: cta (0,0,0) slot mbar[0]: 4096 TMA bytes land on the slot, but nobody waits on it
+init_role_static_waiter init_role.py:3: cta (0,0,0) slot full[0]: role consumer waits on full in its code but has no wait, arrival or transaction event on full[0] in this run (a bar_init does not count), while the slot completes 1 times (1 arrivals / count 1) and receives 4096 TMA bytes (a data-ready barrier)
+empty_parity_deadlock deadlock.py:12: cta (0,0,0) slot empty[0]: role producer (consumer convention, 2 waits): this wait never returns: even with every arrival as early as the roles' waits allow, 0 arrival(s) reach the slot before it and its phase needs 1 (a hang or a cross-role wait cycle)
+empty_parity_deadlock deadlock.py:21: cta (0,0,0) slot full[0]: role consumer (consumer convention, 2 waits): this wait never returns
+late_first_wait late.py:15: cta (0,0,0) slot slot[0]: role late (consumer convention, 1 waits) needs 3 completions but the slot completes 2 times (2 arrivals / count 1): the wait hangs
+late_wait_tx late_tx.py:11: cta (0,0,0) slot tfull[0]: phase 3: expect_tx 8192 bytes != tma_load 4096 bytes landing in it
+tx_unwaited_phase unwaited.py:13: cta (0,0,0) slot full[0]: phase 3: 4096 TMA bytes land in it, but the waits observe phases up to 2: no wait synchronizes with the load
+tx_unwaited_phase unwaited.py:13: cta (0,0,0) slot full[1]: phase 2: 4096 TMA bytes land in it, but the waits observe phases up to 1
+count_too_small count.py:5: cta (0,0,0) slot done[0]: the arrivals of the 2 waited phase(s) do not split into per-role shares that sum to the count 1 and end at arrive events (role a: 2 arrivals, reaching [1, 2]; role b: 2 arrivals, reaching [1, 2]), and no initialization arrival forms phase 1 by itself
+zero_share_evidence zero.py:5: cta (0,0,0) slot done[0]: the arrivals of the 2 waited phase(s) do not split into per-role shares that sum to the count 1 and end at arrive events (role a: 2 arrivals, reaching [1, 2]; role late: 1 arrivals, reaching [1])
+lap_shift note: lap.py:14: cta (0,0,0) slot released[0] role mma: wait #1 (parity 0, producer convention) synchronizes with phase 5, not phase 3 after its previous wait: phase 4 surely completed before it (the arrivals that surely precede it reach the phase at role compute's arrive at lap.py:5)
+lap_shift lap.py:14: cta (0,0,0) slot released[0]: role mma (producer convention, 3 waits) needs 10 completions but the slot completes 9 times (9 arrivals / count 1): the wait hangs
+init_prearrive ring.py:10: cta (0,0,0) slot ring[0]: role reducer (consumer convention, 3 waits) needs 5 completions but the slot completes 4 times (4 arrivals / count 1): the wait hangs
+init_prearrive ring.py:16: cta (0,0,0) slot filled[0]: role releaser (consumer convention, 3 waits): this wait never returns
+init_prearrive ring.py:3: cta (0,0,0) slot ring[0]: the arrivals of the 3 waited phase(s) do not split into per-role shares that sum to the count 1 and end at arrive events (role init: 1 arrivals, reaching [1]; role releaser: 3 arrivals, reaching [1, 2, 3])
+share_credit_skip share.py:16: cta (0,0,0) slot dp[0] role mma: wait #1 has parity 1, expected 0 (producer convention, sequence [1, 1, 1]): it repeats the previous parity
+ambiguous_shares amb.py:22: cta (0,0,0) slot y[0]: role w (consumer convention, 2 waits) needs 4 completions but the slot completes 2 times (2 arrivals / count 1): the wait hangs
+meta_oob_load oob.py:5: cta (1,0,0) role default: load meta[1] outside the metadata tensor (shape [1]): an out-of-bounds global read
+meta_oob_load oob.py:5: cta (1,0,0) role default: not decided on this input: 1 role trace(s) stop at an out-of-bounds metadata load (P0-1)
+meta_oob_load ?: tensor out: 1 element(s) written more than once by plain stores (rows [0, 1)); e.g. offset 0 (row 0) 2 times, by oob.py:6 (cta (0,0,0) role default) and oob.py:8 (cta (0,0,0) role default)
+progress_latejoin_cycle r1.py:11: cta (0,0,0) slot x[0]: role c (consumer convention, 1 waits): this wait never returns: even with every arrival as early as the roles' waits allow, 2 arrival(s) reach the slot before it and its phase needs 3
+progress_commit_ring r2.py:4: cta (0,0,0) slot ca[0]: role a (consumer convention, 4 waits): this wait never returns
+lap_tma_wait_evidence note: r3.py:15: cta (0,0,0) slot full[0] role b: wait #1 (parity 1, consumer convention) synchronizes with phase 4, not phase 2 after its previous wait: phase 3 surely completed before it (role a's wait at r3.py:9 needs it and surely returned before)
+lap_tma_wait_evidence r3.py:15: cta (0,0,0) slot full[0]: role b (consumer convention, 2 waits) needs 4 completions but the slot completes 3 times (3 arrivals / count 1): the wait hangs
+ambiguous_tx_shares r4.py:5: cta (0,0,0) slot x[0]: phase 5: 4096 TMA bytes land in it, but the waits observe phases up to 2: no wait synchronizes with the load
+joint_tx_shares b.py:4: cta (0,0,0) slot x[0]: phase 2: 8192 TMA bytes land in it, but the waits observe phases up to 1: no wait synchronizes with the load
+init_commit_release r5.py:3: cta (0,0,0) slot ring[0]: the arrivals of the 3 waited phase(s) do not split into per-role shares that sum to the count 1 and end at arrive events (role init: 1 arrivals, reaching [1]; role releaser: 3 arrivals, reaching [1, 2, 3]), and no initialization arrival forms phase 1 by itself
+meta_masked_load r6.py:6: cta (0,0,0) role default: load tiles[0] outside the metadata tensor (shape [0]): an out-of-bounds global read
+meta_oob_elided r7.py:4: cta (1,0,0) role default: load meta[1] outside the metadata tensor (shape [1]): an out-of-bounds global read
+meta_oob_elided r7.py:4: cta (1,0,0) role default: not decided on this input: 1 role trace(s) stop at an out-of-bounds metadata load (P0-1)
+meta_oob_elided r7.py:9: cta (0,0,0) slot b[0]: role waiter (consumer convention, 1 waits) needs 1 completions but the slot completes 0 times (0 arrivals / count 1): the wait hangs
+stale_presumed_hang r9.py:8: cta (0,0,0) slot x[0] role c: wait #1 has parity 0, expected 1 (consumer convention, sequence [0, 0, 1]): it repeats the previous parity
+stale_presumed_hang r9.py:10: cta (0,0,0) slot x[0]: role c (consumer convention, 4 waits) needs 3 completions but the slot completes 2 times (2 arrivals / count 1): the wait hangs
+zero_share_credit zc.py:6: cta (0,0,0) slot y[0] role w: wait #1 has parity 0, expected 1 (consumer convention, sequence [0, 0]): it repeats the previous parity
+zero_share_credit zc.py:6: cta (0,0,0) slot y[0]: role w (consumer convention, 2 waits) needs 3 completions but the slot completes 2 times (2 arrivals / count 1): the wait hangs (counting the repeated parity at zc.py:6 as the phase skip the lockstep contents imply; if it is no skip, that wait is stale)
+count_too_small count.py:5: cta (0,0,0) slot done[0]: declared arrival count 0 is not positive
+atomic_outside_intended atomic_outside_intended.py:9: cta (0,0,0) role default: gatomic y: 32 lane(s) outside allocation [0, 127]: offsets [128, 160)
+tx_attribution tx.py:11: cta (0,0,0) slot full[0] role producer: 4 transaction event(s) cannot be attributed to a phase: the role does not arrive on the slot in every waited phase
+tx_attribution tx.py:13: cta (0,0,0) slot full[0] role producer: tma_load not covered by an earlier expect_tx of this role (it issued none on the slot before it)
+segment_edges seg.py:6: cta (0,0,0) role default: gstore y: work batch=1 names no segment (1 segments)
+segment_edges ?: tensor y: 16 intended element(s) never written by a plain store: rows [64, 80)
+cluster_pair_tma cluster.py:10: cta (0,0,0) slot full[0]: phase 1: expect_tx 256 bytes != tma_load 128 bytes landing in it
+cluster_pair_tma cluster.py:12: cta (1,0,0) slot full[0]: 128 TMA bytes land on the slot, but nobody waits on it
+cluster_pair_tma cluster.py:30: cta (1,0,0) slot done[0]: role epilogue of cta (1,0,0) (consumer convention, 1 waits) needs 1 completions but the slot completes 0 times (0 arrivals / count 1): the wait hangs
+cluster_pair_tma cluster.py:10: cta (0,0,0) slot full[0]: phase 1: expect_tx 128 bytes != tma_load 256 bytes landing in it
+cluster_remote_arrive cluster.py:45: cta (0,0,0) slot ready[0]: role waiter of cta (0,0,0) (consumer convention, 1 waits) needs 1 completions but the slot completes 0 times (1 arrivals / count 2): the wait hangs
+cluster_remote_arrive arrive names CTA rank 2, outside the cluster of 2 CTA(s)
+cluster_dsmem_relay cluster.py:51: cta (0,0,0) slot peer_full[0]: phase 1: expect_tx 512 bytes != tma_load 256 bytes landing in it
+cluster_dsmem_relay cluster.py:51: cta (0,0,0) slot peer_full[0]: phase 2: expect_tx 512 bytes != tma_load 0 bytes landing in it
+cluster_multicast cluster.py:70: cta (1,0,0) slot full[0]: phase 1: expect_tx 128 bytes != tma_load 0 bytes landing in it
+cluster_launch grid (3,1,1) is not a multiple of the cluster dims (2,1,1): the launch fails
+cluster_barrier cluster.py:101: cta (0,0,0) slot cluster_barrier[0]: role warp1 of cta (1,0,0) (consumer convention, 1 waits) needs 1 completions but the slot completes 0 times (96 arrivals / count 128): the wait hangs

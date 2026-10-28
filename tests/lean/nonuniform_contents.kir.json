@@ -1,0 +1,457 @@
+{
+ "kir_version": 1,
+ "kernel": "nonuniform_contents",
+ "source": "tests/lean/nonuniform_contents.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "x",
+   "count": {
+    "e": "const",
+    "v": 3,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "y",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "go",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "p2",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "p3",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "a",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:3",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:3",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:3",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r10.py:4",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:5",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:5",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:5",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r10.py:6",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:7",
+     "bar": "p2",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:8",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r10.py:9",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:10",
+     "bar": "p3",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:11",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "z",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r10.py:14",
+     "bar": "go",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:15",
+     "bar": "y",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:16",
+     "bar": "y",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r10.py:17",
+     "bar": "p2",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:18",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:18",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r10.py:19",
+     "bar": "p3",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:20",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:20",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "w",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r10.py:23",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r10.py:24",
+     "bar": "y",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:25",
+     "bar": "go",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "q",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r10.py:28",
+     "bar": "y",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "nonuniform_contents",
+  "inputs": [
+   {
+    "name": "z_joins_at_phase3",
+    "params": {}
+   }
+  ]
+ }
+}

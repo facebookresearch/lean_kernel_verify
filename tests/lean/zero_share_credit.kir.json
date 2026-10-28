@@ -1,0 +1,381 @@
+{
+ "kir_version": 1,
+ "kernel": "zero_share_credit",
+ "source": "tests/lean/zero_share_credit.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "ZFREE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "x",
+   "count": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "y",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "sig",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "qq",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "w",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "zc.py:3",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "zc.py:4",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "zc.py:5",
+     "bar": "y",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "zc.py:6",
+     "bar": "y",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "zc.py:7",
+     "bar": "sig",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "q",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "zc.py:10",
+     "bar": "y",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "zc.py:11",
+     "bar": "y",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "zc.py:12",
+     "bar": "sig",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "zc.py:13",
+     "bar": "qq",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "z",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "ne",
+      "a": {
+       "e": "var",
+       "name": "ZFREE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "zc.py:16",
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": [],
+     "loc": "zc.py:16"
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "zc.py:17",
+     "bar": "qq",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "ne",
+      "a": {
+       "e": "var",
+       "name": "ZFREE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [],
+     "else": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "zc.py:18",
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "zc.py:18"
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "zc.py:19",
+     "bar": "x",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "a",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "const",
+      "v": 4,
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "zc.py:22",
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "zc.py:21"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "zero_share_credit",
+  "inputs": [
+   {
+    "name": "z_after_waits",
+    "params": {
+     "ZFREE": 0
+    }
+   },
+   {
+    "name": "z_free_first",
+    "params": {
+     "ZFREE": 1
+    }
+   }
+  ]
+ }
+}

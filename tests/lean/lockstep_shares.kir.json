@@ -1,0 +1,116 @@
+{
+  "kir_version": 1,
+  "kernel": "lockstep_shares",
+  "source": "tests/lean/lockstep_shares.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "TILES", "type": "i32"}, {"name": "TAIL", "type": "i32"}],
+  "tensors": [],
+  "barriers": [{"name": "done", "count": {"e": "const", "v": 2, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}}],
+  "roles": [
+    {
+      "name": "a",
+      "warps": 1,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "for",
+          "var": "t",
+          "loc": "lockstep_shares.py:4",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {"e": "var", "name": "TILES", "w": 32},
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "event",
+              "ev": "arrive",
+              "loc": "lockstep_shares.py:5",
+              "bar": "done",
+              "idx": {"e": "const", "v": 0, "w": 32}
+            }
+          ]
+        },
+        {
+          "op": "for",
+          "var": "t",
+          "loc": "lockstep_shares.py:6",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {"e": "var", "name": "TAIL", "w": 32},
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "event",
+              "ev": "arrive",
+              "loc": "lockstep_shares.py:7",
+              "bar": "done",
+              "idx": {"e": "const", "v": 0, "w": 32}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "b",
+      "warps": 1,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "for",
+          "var": "t",
+          "loc": "lockstep_shares.py:9",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {"e": "var", "name": "TILES", "w": 32},
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "event",
+              "ev": "arrive",
+              "loc": "lockstep_shares.py:10",
+              "bar": "done",
+              "idx": {"e": "const", "v": 0, "w": 32}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "w",
+      "warps": 1,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "for",
+          "var": "t",
+          "loc": "lockstep_shares.py:12",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {"e": "var", "name": "TILES", "w": 32},
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "event",
+              "ev": "wait",
+              "loc": "lockstep_shares.py:13",
+              "bar": "done",
+              "idx": {"e": "const", "v": 0, "w": 32},
+              "parity": {
+                "e": "bin",
+                "o": "and",
+                "a": {"e": "var", "name": "t", "w": 32},
+                "b": {"e": "const", "v": 1, "w": 32},
+                "w": 32
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "case": {
+    "name": "tails",
+    "inputs": [
+      {"name": "no_tail", "params": {"TILES": 2, "TAIL": 0}},
+      {"name": "partial_tail", "params": {"TILES": 2, "TAIL": 1}},
+      {"name": "full_tail", "params": {"TILES": 2, "TAIL": 2}}
+    ]
+  }
+}

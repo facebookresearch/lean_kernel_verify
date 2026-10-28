@@ -1,0 +1,212 @@
+{
+ "kir_version": 1,
+ "kernel": "count_too_small",
+ "source": "tests/lean/count_too_small.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "TILES",
+   "type": "i32"
+  },
+  {
+   "name": "CNT",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "done",
+   "count": {
+    "e": "var",
+    "name": "CNT",
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "a",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "TILES",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "count.py:5",
+       "bar": "done",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "count.py:4"
+    }
+   ]
+  },
+  {
+   "name": "b",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "TILES",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "count.py:9",
+       "bar": "done",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "count.py:8"
+    }
+   ]
+  },
+  {
+   "name": "w",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "TILES",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "count.py:13",
+       "bar": "done",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "var",
+         "name": "t",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      }
+     ],
+     "loc": "count.py:12"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "count_too_small",
+  "inputs": [
+   {
+    "name": "count2",
+    "params": {
+     "TILES": 2,
+     "CNT": 2
+    }
+   },
+   {
+    "name": "count1",
+    "params": {
+     "TILES": 2,
+     "CNT": 1
+    }
+   },
+   {
+    "name": "count0",
+    "params": {
+     "TILES": 2,
+     "CNT": 0
+    }
+   }
+  ]
+ }
+}

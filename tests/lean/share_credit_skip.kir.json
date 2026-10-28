@@ -1,0 +1,330 @@
+{
+ "kir_version": 1,
+ "kernel": "share_credit_skip",
+ "source": "tests/lean/share_credit_skip.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "T",
+   "type": "i32"
+  },
+  {
+   "name": "USE_S",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "dp",
+   "count": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "sp",
+   "count": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "ca",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "share.py:5",
+       "bar": "dp",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "share.py:6",
+       "bar": "dp",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "share.py:7",
+       "bar": "sp",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "share.py:4"
+    }
+   ]
+  },
+  {
+   "name": "cb",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "share.py:9",
+       "bar": "dp",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "share.py:10",
+       "bar": "dp",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "share.py:11",
+       "bar": "sp",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "share.py:8"
+    }
+   ]
+  },
+  {
+   "name": "mma",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "if",
+       "cond": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "cmp",
+         "o": "ne",
+         "a": {
+          "e": "var",
+          "name": "USE_S",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "w": 1
+        },
+        "b": {
+         "e": "cmp",
+         "o": "sgt",
+         "a": {
+          "e": "var",
+          "name": "t",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "w": 1
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "share.py:15",
+         "bar": "sp",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "bin",
+          "o": "and",
+          "a": {
+           "e": "bin",
+           "o": "sub",
+           "a": {
+            "e": "var",
+            "name": "t",
+            "w": 32
+           },
+           "b": {
+            "e": "const",
+            "v": 1,
+            "w": 32
+           },
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "share.py:14"
+      },
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "share.py:16",
+       "bar": "dp",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "share.py:13"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "share_credit_skip",
+  "inputs": [
+   {
+    "name": "ordered_by_sp",
+    "params": {
+     "T": 3,
+     "USE_S": 1
+    }
+   },
+   {
+    "name": "unordered",
+    "params": {
+     "T": 3,
+     "USE_S": 0
+    }
+   }
+  ]
+ }
+}

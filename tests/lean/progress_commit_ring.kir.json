@@ -1,0 +1,304 @@
+{
+ "kir_version": 1,
+ "kernel": "progress_commit_ring",
+ "source": "tests/lean/progress_commit_ring.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "T",
+   "type": "i32"
+  },
+  {
+   "name": "FLIP",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "ab",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "bc",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "ca",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "a",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "r2.py:4",
+       "bar": "ca",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "xor",
+        "a": {
+         "e": "bin",
+         "o": "and",
+         "a": {
+          "e": "var",
+          "name": "t",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 1,
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "var",
+         "name": "FLIP",
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "r2.py:5",
+       "bar": "ab",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "r2.py:3"
+    }
+   ]
+  },
+  {
+   "name": "b",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "r2.py:8",
+       "bar": "ab",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "var",
+         "name": "t",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "r2.py:9",
+       "bar": "bc",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "r2.py:7"
+    }
+   ]
+  },
+  {
+   "name": "c",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "r2.py:12",
+       "bar": "bc",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "var",
+         "name": "t",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "commit_arrive",
+       "loc": "r2.py:13",
+       "bar": "ca",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "r2.py:11"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "progress_commit_ring",
+  "inputs": [
+   {
+    "name": "producer_parity",
+    "params": {
+     "T": 4,
+     "FLIP": 1
+    }
+   },
+   {
+    "name": "consumer_parity",
+    "params": {
+     "T": 4,
+     "FLIP": 0
+    }
+   }
+  ]
+ }
+}

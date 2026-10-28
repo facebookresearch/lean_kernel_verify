@@ -1,0 +1,129 @@
+{
+  "kir_version": 1,
+  "kernel": "m2_tx_skip_notx",
+  "source": "tests/lean/m2c_notx_skip.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [],
+  "tensors": [],
+  "barriers": [
+    {"name": "full", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}},
+    {"name": "empty", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}},
+    {"name": "sig", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}}
+  ],
+  "roles": [
+    {
+      "name": "producer",
+      "warps": 1,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "for",
+          "var": "k",
+          "loc": "m2.py:10",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {"e": "const", "v": 3, "w": 32},
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "event",
+              "ev": "wait",
+              "loc": "m2.py:11",
+              "bar": "empty",
+              "idx": {"e": "const", "v": 0, "w": 32},
+              "parity": {
+                "e": "bin",
+                "o": "xor",
+                "w": 32,
+                "a": {
+                  "e": "bin",
+                  "o": "and",
+                  "w": 32,
+                  "a": {"e": "var", "name": "k", "w": 32},
+                  "b": {"e": "const", "v": 1, "w": 32}
+                },
+                "b": {"e": "const", "v": 1, "w": 32}
+              }
+            },
+            {
+              "op": "event",
+              "ev": "arrive",
+              "loc": "m2.py:12",
+              "bar": "full",
+              "idx": {"e": "const", "v": 0, "w": 32}
+            },
+            {
+              "op": "event",
+              "ev": "arrive",
+              "loc": "m2.py:14",
+              "bar": "sig",
+              "idx": {"e": "const", "v": 0, "w": 32}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "consumer",
+      "warps": 4,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "event",
+          "ev": "wait",
+          "loc": "m2.py:20",
+          "bar": "full",
+          "idx": {"e": "const", "v": 0, "w": 32},
+          "parity": {"e": "const", "v": 0, "w": 32}
+        },
+        {
+          "op": "event",
+          "ev": "arrive",
+          "loc": "m2.py:21",
+          "bar": "empty",
+          "idx": {"e": "const", "v": 0, "w": 32}
+        },
+        {
+          "op": "event",
+          "ev": "wait",
+          "loc": "m2.py:22",
+          "bar": "sig",
+          "idx": {"e": "const", "v": 0, "w": 32},
+          "parity": {"e": "const", "v": 0, "w": 32}
+        },
+        {
+          "op": "event",
+          "ev": "wait",
+          "loc": "m2.py:23",
+          "bar": "sig",
+          "idx": {"e": "const", "v": 0, "w": 32},
+          "parity": {"e": "const", "v": 1, "w": 32}
+        },
+        {
+          "op": "event",
+          "ev": "arrive",
+          "loc": "m2.py:24",
+          "bar": "empty",
+          "idx": {"e": "const", "v": 0, "w": 32}
+        },
+        {
+          "op": "event",
+          "ev": "wait",
+          "loc": "m2.py:25",
+          "bar": "full",
+          "idx": {"e": "const", "v": 0, "w": 32},
+          "parity": {"e": "const", "v": 0, "w": 32}
+        },
+        {
+          "op": "event",
+          "ev": "wait",
+          "loc": "m2.py:26",
+          "bar": "sig",
+          "idx": {"e": "const", "v": 0, "w": 32},
+          "parity": {"e": "const", "v": 0, "w": 32}
+        }
+      ]
+    }
+  ],
+  "case": {"name": "m2", "inputs": [{"name": "one", "params": {}}]}
+}

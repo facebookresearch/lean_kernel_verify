@@ -1,0 +1,35 @@
+{
+  "kir_version": 1,
+  "kernel": "parity_two",
+  "source": "tests/lean/parity_two.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "K", "type": "i32"}, {"name": "STAGES", "type": "i32"}],
+  "tensors": [],
+  "barriers": [
+    {"name": "ready", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "var", "name": "STAGES", "w": 32}}
+  ],
+  "roles": [
+    {"name": "producer", "warps": 1, "threads_per_issue": 1, "body": [
+      {"op": "for", "var": "k", "loc": "parity_two.py:10",
+       "lb": {"e": "const", "v": 0, "w": 32}, "ub": {"e": "var", "name": "K", "w": 32}, "step": {"e": "const", "v": 1, "w": 32},
+       "body": [
+        {"op": "event", "ev": "arrive", "bar": "ready", "loc": "parity_two.py:11",
+         "idx": {"e": "bin", "o": "srem", "w": 32, "a": {"e": "var", "name": "k", "w": 32}, "b": {"e": "var", "name": "STAGES", "w": 32}}}
+      ]}
+    ]},
+    {"name": "consumer", "warps": 4, "threads_per_issue": 1, "body": [
+      {"op": "for", "var": "k", "loc": "parity_two.py:20",
+       "lb": {"e": "const", "v": 0, "w": 32}, "ub": {"e": "var", "name": "K", "w": 32}, "step": {"e": "const", "v": 1, "w": 32},
+       "body": [
+        {"op": "event", "ev": "wait", "bar": "ready", "loc": "parity_two.py:21",
+         "idx": {"e": "bin", "o": "srem", "w": 32, "a": {"e": "var", "name": "k", "w": 32}, "b": {"e": "var", "name": "STAGES", "w": 32}},
+         "parity": {"e": "bin", "o": "sdiv", "w": 32, "a": {"e": "var", "name": "k", "w": 32}, "b": {"e": "var", "name": "STAGES", "w": 32}}}
+      ]}
+    ]}
+  ],
+  "case": {"name": "phase", "inputs": [
+    {"name": "k2", "params": {"K": 2, "STAGES": 1}},
+    {"name": "k3", "params": {"K": 3, "STAGES": 1}}
+  ]}
+}

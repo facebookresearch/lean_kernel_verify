@@ -1,0 +1,495 @@
+{
+ "kir_version": 1,
+ "kernel": "partial_issue",
+ "source": "tests/lean/p1/partial_issue.kir.json",
+ "ir": "cute-mlir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "M",
+   "type": "i32"
+  },
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "go",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "drain",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "mma",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "tmem",
+     "loc": "partial_issue.py:10",
+     "inst": "cp",
+     "warp": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "rects": [
+      {
+       "use": "data",
+       "write": true,
+       "lane": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "nlanes": 128,
+       "col": {
+        "e": "const",
+        "v": 64,
+        "w": 32
+       },
+       "ncols": 4
+      }
+     ]
+    },
+    {
+     "op": "event",
+     "ev": "commit_arrive",
+     "loc": "partial_issue.py:11",
+     "bar": "go",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "sle",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "partial_issue.py:12",
+       "bar": "drain",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "partial_issue.py:13",
+       "inst": "cp",
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "data",
+         "write": true,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 64,
+          "w": 32
+         },
+         "ncols": 4
+        }
+       ]
+      }
+     ],
+     "else": [],
+     "loc": "partial_issue.py:12"
+    }
+   ]
+  },
+  {
+   "name": "c2",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "partial_issue.py:20",
+     "bar": "go",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "tmem",
+     "loc": "partial_issue.py:21",
+     "inst": "ld",
+     "warp": {
+      "e": "const",
+      "v": 2,
+      "w": 32
+     },
+     "rects": [
+      {
+       "use": "data",
+       "write": false,
+       "lane": {
+        "e": "bin",
+        "o": "mul",
+        "a": {
+         "e": "bin",
+         "o": "urem",
+         "a": {
+          "e": "const",
+          "v": 2,
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 4,
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 32,
+         "w": 32
+        },
+        "w": 32
+       },
+       "nlanes": 32,
+       "col": {
+        "e": "const",
+        "v": 64,
+        "w": 32
+       },
+       "ncols": 32
+      }
+     ]
+    },
+    {
+     "op": "event",
+     "ev": "tmem_wait",
+     "loc": "partial_issue.py:22",
+     "ld": true
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "named_bar",
+       "loc": "partial_issue.py:23",
+       "id": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "count": {
+        "e": "const",
+        "v": 64,
+        "w": 32
+       },
+       "sync": true
+      }
+     ],
+     "else": [],
+     "loc": "partial_issue.py:23"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "sle",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "partial_issue.py:24",
+       "bar": "drain",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": [],
+     "loc": "partial_issue.py:24"
+    }
+   ]
+  },
+  {
+   "name": "c3",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "sle",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "partial_issue.py:30",
+       "bar": "go",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": [],
+     "loc": "partial_issue.py:30"
+    },
+    {
+     "op": "event",
+     "ev": "tmem",
+     "loc": "partial_issue.py:31",
+     "inst": "ld",
+     "warp": {
+      "e": "const",
+      "v": 3,
+      "w": 32
+     },
+     "rects": [
+      {
+       "use": "data",
+       "write": false,
+       "lane": {
+        "e": "bin",
+        "o": "mul",
+        "a": {
+         "e": "bin",
+         "o": "urem",
+         "a": {
+          "e": "const",
+          "v": 3,
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 4,
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 32,
+         "w": 32
+        },
+        "w": 32
+       },
+       "nlanes": 32,
+       "col": {
+        "e": "const",
+        "v": 64,
+        "w": 32
+       },
+       "ncols": 32
+      }
+     ]
+    },
+    {
+     "op": "event",
+     "ev": "tmem_wait",
+     "loc": "partial_issue.py:32",
+     "ld": true
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "named_bar",
+       "loc": "partial_issue.py:33",
+       "id": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "count": {
+        "e": "const",
+        "v": 64,
+        "w": 32
+       },
+       "sync": true
+      }
+     ],
+     "else": [],
+     "loc": "partial_issue.py:33"
+    }
+   ]
+  }
+ ],
+ "tmem": {
+  "cols": 512,
+  "base": "zero"
+ },
+ "case": {
+  "name": "partial_issue",
+  "inputs": [
+   {
+    "name": "one_thread_arrives",
+    "params": {
+     "M": 0,
+     "MODE": 0
+    }
+   },
+   {
+    "name": "bar_sync_then_one_arrives",
+    "params": {
+     "M": 0,
+     "MODE": 1
+    }
+   },
+   {
+    "name": "one_thread_waits",
+    "params": {
+     "M": 0,
+     "MODE": 2
+    }
+   }
+  ]
+ }
+}

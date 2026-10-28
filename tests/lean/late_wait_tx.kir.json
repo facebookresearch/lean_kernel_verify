@@ -1,0 +1,363 @@
+{
+ "kir_version": 1,
+ "kernel": "late_wait_tx",
+ "source": "tests/lean/late_wait_tx.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "B3",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "a",
+   "kind": "desc",
+   "elem_bytes": 2,
+   "shape": [
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false,
+   "box": [
+    64,
+    32
+   ]
+  }
+ ],
+ "barriers": [
+  {
+   "name": "tfull",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "sig",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "producer",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "expect_tx",
+     "loc": "late_tx.py:5",
+     "bar": "tfull",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "bytes": {
+      "e": "const",
+      "v": 4096,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "late_tx.py:5",
+     "bar": "tfull",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "tma_load",
+     "loc": "late_tx.py:6",
+     "desc": "a",
+     "coords": [
+      {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      }
+     ],
+     "bar": "tfull",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "expect_tx",
+     "loc": "late_tx.py:8",
+     "bar": "tfull",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "bytes": {
+      "e": "const",
+      "v": 4096,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "late_tx.py:8",
+     "bar": "tfull",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "tma_load",
+     "loc": "late_tx.py:9",
+     "desc": "a",
+     "coords": [
+      {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      {
+       "e": "const",
+       "v": 32,
+       "w": 32
+      }
+     ],
+     "bar": "tfull",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "expect_tx",
+     "loc": "late_tx.py:11",
+     "bar": "tfull",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "bytes": {
+      "e": "var",
+      "name": "B3",
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "late_tx.py:11",
+     "bar": "tfull",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "tma_load",
+     "loc": "late_tx.py:12",
+     "desc": "a",
+     "coords": [
+      {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      {
+       "e": "const",
+       "v": 64,
+       "w": 32
+      }
+     ],
+     "bar": "tfull",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "observer",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "late_tx.py:20",
+     "bar": "tfull",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "late_tx.py:21",
+     "bar": "tfull",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "late_tx.py:22",
+     "bar": "sig",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "late",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "late_tx.py:25",
+     "bar": "sig",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "late_tx.py:26",
+     "bar": "tfull",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "late_wait_tx",
+  "inputs": [
+   {
+    "name": "bytes_match",
+    "params": {
+     "B3": 4096
+    }
+   },
+   {
+    "name": "bytes_mismatch",
+    "params": {
+     "B3": 8192
+    }
+   }
+  ]
+ }
+}

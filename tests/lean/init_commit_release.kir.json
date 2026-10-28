@@ -1,0 +1,452 @@
+{
+ "kir_version": 1,
+ "kernel": "init_commit_release",
+ "source": "tests/lean/init_commit_release.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "T",
+   "type": "i32"
+  },
+  {
+   "name": "INITC",
+   "type": "i32"
+  },
+  {
+   "name": "RELC",
+   "type": "i32"
+  },
+  {
+   "name": "EARLY",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "ring",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "go",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "filled",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "init",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "ne",
+      "a": {
+       "e": "var",
+       "name": "INITC",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "commit_arrive",
+       "loc": "r5.py:3",
+       "bar": "ring",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "r5.py:4",
+       "bar": "ring",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "r5.py:2"
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r5.py:5",
+     "bar": "go",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "reducer",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r5.py:8",
+     "bar": "go",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "r5.py:10",
+       "bar": "ring",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "var",
+         "name": "t",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "r5.py:11",
+       "bar": "filled",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "r5.py:9"
+    }
+   ]
+  },
+  {
+   "name": "releaser",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r5.py:14",
+     "bar": "go",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "ne",
+      "a": {
+       "e": "var",
+       "name": "EARLY",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "commit_arrive",
+       "loc": "r5.py:15",
+       "bar": "ring",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": [],
+     "loc": "r5.py:15"
+    },
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "r5.py:17",
+       "bar": "filled",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "var",
+         "name": "t",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "slt",
+        "a": {
+         "e": "var",
+         "name": "t",
+         "w": 32
+        },
+        "b": {
+         "e": "bin",
+         "o": "sub",
+         "a": {
+          "e": "var",
+          "name": "T",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 1,
+          "w": 32
+         },
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "if",
+         "cond": {
+          "e": "cmp",
+          "o": "ne",
+          "a": {
+           "e": "var",
+           "name": "RELC",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 0,
+           "w": 32
+          },
+          "w": 1
+         },
+         "then": [
+          {
+           "op": "event",
+           "ev": "commit_arrive",
+           "loc": "r5.py:19",
+           "bar": "ring",
+           "idx": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           }
+          }
+         ],
+         "else": [
+          {
+           "op": "event",
+           "ev": "arrive",
+           "loc": "r5.py:20",
+           "bar": "ring",
+           "idx": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           }
+          }
+         ],
+         "loc": "r5.py:18"
+        }
+       ],
+       "else": [],
+       "loc": "r5.py:18"
+      }
+     ],
+     "loc": "r5.py:16"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "init_commit_release",
+  "inputs": [
+   {
+    "name": "commit_release",
+    "params": {
+     "T": 3,
+     "INITC": 0,
+     "RELC": 1,
+     "EARLY": 0
+    }
+   },
+   {
+    "name": "plain_release",
+    "params": {
+     "T": 3,
+     "INITC": 0,
+     "RELC": 0,
+     "EARLY": 0
+    }
+   },
+   {
+    "name": "init_is_commit",
+    "params": {
+     "T": 3,
+     "INITC": 1,
+     "RELC": 1,
+     "EARLY": 0
+    }
+   },
+   {
+    "name": "init_is_commit_early_release",
+    "params": {
+     "T": 3,
+     "INITC": 1,
+     "RELC": 1,
+     "EARLY": 1
+    }
+   }
+  ]
+ }
+}

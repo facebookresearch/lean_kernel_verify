@@ -1,0 +1,270 @@
+{
+ "kir_version": 1,
+ "kernel": "cluster_barrier",
+ "source": "tests/lean/cluster_barrier.kir.json",
+ "ir": "cute-mlir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "cluster": [
+  2,
+  1,
+  1
+ ],
+ "params": [
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "cluster_barrier",
+   "count": {
+    "e": "const",
+    "v": 128,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "warp0",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "let",
+     "var": "cluster_barrier_parity",
+     "expr": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "loc": "cluster.py:100"
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "cluster.py:100",
+     "bar": "cluster_barrier",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "n": 32,
+     "cta": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "cluster.py:100",
+     "bar": "cluster_barrier",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "var",
+      "name": "cluster_barrier_parity",
+      "w": 32
+     },
+     "cta": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "let",
+     "var": "cluster_barrier_parity",
+     "expr": {
+      "e": "bin",
+      "o": "xor",
+      "a": {
+       "e": "var",
+       "name": "cluster_barrier_parity",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 32
+     },
+     "loc": "cluster.py:100"
+    }
+   ]
+  },
+  {
+   "name": "warp1",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "let",
+     "var": "cluster_barrier_parity",
+     "expr": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "loc": "cluster.py:101"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "bin",
+      "o": "and",
+      "w": 1,
+      "a": {
+       "e": "cmp",
+       "o": "eq",
+       "a": {
+        "e": "var",
+        "name": "MODE",
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "w": 1
+      },
+      "b": {
+       "e": "cmp",
+       "o": "eq",
+       "a": {
+        "e": "bin",
+        "o": "urem",
+        "a": {
+         "e": "pid",
+         "axis": 0,
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 2,
+         "w": 32
+        },
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "w": 1
+      }
+     },
+     "then": [],
+     "else": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "cluster.py:101",
+       "bar": "cluster_barrier",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "n": 32,
+       "cta": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ]
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "cluster.py:101",
+     "bar": "cluster_barrier",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "var",
+      "name": "cluster_barrier_parity",
+      "w": 32
+     },
+     "cta": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "let",
+     "var": "cluster_barrier_parity",
+     "expr": {
+      "e": "bin",
+      "o": "xor",
+      "a": {
+       "e": "var",
+       "name": "cluster_barrier_parity",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 32
+     },
+     "loc": "cluster.py:101"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "cluster_barrier",
+  "inputs": [
+   {
+    "name": "ok",
+    "params": {
+     "MODE": 0
+    }
+   },
+   {
+    "name": "follower_skips_arrive",
+    "params": {
+     "MODE": 1
+    }
+   }
+  ]
+ }
+}

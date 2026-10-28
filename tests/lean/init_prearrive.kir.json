@@ -1,0 +1,401 @@
+{
+ "kir_version": 1,
+ "kernel": "init_prearrive",
+ "source": "tests/lean/init_prearrive.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "T",
+   "type": "i32"
+  },
+  {
+   "name": "DOUBLE",
+   "type": "i32"
+  },
+  {
+   "name": "EARLY",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "ring",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "go",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "filled",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "init",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "ring.py:3",
+     "bar": "ring",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "ne",
+      "a": {
+       "e": "var",
+       "name": "DOUBLE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "ring.py:4",
+       "bar": "ring",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": [],
+     "loc": "ring.py:4"
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "ring.py:5",
+     "bar": "go",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "reducer",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "ring.py:8",
+     "bar": "go",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "ring.py:10",
+       "bar": "ring",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "var",
+         "name": "t",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "ring.py:11",
+       "bar": "filled",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "ring.py:9"
+    }
+   ]
+  },
+  {
+   "name": "releaser",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "ne",
+      "a": {
+       "e": "var",
+       "name": "EARLY",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "ring.py:13",
+       "bar": "ring",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": [],
+     "loc": "ring.py:13"
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "ring.py:14",
+     "bar": "go",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "ring.py:16",
+       "bar": "filled",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "var",
+         "name": "t",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "slt",
+        "a": {
+         "e": "var",
+         "name": "t",
+         "w": 32
+        },
+        "b": {
+         "e": "bin",
+         "o": "sub",
+         "a": {
+          "e": "var",
+          "name": "T",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 1,
+          "w": 32
+         },
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "ring.py:17",
+         "bar": "ring",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "ring.py:17"
+      }
+     ],
+     "loc": "ring.py:15"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "init_prearrive",
+  "inputs": [
+   {
+    "name": "pre_arrive",
+    "params": {
+     "T": 3,
+     "DOUBLE": 0,
+     "EARLY": 0
+    }
+   },
+   {
+    "name": "double_pre_arrive",
+    "params": {
+     "T": 3,
+     "DOUBLE": 1,
+     "EARLY": 0
+    }
+   },
+   {
+    "name": "early_release",
+    "params": {
+     "T": 3,
+     "DOUBLE": 0,
+     "EARLY": 1
+    }
+   }
+  ]
+ }
+}

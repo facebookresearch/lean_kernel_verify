@@ -1,0 +1,38 @@
+# Report lines run_all.sh checks for the P1 fixtures besides expected_messages.txt:
+# <fixture> <text> must occur in the fixture's Lean output, <fixture> !<text> must not.
+s2t_drain !roles mma / compute
+s2t_drain !then tcgen05.cp at s2t_drain.py:15
+s2t_race 19 TMEM accesses, 10 conflicting pair(s) classified (0 ordered only under the lockstep contents), 0 named-barrier slot(s), 0 blocked wait(s)
+split_drain 0 conflicting pair(s) classified (0 ordered only under the lockstep contents)
+split_drain !NOTES
+lockstep_only 4 conflicting pair(s) classified (2 ordered only under the lockstep contents)
+lockstep_only !NOTES waited_credit P1-1
+lockstep_only 17 conflicting pair(s) classified (6 ordered only under the lockstep contents)
+lockstep_only !not decided on this input: 6 conflicting pair(s)
+named_bars !NOTES bar_sync P1-1
+named_bars 1 named-barrier slot(s) (inconsistent: ids [1])
+same_role !NOTES pipelined P1-1
+same_role !NOTES mma_d_commit_cp P1-1
+cross_warp NOTES no_sync P1-1 1
+cross_warp !NOTES bar_sync P1-1
+partial_issue !roles mma / c2
+partial_issue !NOTES
+partial_issue 1 named-barrier slot(s), 0 blocked wait(s)
+handoff !NOTES
+meta_oob_p1 so P1-1 is not decided
+partial_event_control !NOTES
+partial_event_control 0 conflicting pair(s) classified (0 ordered only under the lockstep contents)
+partial_sync 2 conflicting pair(s) classified (2 ordered only under the lockstep contents), 1 named-barrier slot(s), 0 blocked wait(s)
+partial_sync 0 conflicting pair(s) classified (0 ordered only under the lockstep contents), 1 named-barrier slot(s), 0 blocked wait(s)
+partial_split 3 conflicting pair(s) classified (3 ordered only under the lockstep contents)
+partial_split !NOTES
+partial_named 2 conflicting pair(s) classified (0 ordered only under the lockstep contents)
+partial_named !NOTES
+lockstep_only UNDECIDED credit_two_mblocks P1-1
+lockstep_only !UNDECIDED credit_and_race P1-1
+named_bars UNDECIDED inconsistent P1-1
+named_bars !UNDECIDED no_barrier P1-1
+s2t_race !UNDECIDED
+meta_oob_p1 UNDECIDED oob P1-1
+cluster_pair grid (2,1,1) in clusters (2,1,1): 2 CTA(s) x 2 role(s), 35 events; P1: 9 TMEM accesses, 0 conflicting pair(s) classified
+cluster_pair !NOTES

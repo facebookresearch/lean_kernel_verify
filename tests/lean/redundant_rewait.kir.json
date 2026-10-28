@@ -1,0 +1,328 @@
+{
+ "kir_version": 1,
+ "kernel": "redundant_rewait",
+ "source": "tests/lean/redundant_rewait.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "B",
+   "type": "i32"
+  },
+  {
+   "name": "STALE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "empty",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "full",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "mma",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "b",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "B",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "loc": "redundant_rewait.py:3",
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "redundant_rewait.py:4",
+       "bar": "empty",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "xor",
+        "a": {
+         "e": "bin",
+         "o": "and",
+         "a": {
+          "e": "var",
+          "name": "b",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 1,
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "redundant_rewait.py:5",
+       "bar": "empty",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "xor",
+        "a": {
+         "e": "bin",
+         "o": "and",
+         "a": {
+          "e": "var",
+          "name": "b",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 1,
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "commit_arrive",
+       "loc": "redundant_rewait.py:6",
+       "bar": "full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "epilogue",
+   "warps": 4,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "b",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "B",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "loc": "redundant_rewait.py:9",
+     "body": [
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "ne",
+        "a": {
+         "e": "var",
+         "name": "STALE",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        "w": 1
+       },
+       "loc": "redundant_rewait.py:10",
+       "then": [
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "redundant_rewait.py:11",
+         "bar": "empty",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        },
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "redundant_rewait.py:12",
+         "bar": "full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "bin",
+          "o": "and",
+          "a": {
+           "e": "var",
+           "name": "b",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 32
+         }
+        }
+       ],
+       "else": [
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "redundant_rewait.py:14",
+         "bar": "full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "bin",
+          "o": "and",
+          "a": {
+           "e": "var",
+           "name": "b",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 32
+         }
+        },
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "redundant_rewait.py:15",
+         "bar": "empty",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "redundant_rewait",
+  "inputs": [
+   {
+    "name": "b3",
+    "params": {
+     "B": 3,
+     "STALE": 0
+    }
+   },
+   {
+    "name": "b1_stale",
+    "params": {
+     "B": 1,
+     "STALE": 1
+    }
+   },
+   {
+    "name": "b3_stale",
+    "params": {
+     "B": 3,
+     "STALE": 1
+    }
+   }
+  ]
+ }
+}

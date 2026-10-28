@@ -1,0 +1,282 @@
+{
+ "kir_version": 1,
+ "kernel": "meta_masked_load",
+ "source": "tests/lean/meta_masked_load.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "N_TILES",
+   "type": "i32"
+  },
+  {
+   "name": "MASKED",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "tiles",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "var",
+     "name": "N_TILES",
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": true
+  },
+  {
+   "name": "data",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "const",
+     "v": 16,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false
+  }
+ ],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "default",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "let",
+     "var": "v",
+     "expr": {
+      "e": "const",
+      "v": -1,
+      "w": 32
+     },
+     "loc": "r6.py:3"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "ne",
+      "a": {
+       "e": "var",
+       "name": "MASKED",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "let",
+       "var": "v",
+       "expr": {
+        "e": "select",
+        "c": {
+         "e": "cmp",
+         "o": "slt",
+         "a": {
+          "e": "pid",
+          "axis": 0,
+          "w": 32
+         },
+         "b": {
+          "e": "var",
+          "name": "N_TILES",
+          "w": 32
+         },
+         "w": 1
+        },
+        "a": {
+         "e": "load",
+         "tensor": "tiles",
+         "index": [
+          {
+           "e": "select",
+           "c": {
+            "e": "cmp",
+            "o": "slt",
+            "a": {
+             "e": "pid",
+             "axis": 0,
+             "w": 32
+            },
+            "b": {
+             "e": "var",
+             "name": "N_TILES",
+             "w": 32
+            },
+            "w": 1
+           },
+           "a": {
+            "e": "pid",
+            "axis": 0,
+            "w": 32
+           },
+           "b": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           },
+           "w": 32
+          }
+         ],
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": -1,
+         "w": 32
+        },
+        "w": 32
+       },
+       "loc": "r6.py:5"
+      }
+     ],
+     "else": [
+      {
+       "op": "let",
+       "var": "v",
+       "expr": {
+        "e": "load",
+        "tensor": "tiles",
+        "index": [
+         {
+          "e": "pid",
+          "axis": 0,
+          "w": 32
+         }
+        ],
+        "w": 32
+       },
+       "loc": "r6.py:6"
+      }
+     ],
+     "loc": "r6.py:4"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "sge",
+      "a": {
+       "e": "var",
+       "name": "v",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "gload",
+       "loc": "r6.py:8",
+       "tensor": "data",
+       "offsets": {
+        "t": "splat",
+        "a": {
+         "e": "var",
+         "name": "v",
+         "w": 32
+        },
+        "shape": [
+         1
+        ],
+        "w": 32
+       },
+       "mask": null
+      }
+     ],
+     "else": [],
+     "loc": "r6.py:7"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "meta_masked_load",
+  "inputs": [
+   {
+    "name": "masked_empty",
+    "params": {
+     "N_TILES": 0,
+     "MASKED": 1
+    },
+    "metadata": {
+     "tiles": []
+    }
+   },
+   {
+    "name": "masked_one_tile",
+    "params": {
+     "N_TILES": 1,
+     "MASKED": 1
+    },
+    "metadata": {
+     "tiles": [
+      3
+     ]
+    }
+   },
+   {
+    "name": "unmasked_empty",
+    "params": {
+     "N_TILES": 0,
+     "MASKED": 0
+    },
+    "metadata": {
+     "tiles": []
+    }
+   }
+  ]
+ }
+}

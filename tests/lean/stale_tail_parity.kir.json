@@ -1,0 +1,60 @@
+{
+  "kir_version": 1,
+  "kernel": "stale_tail_parity",
+  "source": "tests/lean/stale_tail_parity.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "TILES", "type": "i32"}, {"name": "K", "type": "i32"}],
+  "tensors": [
+    {"name": "a", "kind": "desc", "elem_bytes": 2,
+     "shape": [{"e": "const", "v": 4096, "w": 32}, {"e": "const", "v": 4096, "w": 32}],
+     "strides": [{"e": "const", "v": 4096, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+     "segments": null, "role": "input", "metadata": false, "box": [64, 32]}
+  ],
+  "barriers": [
+    {"name": "full", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}},
+    {"name": "empty", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}}
+  ],
+  "roles": [
+    {"name": "producer", "warps": 1, "threads_per_issue": 1, "body": [
+      {"op": "let", "var": "g", "expr": {"e": "const", "v": 0, "w": 32}},
+      {"op": "for", "var": "t", "loc": "stale_tail_parity.py:10",
+       "lb": {"e": "const", "v": 0, "w": 32}, "ub": {"e": "var", "name": "TILES", "w": 32}, "step": {"e": "const", "v": 1, "w": 32},
+       "body": [
+        {"op": "for", "var": "k", "loc": "stale_tail_parity.py:11",
+         "lb": {"e": "const", "v": 0, "w": 32}, "ub": {"e": "var", "name": "K", "w": 32}, "step": {"e": "const", "v": 1, "w": 32},
+         "body": [
+          {"op": "event", "ev": "wait", "bar": "empty", "loc": "stale_tail_parity.py:12", "idx": {"e": "const", "v": 0, "w": 32},
+           "parity": {"e": "bin", "o": "xor", "w": 32,
+                      "a": {"e": "bin", "o": "and", "w": 32, "a": {"e": "var", "name": "g", "w": 32}, "b": {"e": "const", "v": 1, "w": 32}},
+                      "b": {"e": "const", "v": 1, "w": 32}}},
+          {"op": "event", "ev": "expect_tx", "bar": "full", "loc": "stale_tail_parity.py:13", "idx": {"e": "const", "v": 0, "w": 32},
+           "bytes": {"e": "const", "v": 4096, "w": 32}},
+          {"op": "event", "ev": "arrive", "bar": "full", "loc": "stale_tail_parity.py:13", "idx": {"e": "const", "v": 0, "w": 32}},
+          {"op": "event", "ev": "tma_load", "desc": "a", "bar": "full", "loc": "stale_tail_parity.py:14", "idx": {"e": "const", "v": 0, "w": 32},
+           "coords": [{"e": "bin", "o": "mul", "w": 32, "addr": true, "a": {"e": "var", "name": "t", "w": 32}, "b": {"e": "const", "v": 64, "w": 32}},
+                      {"e": "bin", "o": "mul", "w": 32, "addr": true, "a": {"e": "var", "name": "k", "w": 32}, "b": {"e": "const", "v": 32, "w": 32}}]},
+          {"op": "let", "var": "g", "loc": "stale_tail_parity.py:15",
+           "expr": {"e": "bin", "o": "add", "w": 32, "a": {"e": "var", "name": "g", "w": 32}, "b": {"e": "const", "v": 1, "w": 32}}}
+        ]}
+      ]}
+    ]},
+    {"name": "consumer", "warps": 4, "threads_per_issue": 1, "body": [
+      {"op": "for", "var": "t", "loc": "stale_tail_parity.py:20",
+       "lb": {"e": "const", "v": 0, "w": 32}, "ub": {"e": "var", "name": "TILES", "w": 32}, "step": {"e": "const", "v": 1, "w": 32},
+       "body": [
+        {"op": "for", "var": "k", "loc": "stale_tail_parity.py:21",
+         "lb": {"e": "const", "v": 0, "w": 32}, "ub": {"e": "var", "name": "K", "w": 32}, "step": {"e": "const", "v": 1, "w": 32},
+         "body": [
+          {"op": "event", "ev": "wait", "bar": "full", "loc": "stale_tail_parity.py:22", "idx": {"e": "const", "v": 0, "w": 32},
+           "parity": {"e": "bin", "o": "and", "w": 32, "a": {"e": "var", "name": "k", "w": 32}, "b": {"e": "const", "v": 1, "w": 32}}},
+          {"op": "event", "ev": "arrive", "bar": "empty", "loc": "stale_tail_parity.py:23", "idx": {"e": "const", "v": 0, "w": 32}}
+        ]}
+      ]}
+    ]}
+  ],
+  "case": {"name": "persistent", "inputs": [
+    {"name": "k_even", "params": {"TILES": 2, "K": 2}},
+    {"name": "k_odd", "params": {"TILES": 2, "K": 3}}
+  ]}
+}

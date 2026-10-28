@@ -1,0 +1,790 @@
+{
+ "kir_version": 1,
+ "kernel": "lockstep_only",
+ "source": "tests/lean/p1/lockstep_only.kir.json",
+ "ir": "cute-mlir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "M",
+   "type": "i32"
+  },
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "go",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "drain",
+   "count": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "ready",
+   "count": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "mma",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "m",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "M",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "ne",
+        "a": {
+         "e": "var",
+         "name": "MODE",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "if",
+         "cond": {
+          "e": "cmp",
+          "o": "sge",
+          "a": {
+           "e": "var",
+           "name": "m",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 1
+         },
+         "then": [
+          {
+           "op": "event",
+           "ev": "wait",
+           "loc": "lockstep_only.py:10",
+           "bar": "drain",
+           "idx": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           },
+           "parity": {
+            "e": "bin",
+            "o": "and",
+            "a": {
+             "e": "bin",
+             "o": "sub",
+             "a": {
+              "e": "var",
+              "name": "m",
+              "w": 32
+             },
+             "b": {
+              "e": "const",
+              "v": 1,
+              "w": 32
+             },
+             "w": 32
+            },
+            "b": {
+             "e": "const",
+             "v": 1,
+             "w": 32
+            },
+            "w": 32
+           }
+          }
+         ],
+         "else": [],
+         "loc": "lockstep_only.py:10"
+        },
+        {
+         "op": "if",
+         "cond": {
+          "e": "cmp",
+          "o": "eq",
+          "a": {
+           "e": "var",
+           "name": "MODE",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 3,
+           "w": 32
+          },
+          "w": 1
+         },
+         "then": [
+          {
+           "op": "event",
+           "ev": "tmem",
+           "loc": "lockstep_only.py:13",
+           "inst": "cp",
+           "warp": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           },
+           "rects": [
+            {
+             "use": "data",
+             "write": true,
+             "lane": {
+              "e": "const",
+              "v": 0,
+              "w": 32
+             },
+             "nlanes": 128,
+             "col": {
+              "e": "const",
+              "v": 200,
+              "w": 32
+             },
+             "ncols": 4
+            }
+           ]
+          }
+         ],
+         "else": [],
+         "loc": "lockstep_only.py:13"
+        },
+        {
+         "op": "event",
+         "ev": "tmem",
+         "loc": "lockstep_only.py:11",
+         "inst": "cp",
+         "warp": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "rects": [
+          {
+           "use": "data",
+           "write": true,
+           "lane": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           },
+           "nlanes": 128,
+           "col": {
+            "e": "const",
+            "v": 80,
+            "w": 32
+           },
+           "ncols": 4
+          }
+         ]
+        },
+        {
+         "op": "event",
+         "ev": "commit_arrive",
+         "loc": "lockstep_only.py:12",
+         "bar": "go",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "lockstep_only.py:10"
+      }
+     ],
+     "loc": "lockstep_only.py:9"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "lockstep_only.py:40",
+       "inst": "cp",
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "data",
+         "write": true,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "ncols": 4
+        }
+       ]
+      },
+      {
+       "op": "event",
+       "ev": "commit_arrive",
+       "loc": "lockstep_only.py:41",
+       "bar": "ready",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": [],
+     "loc": "lockstep_only.py:40"
+    }
+   ]
+  },
+  {
+   "name": "credit",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "m",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "M",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "eq",
+        "a": {
+         "e": "var",
+         "name": "MODE",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 2,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "lockstep_only.py:30",
+         "bar": "go",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "bin",
+          "o": "and",
+          "a": {
+           "e": "var",
+           "name": "m",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "lockstep_only.py:30"
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "ne",
+        "a": {
+         "e": "var",
+         "name": "MODE",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "lockstep_only.py:31",
+         "bar": "drain",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "lockstep_only.py:31"
+      }
+     ],
+     "loc": "lockstep_only.py:29"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lockstep_only.py:50",
+       "bar": "ready",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lockstep_only.py:51",
+       "bar": "ready",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": [],
+     "loc": "lockstep_only.py:50"
+    }
+   ]
+  },
+  {
+   "name": "reader",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "m",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "M",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "ne",
+        "a": {
+         "e": "var",
+         "name": "MODE",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "lockstep_only.py:20",
+         "bar": "go",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "bin",
+          "o": "and",
+          "a": {
+           "e": "var",
+           "name": "m",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 32
+         }
+        },
+        {
+         "op": "event",
+         "ev": "tmem",
+         "loc": "lockstep_only.py:21",
+         "inst": "ld",
+         "warp": {
+          "e": "const",
+          "v": 4,
+          "w": 32
+         },
+         "rects": [
+          {
+           "use": "data",
+           "write": false,
+           "lane": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           },
+           "nlanes": 32,
+           "col": {
+            "e": "const",
+            "v": 80,
+            "w": 32
+           },
+           "ncols": 4
+          }
+         ]
+        },
+        {
+         "op": "event",
+         "ev": "tmem_wait",
+         "loc": "lockstep_only.py:22",
+         "ld": true
+        },
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "lockstep_only.py:23",
+         "bar": "drain",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        },
+        {
+         "op": "if",
+         "cond": {
+          "e": "cmp",
+          "o": "eq",
+          "a": {
+           "e": "var",
+           "name": "MODE",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 3,
+           "w": 32
+          },
+          "w": 1
+         },
+         "then": [
+          {
+           "op": "event",
+           "ev": "tmem",
+           "loc": "lockstep_only.py:24",
+           "inst": "st",
+           "warp": {
+            "e": "const",
+            "v": 4,
+            "w": 32
+           },
+           "rects": [
+            {
+             "use": "data",
+             "write": true,
+             "lane": {
+              "e": "const",
+              "v": 0,
+              "w": 32
+             },
+             "nlanes": 32,
+             "col": {
+              "e": "const",
+              "v": 200,
+              "w": 32
+             },
+             "ncols": 4
+            }
+           ]
+          },
+          {
+           "op": "event",
+           "ev": "tmem_wait",
+           "loc": "lockstep_only.py:25",
+           "ld": false
+          }
+         ],
+         "else": [],
+         "loc": "lockstep_only.py:24"
+        }
+       ],
+       "else": [],
+       "loc": "lockstep_only.py:20"
+      }
+     ],
+     "loc": "lockstep_only.py:19"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "lockstep_only.py:60",
+       "bar": "ready",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "lockstep_only.py:61",
+       "inst": "ld",
+       "warp": {
+        "e": "const",
+        "v": 5,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "data",
+         "write": false,
+         "lane": {
+          "e": "const",
+          "v": 32,
+          "w": 32
+         },
+         "nlanes": 32,
+         "col": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "ncols": 4
+        }
+       ]
+      },
+      {
+       "op": "event",
+       "ev": "tmem_wait",
+       "loc": "lockstep_only.py:62",
+       "ld": true
+      }
+     ],
+     "else": [],
+     "loc": "lockstep_only.py:60"
+    }
+   ]
+  }
+ ],
+ "tmem": {
+  "cols": 512,
+  "base": "zero"
+ },
+ "case": {
+  "name": "lockstep_only",
+  "inputs": [
+   {
+    "name": "credit_two_mblocks",
+    "params": {
+     "M": 2,
+     "MODE": 0
+    }
+   },
+   {
+    "name": "credit_three_mblocks",
+    "params": {
+     "M": 3,
+     "MODE": 0
+    }
+   },
+   {
+    "name": "commit_landing",
+    "params": {
+     "M": 1,
+     "MODE": 1
+    }
+   },
+   {
+    "name": "waited_credit",
+    "params": {
+     "M": 3,
+     "MODE": 2
+    }
+   },
+   {
+    "name": "credit_and_race",
+    "params": {
+     "M": 4,
+     "MODE": 3
+    }
+   }
+  ]
+ }
+}

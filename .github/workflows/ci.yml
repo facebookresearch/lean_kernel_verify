@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  LEAN_VERSION: "4.34.0"
+  # sha256 of lean-4.34.0-linux.tar.zst, from the assets of the Lean v4.34.0 release
+  LEAN_SHA256: caaa98356098c85dc0fcbbd28e1ec66f39eb6551829972b752ff20e1286b646b
+
+jobs:
+  test:
+    name: Lean layer and Python tests (CPU)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Install Lean
+        run: |
+          command -v zstd >/dev/null || sudo apt-get install -y zstd
+          archive="lean-${LEAN_VERSION}-linux.tar.zst"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/leanprover/lean4/releases/download/v${LEAN_VERSION}/$archive"
+          echo "${LEAN_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar --zstd -xf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP"
+          rm "$RUNNER_TEMP/$archive"
+          echo "LEAN_TOOLCHAIN_DIR=$RUNNER_TEMP/lean-${LEAN_VERSION}-linux" >> "$GITHUB_ENV"
+
+      - name: Show the toolchains
+        run: |
+          scripts/lean.sh --version
+          python3 --version
+
+      - name: Lean layer (tests/lean/run_all.sh)
+        run: tests/lean/run_all.sh
+
+      - name: lkv.py check on a passing fixture
+        run: python3 -I scripts/lkv.py check tests/lean/pipeline_ok.kir.json --out "$RUNNER_TEMP/lkv_check"
+
+      - name: CuTe translation (tests/cute/test_core.py)
+        run: python3 -I tests/cute/test_core.py
+
+      - name: lkv.py unit tests (tests/e2e/test_e2e.py Unit)
+        run: python3 -I tests/e2e/test_e2e.py Unit

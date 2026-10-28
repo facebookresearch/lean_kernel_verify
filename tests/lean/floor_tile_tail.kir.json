@@ -1,0 +1,49 @@
+{
+  "kir_version": 1,
+  "kernel": "floor_tile_tail",
+  "source": "tests/lean/floor_tile_tail.kir.json",
+  "ir": "ttgir",
+  "grid": [
+    {"e": "bin", "o": "sdiv", "w": 32, "a": {"e": "var", "name": "N", "w": 32}, "b": {"e": "const", "v": 64, "w": 32}},
+    {"e": "const", "v": 1, "w": 32},
+    {"e": "const", "v": 1, "w": 32}
+  ],
+  "params": [{"name": "N", "type": "i32"}],
+  "tensors": [
+    {"name": "out", "kind": "global", "elem_bytes": 4,
+     "shape": [{"e": "var", "name": "N", "w": 32}, {"e": "const", "v": 16, "w": 32}],
+     "strides": [{"e": "const", "v": 16, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+     "segments": null, "role": "output", "metadata": false}
+  ],
+  "barriers": [],
+  "roles": [
+    {"name": "default", "warps": 4, "threads_per_issue": 32, "body": [
+      {"op": "let", "var": "rows", "loc": "floor_tile_tail.py:8",
+       "expr": {"e": "bin", "o": "mul", "w": 32, "addr": true, "a": {"e": "pid", "axis": 0, "w": 32}, "b": {"e": "const", "v": 64, "w": 32}}},
+      {"op": "event", "ev": "gstore", "tensor": "out", "loc": "floor_tile_tail.py:12",
+       "offsets": {"t": "bin", "o": "add", "shape": [64, 16], "w": 32, "addr": true,
+         "a": {"t": "bcast", "axis": 1, "shape": [64, 16], "w": 32,
+           "a": {"t": "bin", "o": "mul", "shape": [64, 1], "w": 32, "addr": true,
+             "a": {"t": "expand", "axis": 1, "shape": [64, 1], "w": 32,
+               "a": {"t": "bin", "o": "add", "shape": [64], "w": 32, "addr": true,
+                 "a": {"t": "splat", "shape": [64], "w": 32, "a": {"e": "var", "name": "rows", "w": 32}},
+                 "b": {"t": "range", "start": 0, "end": 64, "shape": [64], "w": 32}}},
+             "b": {"t": "splat", "shape": [64, 1], "w": 32, "a": {"e": "const", "v": 16, "w": 32}}}},
+         "b": {"t": "bcast", "axis": 0, "shape": [64, 16], "w": 32,
+           "a": {"t": "expand", "axis": 0, "shape": [1, 16], "w": 32,
+             "a": {"t": "range", "start": 0, "end": 16, "shape": [16], "w": 32}}}},
+       "mask": {"t": "cmp", "o": "slt", "shape": [64, 16], "w": 1,
+         "a": {"t": "bcast", "axis": 1, "shape": [64, 16], "w": 32,
+           "a": {"t": "expand", "axis": 1, "shape": [64, 1], "w": 32,
+             "a": {"t": "bin", "o": "add", "shape": [64], "w": 32, "addr": true,
+               "a": {"t": "splat", "shape": [64], "w": 32, "a": {"e": "var", "name": "rows", "w": 32}},
+               "b": {"t": "range", "start": 0, "end": 64, "shape": [64], "w": 32}}}},
+         "b": {"t": "splat", "shape": [64, 16], "w": 32, "a": {"e": "var", "name": "N", "w": 32}}}}
+    ]}
+  ],
+  "case": {"name": "tail", "inputs": [
+    {"name": "n128", "params": {"N": 128}, "intended_writes": {"out": "all"}},
+    {"name": "n100", "params": {"N": 100}, "intended_writes": {"out": "all"}},
+    {"name": "n40", "params": {"N": 40}, "intended_writes": {"out": "all"}}
+  ]}
+}

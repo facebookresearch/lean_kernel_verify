@@ -1,0 +1,326 @@
+{
+ "kir_version": 1,
+ "kernel": "lap_tma_wait_evidence",
+ "source": "tests/lean/lap_tma_wait_evidence.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "T",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "a",
+   "kind": "desc",
+   "elem_bytes": 2,
+   "shape": [
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false,
+   "box": [
+    64,
+    32
+   ]
+  }
+ ],
+ "barriers": [
+  {
+   "name": "full",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "sig",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "p",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "expect_tx",
+       "loc": "r3.py:4",
+       "bar": "full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "bytes": {
+        "e": "const",
+        "v": 4096,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "r3.py:4",
+       "bar": "full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "tma_load",
+       "loc": "r3.py:5",
+       "desc": "a",
+       "coords": [
+        {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        {
+         "e": "bin",
+         "o": "mul",
+         "a": {
+          "e": "var",
+          "name": "t",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 32,
+          "w": 32
+         },
+         "w": 32,
+         "addr": true
+        }
+       ],
+       "bar": "full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "r3.py:3"
+    }
+   ]
+  },
+  {
+   "name": "a",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "t",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "T",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "r3.py:9",
+       "bar": "full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "var",
+         "name": "t",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      }
+     ],
+     "loc": "r3.py:8"
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "r3.py:10",
+     "bar": "sig",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "b",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r3.py:13",
+     "bar": "full",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r3.py:14",
+     "bar": "sig",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "r3.py:15",
+     "bar": "full",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     }
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "lap_tma_wait_evidence",
+  "inputs": [
+   {
+    "name": "t4_lap_ok",
+    "params": {
+     "T": 4
+    }
+   },
+   {
+    "name": "t3_lap_past_end",
+    "params": {
+     "T": 3
+    }
+   }
+  ]
+ }
+}

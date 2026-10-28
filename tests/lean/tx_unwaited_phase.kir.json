@@ -1,0 +1,574 @@
+{
+ "kir_version": 1,
+ "kernel": "tx_unwaited_phase",
+ "source": "tests/lean/tx_unwaited_phase.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "K_TILES",
+   "type": "i32"
+  },
+  {
+   "name": "ARRIVE_FIRST",
+   "type": "i32"
+  },
+  {
+   "name": "EXTRA",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "a",
+   "kind": "desc",
+   "elem_bytes": 2,
+   "shape": [
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 4096,
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false,
+   "box": [
+    64,
+    32
+   ]
+  },
+  {
+   "name": "out",
+   "kind": "desc",
+   "elem_bytes": 2,
+   "shape": [
+    {
+     "e": "const",
+     "v": 64,
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 16,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 16,
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "output",
+   "metadata": false,
+   "box": [
+    64,
+    16
+   ]
+  }
+ ],
+ "barriers": [
+  {
+   "name": "full",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   }
+  },
+  {
+   "name": "empty",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "producer",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "k",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "K_TILES",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "let",
+       "var": "s",
+       "expr": {
+        "e": "bin",
+        "o": "srem",
+        "a": {
+         "e": "var",
+         "name": "k",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 2,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "let",
+       "var": "ph",
+       "expr": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "bin",
+         "o": "sdiv",
+         "a": {
+          "e": "var",
+          "name": "k",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 2,
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "unwaited.py:12",
+       "bar": "empty",
+       "idx": {
+        "e": "var",
+        "name": "s",
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "xor",
+        "a": {
+         "e": "var",
+         "name": "ph",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "ne",
+        "a": {
+         "e": "var",
+         "name": "ARRIVE_FIRST",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "unwaited.py:12",
+         "bar": "full",
+         "idx": {
+          "e": "var",
+          "name": "s",
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "unwaited.py:12"
+      },
+      {
+       "op": "event",
+       "ev": "expect_tx",
+       "loc": "unwaited.py:13",
+       "bar": "full",
+       "idx": {
+        "e": "var",
+        "name": "s",
+        "w": 32
+       },
+       "bytes": {
+        "e": "const",
+        "v": 4096,
+        "w": 32
+       }
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "eq",
+        "a": {
+         "e": "var",
+         "name": "ARRIVE_FIRST",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "unwaited.py:13",
+         "bar": "full",
+         "idx": {
+          "e": "var",
+          "name": "s",
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "unwaited.py:13"
+      },
+      {
+       "op": "event",
+       "ev": "tma_load",
+       "loc": "unwaited.py:14",
+       "desc": "a",
+       "coords": [
+        {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        {
+         "e": "bin",
+         "o": "mul",
+         "a": {
+          "e": "var",
+          "name": "k",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 32,
+          "w": 32
+         },
+         "w": 32,
+         "addr": true
+        }
+       ],
+       "bar": "full",
+       "idx": {
+        "e": "var",
+        "name": "s",
+        "w": 32
+       }
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "cmp",
+         "o": "eq",
+         "a": {
+          "e": "var",
+          "name": "k",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "w": 1
+        },
+        "b": {
+         "e": "cmp",
+         "o": "ne",
+         "a": {
+          "e": "var",
+          "name": "EXTRA",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "w": 1
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "unwaited.py:15",
+         "bar": "full",
+         "idx": {
+          "e": "var",
+          "name": "s",
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "unwaited.py:15"
+      }
+     ],
+     "loc": "unwaited.py:11"
+    }
+   ]
+  },
+  {
+   "name": "consumer",
+   "warps": 4,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "k",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "K_TILES",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "let",
+       "var": "s",
+       "expr": {
+        "e": "bin",
+        "o": "srem",
+        "a": {
+         "e": "var",
+         "name": "k",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 2,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "let",
+       "var": "ph",
+       "expr": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "bin",
+         "o": "sdiv",
+         "a": {
+          "e": "var",
+          "name": "k",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 2,
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "unwaited.py:21",
+       "bar": "full",
+       "idx": {
+        "e": "var",
+        "name": "s",
+        "w": 32
+       },
+       "parity": {
+        "e": "var",
+        "name": "ph",
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "unwaited.py:22",
+       "bar": "empty",
+       "idx": {
+        "e": "var",
+        "name": "s",
+        "w": 32
+       }
+      }
+     ],
+     "loc": "unwaited.py:20"
+    },
+    {
+     "op": "event",
+     "ev": "tma_store",
+     "loc": "unwaited.py:30",
+     "desc": "out",
+     "coords": [
+      {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "tx_unwaited_phase",
+  "inputs": [
+   {
+    "name": "in_order",
+    "params": {
+     "K_TILES": 3,
+     "ARRIVE_FIRST": 0,
+     "EXTRA": 0
+    },
+    "intended_writes": {
+     "out": "all"
+    }
+   },
+   {
+    "name": "arrive_before_expect",
+    "params": {
+     "K_TILES": 3,
+     "ARRIVE_FIRST": 1,
+     "EXTRA": 0
+    },
+    "intended_writes": {
+     "out": "all"
+    }
+   },
+   {
+    "name": "extra_midrun_arrive",
+    "params": {
+     "K_TILES": 3,
+     "ARRIVE_FIRST": 0,
+     "EXTRA": 1
+    },
+    "intended_writes": {
+     "out": "all"
+    }
+   }
+  ]
+ }
+}

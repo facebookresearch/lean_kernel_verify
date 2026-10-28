@@ -1,0 +1,220 @@
+# Expected verdicts of every (fixture, input); run_all.sh compares them with the
+# VERDICT lines printed by KV.runCase and with the native_decide theorems. A FAIL is a
+# violation certain in the extracted model; findings that are not (read/reduce spills,
+# completions nobody waits for, pending tx after the last wait) are notes and PASS.
+# fixture                 input            P0-1 P0-2 P0-3 P0-4 P0-5
+pipeline_ok               two_tiles_k3     PASS PASS PASS PASS PASS
+pipeline_ok               one_tile_k1      PASS PASS PASS PASS PASS
+pipeline_ok               zero_k           PASS PASS PASS PASS PASS
+pipeline_ok               five_tiles_k4    PASS PASS PASS PASS PASS
+zero_trip_missing_arrive  n_k_2            PASS PASS PASS PASS PASS
+zero_trip_missing_arrive  n_k_0            PASS FAIL PASS PASS PASS
+stale_tail_parity         k_even           PASS PASS PASS PASS PASS
+stale_tail_parity         k_odd            PASS PASS PASS FAIL PASS
+same_parity_rewait        no_tail          PASS PASS PASS PASS PASS
+same_parity_rewait        with_tail        PASS PASS PASS FAIL PASS
+parity_two                k2               PASS PASS PASS PASS PASS
+parity_two                k3               PASS PASS PASS FAIL PASS
+expect_tx_mismatch        zero_k           PASS PASS PASS PASS PASS
+expect_tx_mismatch        k2               PASS PASS PASS FAIL PASS
+floor_tile_tail           n128             PASS PASS PASS PASS PASS
+floor_tile_tail           n100             PASS PASS FAIL PASS PASS
+floor_tile_tail           n40              PASS PASS FAIL PASS PASS
+tma_store_spill           aligned          PASS PASS PASS PASS PASS
+tma_store_spill           partial_last     PASS PASS PASS PASS PASS
+tma_store_spill           empty_segment    PASS PASS PASS PASS PASS
+tma_store_spill           partial_middle   FAIL PASS FAIL PASS PASS
+unmasked_load_oob         n256             PASS PASS PASS PASS PASS
+unmasked_load_oob         n200             FAIL PASS PASS PASS PASS
+i32_offset_overflow       fits             PASS PASS PASS PASS PASS
+i32_offset_overflow       wraps            FAIL PASS PASS PASS PASS
+i32_offset_overflow       wraps_in_bounds  FAIL PASS PASS PASS PASS
+# P0-5: an input that sets an elision flag of the case gets its P0-1/P0-3 checks under P0-5.
+full_tiles_fast_path      aligned          PASS PASS PASS PASS PASS
+full_tiles_fast_path      partial          PASS PASS PASS PASS FAIL
+full_tiles_fast_path      partial_unflagged FAIL PASS FAIL PASS PASS
+full_tiles_fast_path      partial_other_flag FAIL PASS FAIL PASS PASS
+full_tiles_fast_path      short_grid       PASS PASS PASS PASS FAIL
+full_tiles_fast_path      unchecked        PASS PASS PASS PASS PASS
+eval_semantics            x3               PASS PASS PASS PASS PASS
+eval_semantics            x0               PASS PASS PASS PASS PASS
+eval_errors               ok               PASS PASS PASS PASS PASS
+eval_errors               assert_fail      FAIL FAIL FAIL FAIL FAIL
+eval_errors               div_zero         FAIL FAIL FAIL FAIL FAIL
+eval_errors               while_bound      FAIL FAIL FAIL FAIL FAIL
+eval_errors               meta_oob         FAIL FAIL FAIL FAIL FAIL
+eval_errors               meta_missing_value FAIL FAIL FAIL FAIL FAIL
+eval_errors               meta_negative_offset FAIL FAIL FAIL FAIL FAIL
+eval_errors               barrier_index    FAIL FAIL FAIL FAIL FAIL
+eval_errors               for_step_zero    FAIL FAIL FAIL FAIL FAIL
+eval_errors               for_step_zero_no_trips PASS PASS PASS PASS PASS
+eval_errors               tensor_div_zero_masked FAIL FAIL FAIL FAIL FAIL
+eval_errors               negative_grid    FAIL FAIL FAIL FAIL FAIL
+eval_errors               negative_barrier_num FAIL FAIL FAIL FAIL FAIL
+arrival_counts            count_128        PASS PASS PASS PASS PASS
+arrival_counts            count_32         PASS FAIL PASS PASS PASS
+arrival_counts            count_96         PASS FAIL PASS PASS PASS
+arrival_counts            init_mismatch    PASS FAIL PASS PASS PASS
+atomic_outside_intended   inside           PASS PASS PASS PASS PASS
+atomic_outside_intended   outside          PASS PASS PASS PASS PASS
+atomic_outside_intended   atomic_oob       FAIL PASS PASS PASS PASS
+atomic_outside_intended   store_outside    PASS PASS FAIL PASS PASS
+segmented_gload           ok               PASS PASS PASS PASS PASS
+segmented_gload           mask_total       PASS PASS PASS PASS PASS
+segmented_gload           stray            PASS PASS PASS PASS PASS
+segmented_gload           bad_layout       FAIL FAIL FAIL FAIL FAIL
+segmented_gload           store_ok         PASS PASS PASS PASS PASS
+segmented_gload           store_spill      FAIL PASS FAIL PASS PASS
+segmented_gload           store_stray      FAIL PASS PASS PASS PASS
+segmented_gload           no_intent        PASS PASS FAIL PASS PASS
+padded_column_overrun     masked           PASS PASS PASS PASS PASS
+padded_column_overrun     inner_overrun    FAIL PASS PASS PASS PASS
+padded_column_overrun     last_row_overrun FAIL PASS PASS PASS PASS
+trunc_offset_wrap         fits             PASS PASS PASS PASS PASS
+trunc_offset_wrap         lossy            FAIL PASS PASS PASS PASS
+producer_tail             k3               PASS PASS PASS PASS PASS
+producer_tail             k0               PASS PASS PASS PASS PASS
+producer_tail             tail_waited      PASS PASS PASS FAIL PASS
+lockstep_shares           no_tail          PASS PASS PASS PASS PASS
+lockstep_shares           partial_tail     PASS PASS PASS PASS PASS
+lockstep_shares           full_tail        PASS PASS PASS PASS PASS
+shared_barrier_array      two_tiles_k3     PASS PASS PASS PASS PASS
+shared_barrier_array      one_tile_skipped PASS FAIL PASS FAIL PASS
+tx_skip_confirmed         confirmed        PASS PASS PASS PASS PASS
+tx_skip_confirmed         unconfirmed      PASS PASS PASS FAIL PASS
+# A segment on dim 1 of an [H, T] tensor, offsets built with a TExpr ext, an i32 wrap behind the cast.
+inner_segment_ext         ok               PASS PASS PASS PASS PASS
+inner_segment_ext         spill            FAIL PASS FAIL PASS PASS
+inner_segment_ext         wrap             FAIL PASS FAIL PASS PASS
+phase_skip                ordered          PASS PASS PASS PASS PASS
+phase_skip                unordered        PASS PASS PASS FAIL PASS
+redundant_rewait          b3               PASS PASS PASS PASS PASS
+redundant_rewait          b1_stale         PASS PASS PASS FAIL PASS
+redundant_rewait          b3_stale         PASS PASS PASS FAIL PASS
+# Seeded mutations of the pipeline and phase fixtures (m1-m6, c1), each with its controls.
+m1_consumer_start_parity  two_tiles_k3     PASS PASS PASS FAIL PASS
+m1_consumer_start_parity  one_tile_k1      PASS PASS PASS FAIL PASS
+m1_consumer_start_parity  zero_k           PASS PASS PASS PASS PASS
+m1_consumer_start_parity  five_tiles_k4    PASS PASS PASS FAIL PASS
+m2_tx_skip                one              PASS PASS PASS FAIL PASS
+m2b_commit_skip           one              PASS PASS PASS FAIL PASS
+m2c_notx_skip             one              PASS PASS PASS PASS PASS
+m3_missing_wait           n_k_2            PASS PASS PASS PASS PASS
+m3_missing_wait           n_k_1            PASS PASS PASS PASS PASS
+m4_shl_wrap               fits             PASS PASS PASS PASS PASS
+m4_shl_wrap               wrap_to_row0     FAIL PASS PASS PASS PASS
+m5_arriver_disagree       agree            PASS PASS PASS PASS PASS
+m5_arriver_disagree       disagree         PASS FAIL PASS PASS PASS
+m6_expect_phase_shift     two_tiles_k3     PASS PASS PASS FAIL PASS
+m6_expect_phase_shift     one_tile_k1      PASS PASS PASS FAIL PASS
+m6_expect_phase_shift     zero_k           PASS PASS PASS PASS PASS
+m6_expect_phase_shift     five_tiles_k4    PASS PASS PASS FAIL PASS
+c1_consumer_short         two_tiles_k3     PASS PASS PASS FAIL PASS
+c1_consumer_short         one_tile_k1      PASS FAIL PASS FAIL PASS
+c1_consumer_short         zero_k           PASS PASS PASS PASS PASS
+c1_consumer_short         five_tiles_k4    PASS PASS PASS FAIL PASS
+# The report shows every distinct loc of a spec, also past the first 12 lines (Check.lean shown).
+distinct_locs             last_cta         FAIL PASS PASS PASS PASS
+distinct_locs             no_cta           FAIL PASS PASS PASS PASS
+# One passing and one failing input per Layer-2 rule.
+# A bar_init does not make the default role touch a slot.
+init_role_static_waiter   consumer_short   PASS FAIL PASS FAIL PASS
+init_role_static_waiter   consumer_full    PASS PASS PASS PASS PASS
+# A wait that never returns in the optimistic progress pass (cross-role cycle).
+empty_parity_deadlock     correct_parity   PASS PASS PASS PASS PASS
+empty_parity_deadlock     wrong_parity     PASS FAIL PASS PASS PASS
+# A first wait whose phase k+1 surely completed synchronizes with k+2.
+late_first_wait           parity0_hangs    PASS FAIL PASS PASS PASS
+late_first_wait           parity1_ok       PASS PASS PASS PASS PASS
+late_wait_tx              bytes_match      PASS PASS PASS PASS PASS
+late_wait_tx              bytes_mismatch   PASS PASS PASS FAIL PASS
+# TMA bytes landing in a phase nobody waits for.
+tx_unwaited_phase         in_order         PASS PASS PASS PASS PASS
+tx_unwaited_phase         arrive_before_expect PASS PASS PASS FAIL PASS
+tx_unwaited_phase         extra_midrun_arrive PASS PASS PASS FAIL PASS
+# An arriving role takes share 0 only with evidence that its arrivals follow the waited phases.
+count_too_small           count2           PASS PASS PASS PASS PASS
+count_too_small           count1           PASS FAIL PASS PASS PASS
+count_too_small           count0           PASS FAIL PASS PASS PASS
+zero_share_evidence       after_waited_phases PASS PASS PASS PASS PASS
+zero_share_evidence       unordered        PASS FAIL PASS PASS PASS
+# Laps: a later wait whose next phase surely completed synchronizes with the phase after it (note; P0-2 sees the shift).
+lap_shift                 odd_phases_per_tile PASS PASS PASS PASS PASS
+lap_shift                 lap_past_end     PASS FAIL PASS PASS PASS
+# An initialization arrival forms phase 1 by itself (a dQ ring's pre-arrive).
+init_prearrive            pre_arrive       PASS PASS PASS PASS PASS
+init_prearrive            double_pre_arrive PASS FAIL PASS PASS PASS
+init_prearrive            early_release    PASS FAIL PASS PASS PASS
+# Per-role lockstep shares in happens-before (a dP.empty prologue skip).
+share_credit_skip         ordered_by_sp    PASS PASS PASS PASS PASS
+share_credit_skip         unordered        PASS PASS PASS FAIL PASS
+# Only each role's least share over all fitting assignments is credited.
+ambiguous_shares          y_after_two_x_phases PASS PASS PASS PASS PASS
+ambiguous_shares          y_after_all_x_phases PASS FAIL PASS PASS PASS
+# An out-of-range metadata load is a P0-1 FAIL; the other specs are undecided with their certain lines.
+meta_oob_load             in_range         PASS PASS PASS PASS PASS
+meta_oob_load             out_of_range     FAIL FAIL FAIL FAIL FAIL
+# More seeded inputs per rule, each with its control.
+# Progress pass: a late join (R = K) that only the pass sees; a three-role ring with a commit hop.
+progress_latejoin_cycle   parity0_deadlock PASS FAIL PASS PASS PASS
+progress_latejoin_cycle   parity1_ok       PASS PASS PASS PASS PASS
+progress_commit_ring      producer_parity  PASS PASS PASS PASS PASS
+progress_commit_ring      consumer_parity  PASS FAIL PASS PASS PASS
+# A lap on a TMA slot shown by another role's wait: a note, or a hang past the last completion.
+lap_tma_wait_evidence     t4_lap_ok        PASS PASS PASS PASS PASS
+lap_tma_wait_evidence     t3_lap_past_end  PASS FAIL PASS PASS PASS
+# Bytes are attributed under every fitting share assignment: P0-4 fails only if none explains them.
+ambiguous_tx_shares       one_load         PASS PASS PASS PASS PASS
+ambiguous_tx_shares       two_loads        PASS PASS PASS PASS PASS
+ambiguous_tx_shares       three_loads      PASS PASS PASS FAIL PASS
+joint_tx_shares           jointly_infeasible PASS PASS PASS FAIL PASS
+joint_tx_shares           a_after_phase1   PASS PASS PASS PASS PASS
+# Initialization arrival on a slot with commit arrivals (release by commit, pre-arrival by commit).
+init_commit_release       commit_release   PASS PASS PASS PASS PASS
+init_commit_release       plain_release    PASS PASS PASS PASS PASS
+init_commit_release       init_is_commit   PASS PASS PASS PASS PASS
+init_commit_release       init_is_commit_early_release PASS FAIL PASS PASS PASS
+# A scalar select evaluates only its chosen operand: a masked metadata load reads nothing.
+meta_masked_load          masked_empty     PASS PASS PASS PASS PASS
+meta_masked_load          masked_one_tile  PASS PASS PASS PASS PASS
+meta_masked_load          unmasked_empty   FAIL FAIL FAIL FAIL FAIL
+# An out-of-range metadata load on an elided input is P0-1's; P0-2 lists the complete CTA's hang only.
+meta_oob_elided           in_range         PASS FAIL PASS PASS PASS
+meta_oob_elided           out_of_range     FAIL FAIL FAIL FAIL FAIL
+# Lockstep credit spares a stale FAIL but never makes a wait need more completions.
+positive_share_preferred  z_after_waits    PASS PASS PASS PASS PASS
+nonuniform_contents       z_joins_at_phase3 PASS PASS PASS PASS PASS
+# A stale wait may return at its lower bound: the hang rule counts phase lower bounds.
+stale_presumed_hang       stale_only       PASS PASS PASS FAIL PASS
+stale_presumed_hang       stale_then_hang  PASS FAIL PASS FAIL PASS
+# The lockstep credit counts least shares over evidenced zeros too; a presumed skip past the last completion hangs.
+zero_share_credit         z_after_waits    PASS PASS PASS FAIL PASS
+zero_share_credit         z_free_first     PASS FAIL PASS PASS PASS
+# Transaction bytes of a role that does not arrive on the slot, and a load with no expect_tx of its role.
+tx_attribution            same_role        PASS PASS PASS PASS PASS
+tx_attribution            cross_role_expect PASS PASS PASS FAIL PASS
+tx_attribution            no_expect        PASS PASS PASS FAIL PASS
+# A work item naming no segment; intended rows past the row extent are not clipped.
+segment_edges             in_segment       PASS PASS PASS PASS PASS
+segment_edges             no_segment       FAIL PASS PASS PASS PASS
+segment_edges             intended_past_extent PASS PASS FAIL PASS PASS
+# Thread-block clusters (kir.md change 11): a cta_group::2 pair whose loads complete on the
+# leader's barrier and whose MMA commit arrives on both CTAs; remote arrivals; DSMEM copies
+# (complete_tx: bytes from another CTA, attributed by lockstep byte shares); multicast loads;
+# the cluster barrier; a grid the cluster dims do not divide.
+cluster_pair_tma          ok               PASS PASS PASS PASS PASS
+cluster_pair_tma          follower_no_leader PASS PASS PASS FAIL PASS
+cluster_pair_tma          commit_leader_only PASS FAIL PASS PASS PASS
+cluster_pair_tma          leader_expects_half PASS PASS PASS FAIL PASS
+cluster_remote_arrive     ok               PASS PASS PASS PASS PASS
+cluster_remote_arrive     local_arrive     PASS FAIL PASS PASS PASS
+cluster_remote_arrive     rank_outside_cluster FAIL FAIL FAIL FAIL FAIL
+cluster_dsmem_relay       ok               PASS PASS PASS PASS PASS
+cluster_dsmem_relay       short_copy       PASS PASS PASS FAIL PASS
+cluster_dsmem_relay       uneven_copies    PASS PASS PASS FAIL PASS
+cluster_multicast         ok               PASS PASS PASS PASS PASS
+cluster_multicast         leader_only_mask PASS PASS PASS FAIL PASS
+cluster_launch            grid4            PASS PASS PASS PASS PASS
+cluster_launch            grid3            FAIL FAIL FAIL FAIL FAIL
+cluster_barrier           ok               PASS PASS PASS PASS PASS
+cluster_barrier           follower_skips_arrive PASS FAIL PASS PASS PASS

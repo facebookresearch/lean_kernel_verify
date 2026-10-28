@@ -1,0 +1,491 @@
+{
+ "kir_version": 1,
+ "kernel": "inner_segment_ext",
+ "source": "tests/lean/inner_segment_ext.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "var",
+   "name": "B",
+   "w": 32
+  },
+  {
+   "e": "var",
+   "name": "H",
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "B",
+   "type": "i32"
+  },
+  {
+   "name": "H",
+   "type": "i32"
+  },
+  {
+   "name": "T",
+   "type": "i32"
+  },
+  {
+   "name": "MASKED",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "cu",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "bin",
+     "o": "add",
+     "a": {
+      "e": "var",
+      "name": "B",
+      "w": 32
+     },
+     "b": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": true
+  },
+  {
+   "name": "m",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "var",
+     "name": "H",
+     "w": 32
+    },
+    {
+     "e": "var",
+     "name": "T",
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "var",
+     "name": "T",
+     "w": 32
+    },
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": {
+    "dim": 1,
+    "offsets": "cu",
+    "per": "batch"
+   },
+   "role": "output",
+   "metadata": false
+  }
+ ],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "default",
+   "warps": 2,
+   "threads_per_issue": 64,
+   "body": [
+    {
+     "op": "let",
+     "var": "begin",
+     "expr": {
+      "e": "load",
+      "tensor": "cu",
+      "index": [
+       {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       }
+      ],
+      "w": 32
+     },
+     "loc": "inner_segment_ext.py:4"
+    },
+    {
+     "op": "let",
+     "var": "end",
+     "expr": {
+      "e": "load",
+      "tensor": "cu",
+      "index": [
+       {
+        "e": "bin",
+        "o": "add",
+        "a": {
+         "e": "pid",
+         "axis": 0,
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      ],
+      "w": 32
+     },
+     "loc": "inner_segment_ext.py:5"
+    },
+    {
+     "op": "event",
+     "ev": "work",
+     "loc": "inner_segment_ext.py:6",
+     "fields": {
+      "batch": {
+       "e": "pid",
+       "axis": 0,
+       "w": 32
+      }
+     }
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "ne",
+      "a": {
+       "e": "var",
+       "name": "MASKED",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "loc": "inner_segment_ext.py:7",
+     "then": [
+      {
+       "op": "event",
+       "ev": "gstore",
+       "loc": "inner_segment_ext.py:8",
+       "tensor": "m",
+       "offsets": {
+        "t": "bin",
+        "o": "add",
+        "shape": [
+         64
+        ],
+        "w": 64,
+        "addr": true,
+        "a": {
+         "t": "ext",
+         "signed": true,
+         "a": {
+          "t": "bin",
+          "o": "add",
+          "shape": [
+           64
+          ],
+          "w": 32,
+          "addr": true,
+          "a": {
+           "t": "splat",
+           "a": {
+            "e": "var",
+            "name": "begin",
+            "w": 32
+           },
+           "shape": [
+            64
+           ],
+           "w": 32
+          },
+          "b": {
+           "t": "range",
+           "start": 0,
+           "end": 64,
+           "shape": [
+            64
+           ],
+           "w": 32
+          }
+         },
+         "shape": [
+          64
+         ],
+         "w": 64
+        },
+        "b": {
+         "t": "splat",
+         "shape": [
+          64
+         ],
+         "w": 64,
+         "a": {
+          "e": "bin",
+          "o": "mul",
+          "a": {
+           "e": "ext",
+           "signed": true,
+           "a": {
+            "e": "pid",
+            "axis": 1,
+            "w": 32
+           },
+           "w": 64
+          },
+          "b": {
+           "e": "ext",
+           "signed": true,
+           "a": {
+            "e": "var",
+            "name": "T",
+            "w": 32
+           },
+           "w": 64
+          },
+          "w": 64,
+          "addr": true
+         }
+        }
+       },
+       "mask": {
+        "t": "cmp",
+        "o": "slt",
+        "shape": [
+         64
+        ],
+        "w": 1,
+        "a": {
+         "t": "bin",
+         "o": "add",
+         "shape": [
+          64
+         ],
+         "w": 32,
+         "addr": true,
+         "a": {
+          "t": "splat",
+          "a": {
+           "e": "var",
+           "name": "begin",
+           "w": 32
+          },
+          "shape": [
+           64
+          ],
+          "w": 32
+         },
+         "b": {
+          "t": "range",
+          "start": 0,
+          "end": 64,
+          "shape": [
+           64
+          ],
+          "w": 32
+         }
+        },
+        "b": {
+         "t": "splat",
+         "a": {
+          "e": "var",
+          "name": "end",
+          "w": 32
+         },
+         "shape": [
+          64
+         ],
+         "w": 32
+        }
+       }
+      }
+     ],
+     "else": [
+      {
+       "op": "event",
+       "ev": "gstore",
+       "loc": "inner_segment_ext.py:10",
+       "tensor": "m",
+       "offsets": {
+        "t": "bin",
+        "o": "add",
+        "shape": [
+         64
+        ],
+        "w": 64,
+        "addr": true,
+        "a": {
+         "t": "ext",
+         "signed": true,
+         "a": {
+          "t": "bin",
+          "o": "add",
+          "shape": [
+           64
+          ],
+          "w": 32,
+          "addr": true,
+          "a": {
+           "t": "splat",
+           "a": {
+            "e": "var",
+            "name": "begin",
+            "w": 32
+           },
+           "shape": [
+            64
+           ],
+           "w": 32
+          },
+          "b": {
+           "t": "range",
+           "start": 0,
+           "end": 64,
+           "shape": [
+            64
+           ],
+           "w": 32
+          }
+         },
+         "shape": [
+          64
+         ],
+         "w": 64
+        },
+        "b": {
+         "t": "splat",
+         "shape": [
+          64
+         ],
+         "w": 64,
+         "a": {
+          "e": "bin",
+          "o": "mul",
+          "a": {
+           "e": "ext",
+           "signed": true,
+           "a": {
+            "e": "pid",
+            "axis": 1,
+            "w": 32
+           },
+           "w": 64
+          },
+          "b": {
+           "e": "ext",
+           "signed": true,
+           "a": {
+            "e": "var",
+            "name": "T",
+            "w": 32
+           },
+           "w": 64
+          },
+          "w": 64,
+          "addr": true
+         }
+        }
+       },
+       "mask": {
+        "t": "full",
+        "v": 1,
+        "shape": [
+         64
+        ],
+        "w": 1
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "inner_segment_ext",
+  "inputs": [
+   {
+    "name": "ok",
+    "params": {
+     "B": 2,
+     "H": 2,
+     "T": 100,
+     "MASKED": 1
+    },
+    "metadata": {
+     "cu": [
+      0,
+      40,
+      100
+     ]
+    },
+    "intended_writes": {
+     "m": "all_rows_of_segments"
+    }
+   },
+   {
+    "name": "spill",
+    "params": {
+     "B": 2,
+     "H": 2,
+     "T": 100,
+     "MASKED": 0
+    },
+    "metadata": {
+     "cu": [
+      0,
+      40,
+      100
+     ]
+    },
+    "intended_writes": {
+     "m": "all_rows_of_segments"
+    }
+   },
+   {
+    "name": "wrap",
+    "params": {
+     "B": 1,
+     "H": 1,
+     "T": 2147483647,
+     "MASKED": 1
+    },
+    "metadata": {
+     "cu": [
+      2147483600,
+      2147483640
+     ]
+    },
+    "intended_writes": {
+     "m": "all_rows_of_segments"
+    }
+   }
+  ]
+ }
+}

@@ -1,0 +1,519 @@
+{
+ "kir_version": 1,
+ "kernel": "same_role",
+ "source": "tests/lean/p1/same_role.kir.json",
+ "ir": "cute-mlir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "M",
+   "type": "i32"
+  },
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "acc",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "mma",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "same_role.py:10",
+       "inst": "cp",
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "data",
+         "write": true,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 80,
+          "w": 32
+         },
+         "ncols": 4
+        }
+       ]
+      },
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "same_role.py:11",
+       "inst": "mma",
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "d",
+         "write": true,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 256,
+          "w": 32
+         },
+         "ncols": 128
+        },
+        {
+         "use": "a",
+         "write": false,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "ncols": 8
+        },
+        {
+         "use": "sf",
+         "write": false,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 80,
+          "w": 32
+         },
+         "ncols": 4
+        },
+        {
+         "use": "sf",
+         "write": false,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 80,
+          "w": 32
+         },
+         "ncols": 4
+        }
+       ]
+      },
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "same_role.py:12",
+       "inst": "mma",
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "d",
+         "write": true,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "ncols": 8
+        }
+       ]
+      }
+     ],
+     "else": [],
+     "loc": "same_role.py:10"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "same_role.py:13",
+       "inst": "cp",
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "data",
+         "write": true,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 80,
+          "w": 32
+         },
+         "ncols": 4
+        }
+       ]
+      },
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "same_role.py:14",
+       "inst": "cp",
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "data",
+         "write": true,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 80,
+          "w": 32
+         },
+         "ncols": 4
+        }
+       ]
+      }
+     ],
+     "else": [],
+     "loc": "same_role.py:13"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 2,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "same_role.py:15",
+       "inst": "mma",
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "d",
+         "write": true,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "ncols": 128
+        }
+       ]
+      },
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "same_role.py:16",
+       "inst": "cp",
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "data",
+         "write": true,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 80,
+          "w": 32
+         },
+         "ncols": 4
+        }
+       ]
+      }
+     ],
+     "else": [],
+     "loc": "same_role.py:15"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 3,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "same_role.py:17",
+       "inst": "mma",
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "d",
+         "write": true,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "ncols": 128
+        }
+       ]
+      },
+      {
+       "op": "event",
+       "ev": "commit_arrive",
+       "loc": "same_role.py:18",
+       "bar": "acc",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "same_role.py:19",
+       "bar": "acc",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "same_role.py:20",
+       "inst": "cp",
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "data",
+         "write": true,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 128,
+         "col": {
+          "e": "const",
+          "v": 80,
+          "w": 32
+         },
+         "ncols": 4
+        }
+       ]
+      }
+     ],
+     "else": [],
+     "loc": "same_role.py:17"
+    }
+   ]
+  }
+ ],
+ "tmem": {
+  "cols": 512,
+  "base": "zero"
+ },
+ "case": {
+  "name": "same_role",
+  "inputs": [
+   {
+    "name": "pipelined",
+    "params": {
+     "M": 0,
+     "MODE": 0
+    }
+   },
+   {
+    "name": "cp_cp",
+    "params": {
+     "M": 0,
+     "MODE": 1
+    }
+   },
+   {
+    "name": "mma_d_cp",
+    "params": {
+     "M": 0,
+     "MODE": 2
+    }
+   },
+   {
+    "name": "mma_d_commit_cp",
+    "params": {
+     "M": 0,
+     "MODE": 3
+    }
+   }
+  ]
+ }
+}

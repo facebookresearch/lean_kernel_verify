@@ -1,0 +1,82 @@
+{
+ "kir_version": 1,
+ "kernel": "cluster_launch",
+ "source": "tests/lean/cluster_launch.kir.json",
+ "ir": "cute-mlir",
+ "grid": [
+  {
+   "e": "var",
+   "name": "G",
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "cluster": [
+  2,
+  1,
+  1
+ ],
+ "params": [
+  {
+   "name": "G",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "worker",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "let",
+     "var": "x",
+     "expr": {
+      "e": "bin",
+      "o": "urem",
+      "a": {
+       "e": "pid",
+       "axis": 0,
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 2,
+       "w": 32
+      },
+      "w": 32
+     },
+     "loc": "cluster.py:90"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "cluster_launch",
+  "inputs": [
+   {
+    "name": "grid4",
+    "params": {
+     "G": 4
+    }
+   },
+   {
+    "name": "grid3",
+    "params": {
+     "G": 3
+    }
+   }
+  ]
+ }
+}

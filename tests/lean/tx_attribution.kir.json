@@ -1,0 +1,58 @@
+{
+  "kir_version": 1,
+  "kernel": "tx_attribution",
+  "source": "tests/lean/tx_attribution.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "K_TILES", "type": "i32"}, {"name": "CROSS", "type": "i32"}, {"name": "NO_EXPECT", "type": "i32"}],
+  "tensors": [
+    {"name": "a", "kind": "desc", "elem_bytes": 2,
+     "shape": [{"e": "const", "v": 64, "w": 32}, {"e": "const", "v": 1024, "w": 32}],
+     "strides": [{"e": "const", "v": 1024, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+     "segments": null, "role": "input", "metadata": false, "box": [64, 32]}
+  ],
+  "barriers": [{"name": "full", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}}],
+  "roles": [
+    {"name": "producer", "warps": 1, "threads_per_issue": 1, "body": [
+      {"op": "for", "var": "k", "loc": "tx.py:10", "lb": {"e": "const", "v": 0, "w": 32},
+       "ub": {"e": "var", "name": "K_TILES", "w": 32}, "step": {"e": "const", "v": 1, "w": 32}, "body": [
+        {"op": "if", "loc": "tx.py:11",
+         "cond": {"e": "cmp", "o": "eq", "w": 1, "a": {"e": "var", "name": "NO_EXPECT", "w": 32}, "b": {"e": "const", "v": 0, "w": 32}},
+         "then": [
+          {"op": "event", "ev": "expect_tx", "bar": "full", "loc": "tx.py:11", "idx": {"e": "const", "v": 0, "w": 32},
+           "bytes": {"e": "const", "v": 4096, "w": 32}}
+         ], "else": []},
+        {"op": "if", "loc": "tx.py:12",
+         "cond": {"e": "cmp", "o": "eq", "w": 1, "a": {"e": "var", "name": "CROSS", "w": 32}, "b": {"e": "const", "v": 0, "w": 32}},
+         "then": [
+          {"op": "event", "ev": "arrive", "bar": "full", "loc": "tx.py:12", "idx": {"e": "const", "v": 0, "w": 32}}
+         ], "else": []},
+        {"op": "event", "ev": "tma_load", "desc": "a", "bar": "full", "loc": "tx.py:13", "idx": {"e": "const", "v": 0, "w": 32},
+         "coords": [{"e": "const", "v": 0, "w": 32},
+                    {"e": "bin", "o": "mul", "w": 32, "addr": true, "a": {"e": "var", "name": "k", "w": 32}, "b": {"e": "const", "v": 32, "w": 32}}]}
+       ]}
+    ]},
+    {"name": "helper", "warps": 1, "threads_per_issue": 1, "body": [
+      {"op": "for", "var": "k", "loc": "tx.py:16", "lb": {"e": "const", "v": 0, "w": 32},
+       "ub": {"e": "var", "name": "K_TILES", "w": 32}, "step": {"e": "const", "v": 1, "w": 32}, "body": [
+        {"op": "if", "loc": "tx.py:17",
+         "cond": {"e": "cmp", "o": "ne", "w": 1, "a": {"e": "var", "name": "CROSS", "w": 32}, "b": {"e": "const", "v": 0, "w": 32}},
+         "then": [
+          {"op": "event", "ev": "arrive", "bar": "full", "loc": "tx.py:17", "idx": {"e": "const", "v": 0, "w": 32}}
+         ], "else": []}
+       ]}
+    ]},
+    {"name": "consumer", "warps": 4, "threads_per_issue": 1, "body": [
+      {"op": "for", "var": "k", "loc": "tx.py:20", "lb": {"e": "const", "v": 0, "w": 32},
+       "ub": {"e": "var", "name": "K_TILES", "w": 32}, "step": {"e": "const", "v": 1, "w": 32}, "body": [
+        {"op": "event", "ev": "wait", "bar": "full", "loc": "tx.py:21", "idx": {"e": "const", "v": 0, "w": 32},
+         "parity": {"e": "bin", "o": "and", "w": 32, "a": {"e": "var", "name": "k", "w": 32}, "b": {"e": "const", "v": 1, "w": 32}}}
+       ]}
+    ]}
+  ],
+  "case": {"name": "tx_attribution", "inputs": [
+    {"name": "same_role", "params": {"K_TILES": 2, "CROSS": 0, "NO_EXPECT": 0}},
+    {"name": "cross_role_expect", "params": {"K_TILES": 2, "CROSS": 1, "NO_EXPECT": 0}},
+    {"name": "no_expect", "params": {"K_TILES": 2, "CROSS": 0, "NO_EXPECT": 1}}
+  ]}
+}

@@ -1,0 +1,247 @@
+{
+ "kir_version": 1,
+ "kernel": "meta_oob_load",
+ "source": "tests/lean/meta_oob_load.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "N_META",
+   "type": "i32"
+  },
+  {
+   "name": "DUP",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "meta",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "var",
+     "name": "N_META",
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": true
+  },
+  {
+   "name": "out",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "const",
+     "v": 8,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "output",
+   "metadata": false
+  }
+ ],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "default",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "let",
+     "var": "v",
+     "expr": {
+      "e": "load",
+      "tensor": "meta",
+      "index": [
+       {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       }
+      ],
+      "w": 32
+     },
+     "loc": "oob.py:5"
+    },
+    {
+     "op": "event",
+     "ev": "gstore",
+     "loc": "oob.py:6",
+     "tensor": "out",
+     "offsets": {
+      "t": "bin",
+      "o": "add",
+      "a": {
+       "t": "range",
+       "start": 0,
+       "end": 4,
+       "shape": [
+        4
+       ],
+       "w": 32
+      },
+      "b": {
+       "t": "splat",
+       "a": {
+        "e": "bin",
+        "o": "mul",
+        "a": {
+         "e": "pid",
+         "axis": 0,
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 4,
+         "w": 32
+        },
+        "w": 32,
+        "addr": true
+       },
+       "shape": [
+        4
+       ],
+       "w": 32
+      },
+      "shape": [
+       4
+      ],
+      "w": 32,
+      "addr": true
+     },
+     "mask": null
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "bin",
+      "o": "and",
+      "a": {
+       "e": "cmp",
+       "o": "ne",
+       "a": {
+        "e": "var",
+        "name": "DUP",
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "w": 1
+      },
+      "b": {
+       "e": "cmp",
+       "o": "eq",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "w": 1
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "gstore",
+       "loc": "oob.py:8",
+       "tensor": "out",
+       "offsets": {
+        "t": "full",
+        "v": 0,
+        "shape": [
+         1
+        ],
+        "w": 32
+       },
+       "mask": null
+      }
+     ],
+     "else": [],
+     "loc": "oob.py:7"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "meta_oob_load",
+  "inputs": [
+   {
+    "name": "in_range",
+    "params": {
+     "N_META": 2,
+     "DUP": 0
+    },
+    "metadata": {
+     "meta": [
+      3,
+      5
+     ]
+    },
+    "intended_writes": {
+     "out": "all"
+    }
+   },
+   {
+    "name": "out_of_range",
+    "params": {
+     "N_META": 1,
+     "DUP": 1
+    },
+    "metadata": {
+     "meta": [
+      3
+     ]
+    },
+    "intended_writes": {
+     "out": "all"
+    }
+   }
+  ]
+ }
+}

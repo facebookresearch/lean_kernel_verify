@@ -1,0 +1,37 @@
+{
+  "kir_version": 1,
+  "kernel": "distinct_locs",
+  "source": "tests/lean/distinct_locs.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "const", "v": 13, "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "LAST", "type": "i32"}],
+  "tensors": [
+    {"name": "x", "kind": "global", "elem_bytes": 4, "shape": [{"e": "const", "v": 16, "w": 32}],
+     "strides": [{"e": "const", "v": 1, "w": 32}], "segments": null, "role": "input", "metadata": false},
+    {"name": "y", "kind": "global", "elem_bytes": 4, "shape": [{"e": "const", "v": 16, "w": 32}],
+     "strides": [{"e": "const", "v": 1, "w": 32}], "segments": null, "role": "output", "metadata": false}
+  ],
+  "barriers": [],
+  "roles": [
+    {"name": "default", "warps": 1, "threads_per_issue": 32, "body": [
+      {"op": "event", "ev": "gload", "tensor": "x", "loc": "distinct_locs.py:5", "mask": null,
+       "offsets": {"t": "splat", "shape": [1], "w": 32,
+                   "a": {"e": "bin", "o": "add", "w": 32, "addr": true, "a": {"e": "pid", "axis": 0, "w": 32}, "b": {"e": "const", "v": 100, "w": 32}}}},
+      {"op": "event", "ev": "gatomic", "tensor": "y", "loc": "distinct_locs.py:6", "mask": null,
+       "offsets": {"t": "splat", "shape": [1], "w": 32, "a": {"e": "pid", "axis": 0, "w": 32}}},
+      {"op": "if", "loc": "distinct_locs.py:7",
+       "cond": {"e": "cmp", "o": "eq", "w": 1, "a": {"e": "pid", "axis": 0, "w": 32}, "b": {"e": "var", "name": "LAST", "w": 32}},
+       "then": [
+         {"op": "event", "ev": "gload", "tensor": "x", "loc": "distinct_locs.py:8", "mask": null,
+          "offsets": {"t": "splat", "shape": [1], "w": 32, "a": {"e": "const", "v": 200, "w": 32}}},
+         {"op": "event", "ev": "gatomic", "tensor": "y", "loc": "distinct_locs.py:9", "mask": null,
+          "offsets": {"t": "splat", "shape": [1], "w": 32, "a": {"e": "const", "v": 15, "w": 32}}}
+       ],
+       "else": []}
+    ]}
+  ],
+  "case": {"name": "locs", "inputs": [
+    {"name": "last_cta", "params": {"LAST": 12}, "intended_writes": {"y": []}},
+    {"name": "no_cta", "params": {"LAST": 13}, "intended_writes": {"y": []}}
+  ]}
+}

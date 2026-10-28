@@ -1,0 +1,288 @@
+{
+  "kir_version": 1,
+  "kernel": "m6_expect_phase_shift",
+  "source": "tests/lean/m6_expect_phase_shift.kir.json",
+  "ir": "ttgir",
+  "grid": [
+    {
+      "e": "bin",
+      "o": "sdiv",
+      "w": 32,
+      "a": {
+        "e": "bin",
+        "o": "add",
+        "w": 32,
+        "a": {"e": "var", "name": "N", "w": 32},
+        "b": {"e": "const", "v": 63, "w": 32}
+      },
+      "b": {"e": "const", "v": 64, "w": 32}
+    },
+    {"e": "const", "v": 1, "w": 32},
+    {"e": "const", "v": 1, "w": 32}
+  ],
+  "params": [{"name": "N", "type": "i32"}, {"name": "K_TILES", "type": "i32"}],
+  "tensors": [
+    {
+      "name": "a",
+      "kind": "desc",
+      "elem_bytes": 2,
+      "shape": [
+        {"e": "var", "name": "N", "w": 32},
+        {
+          "e": "bin",
+          "o": "mul",
+          "w": 32,
+          "a": {"e": "var", "name": "K_TILES", "w": 32},
+          "b": {"e": "const", "v": 32, "w": 32}
+        }
+      ],
+      "strides": [
+        {
+          "e": "bin",
+          "o": "mul",
+          "w": 32,
+          "a": {"e": "var", "name": "K_TILES", "w": 32},
+          "b": {"e": "const", "v": 32, "w": 32}
+        },
+        {"e": "const", "v": 1, "w": 32}
+      ],
+      "segments": null,
+      "role": "input",
+      "metadata": false,
+      "box": [64, 32]
+    },
+    {
+      "name": "out",
+      "kind": "desc",
+      "elem_bytes": 2,
+      "shape": [{"e": "var", "name": "N", "w": 32}, {"e": "const", "v": 16, "w": 32}],
+      "strides": [{"e": "const", "v": 16, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+      "segments": null,
+      "role": "output",
+      "metadata": false,
+      "box": [64, 16]
+    }
+  ],
+  "barriers": [
+    {"name": "full", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 2, "w": 32}},
+    {"name": "empty", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 2, "w": 32}}
+  ],
+  "roles": [
+    {
+      "name": "producer",
+      "warps": 1,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "let",
+          "var": "m0",
+          "loc": "pipeline_ok.py:10",
+          "expr": {
+            "e": "bin",
+            "o": "mul",
+            "w": 32,
+            "addr": true,
+            "a": {"e": "pid", "axis": 0, "w": 32},
+            "b": {"e": "const", "v": 64, "w": 32}
+          }
+        },
+        {
+          "op": "for",
+          "var": "k",
+          "loc": "pipeline_ok.py:11",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {"e": "var", "name": "K_TILES", "w": 32},
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "let",
+              "var": "s",
+              "expr": {
+                "e": "bin",
+                "o": "srem",
+                "w": 32,
+                "a": {"e": "var", "name": "k", "w": 32},
+                "b": {"e": "const", "v": 2, "w": 32}
+              }
+            },
+            {
+              "op": "let",
+              "var": "ph",
+              "expr": {
+                "e": "bin",
+                "o": "and",
+                "w": 32,
+                "a": {
+                  "e": "bin",
+                  "o": "sdiv",
+                  "w": 32,
+                  "a": {"e": "var", "name": "k", "w": 32},
+                  "b": {"e": "const", "v": 2, "w": 32}
+                },
+                "b": {"e": "const", "v": 1, "w": 32}
+              }
+            },
+            {
+              "op": "event",
+              "ev": "wait",
+              "bar": "empty",
+              "loc": "pipeline_ok.py:12",
+              "idx": {"e": "var", "name": "s", "w": 32},
+              "parity": {
+                "e": "bin",
+                "o": "xor",
+                "w": 32,
+                "a": {"e": "var", "name": "ph", "w": 32},
+                "b": {"e": "const", "v": 1, "w": 32}
+              }
+            },
+            {
+              "op": "event",
+              "ev": "expect_tx",
+              "bar": "full",
+              "loc": "pipeline_ok.py:13",
+              "idx": {"e": "var", "name": "s", "w": 32},
+              "bytes": {
+                "e": "select",
+                "w": 32,
+                "c": {
+                  "e": "cmp",
+                  "o": "eq",
+                  "w": 1,
+                  "a": {
+                    "e": "bin",
+                    "o": "and",
+                    "w": 32,
+                    "a": {
+                      "e": "bin",
+                      "o": "sdiv",
+                      "w": 32,
+                      "a": {"e": "var", "name": "k", "w": 32},
+                      "b": {"e": "const", "v": 2, "w": 32}
+                    },
+                    "b": {"e": "const", "v": 1, "w": 32}
+                  },
+                  "b": {"e": "const", "v": 0, "w": 32}
+                },
+                "a": {"e": "const", "v": 8192, "w": 32},
+                "b": {"e": "const", "v": 0, "w": 32}
+              }
+            },
+            {
+              "op": "event",
+              "ev": "arrive",
+              "bar": "full",
+              "loc": "pipeline_ok.py:13",
+              "idx": {"e": "var", "name": "s", "w": 32}
+            },
+            {
+              "op": "event",
+              "ev": "tma_load",
+              "desc": "a",
+              "bar": "full",
+              "loc": "pipeline_ok.py:14",
+              "idx": {"e": "var", "name": "s", "w": 32},
+              "coords": [
+                {"e": "var", "name": "m0", "w": 32},
+                {
+                  "e": "bin",
+                  "o": "mul",
+                  "w": 32,
+                  "addr": true,
+                  "a": {"e": "var", "name": "k", "w": 32},
+                  "b": {"e": "const", "v": 32, "w": 32}
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "consumer",
+      "warps": 4,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "for",
+          "var": "k",
+          "loc": "pipeline_ok.py:20",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {"e": "var", "name": "K_TILES", "w": 32},
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "let",
+              "var": "s",
+              "expr": {
+                "e": "bin",
+                "o": "srem",
+                "w": 32,
+                "a": {"e": "var", "name": "k", "w": 32},
+                "b": {"e": "const", "v": 2, "w": 32}
+              }
+            },
+            {
+              "op": "let",
+              "var": "ph",
+              "expr": {
+                "e": "bin",
+                "o": "and",
+                "w": 32,
+                "a": {
+                  "e": "bin",
+                  "o": "sdiv",
+                  "w": 32,
+                  "a": {"e": "var", "name": "k", "w": 32},
+                  "b": {"e": "const", "v": 2, "w": 32}
+                },
+                "b": {"e": "const", "v": 1, "w": 32}
+              }
+            },
+            {
+              "op": "event",
+              "ev": "wait",
+              "bar": "full",
+              "loc": "pipeline_ok.py:21",
+              "idx": {"e": "var", "name": "s", "w": 32},
+              "parity": {"e": "var", "name": "ph", "w": 32}
+            },
+            {
+              "op": "event",
+              "ev": "arrive",
+              "bar": "empty",
+              "loc": "pipeline_ok.py:22",
+              "idx": {"e": "var", "name": "s", "w": 32}
+            }
+          ]
+        },
+        {
+          "op": "event",
+          "ev": "tma_store",
+          "desc": "out",
+          "loc": "pipeline_ok.py:24",
+          "coords": [
+            {
+              "e": "bin",
+              "o": "mul",
+              "w": 32,
+              "addr": true,
+              "a": {"e": "pid", "axis": 0, "w": 32},
+              "b": {"e": "const", "v": 64, "w": 32}
+            },
+            {"e": "const", "v": 0, "w": 32}
+          ]
+        }
+      ]
+    }
+  ],
+  "case": {
+    "name": "pipeline",
+    "inputs": [
+      {"name": "two_tiles_k3", "params": {"N": 100, "K_TILES": 3}, "intended_writes": {"out": "all"}},
+      {"name": "one_tile_k1", "params": {"N": 64, "K_TILES": 1}, "intended_writes": {"out": "all"}},
+      {"name": "zero_k", "params": {"N": 64, "K_TILES": 0}, "intended_writes": {"out": "all"}},
+      {"name": "five_tiles_k4", "params": {"N": 300, "K_TILES": 4}, "intended_writes": {"out": "all"}}
+    ]
+  }
+}

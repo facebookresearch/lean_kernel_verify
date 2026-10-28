@@ -1,0 +1,224 @@
+{
+  "kir_version": 1,
+  "kernel": "tx_skip_confirmed",
+  "source": "tests/lean/tx_skip_confirmed.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "CONFIRM", "type": "i32"}],
+  "tensors": [
+    {
+      "name": "a",
+      "kind": "desc",
+      "elem_bytes": 2,
+      "shape": [{"e": "const", "v": 4096, "w": 32}, {"e": "const", "v": 4096, "w": 32}],
+      "strides": [{"e": "const", "v": 4096, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+      "segments": null,
+      "role": "input",
+      "metadata": false,
+      "box": [64, 32]
+    }
+  ],
+  "barriers": [
+    {"name": "full", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}},
+    {"name": "empty", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}},
+    {"name": "sig", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}},
+    {"name": "sig2", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 1, "w": 32}}
+  ],
+  "roles": [
+    {
+      "name": "producer",
+      "warps": 1,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "for",
+          "var": "k",
+          "loc": "tx_skip_confirmed.py:10",
+          "lb": {"e": "const", "v": 0, "w": 32},
+          "ub": {"e": "const", "v": 3, "w": 32},
+          "step": {"e": "const", "v": 1, "w": 32},
+          "body": [
+            {
+              "op": "event",
+              "ev": "wait",
+              "loc": "tx_skip_confirmed.py:11",
+              "bar": "empty",
+              "idx": {"e": "const", "v": 0, "w": 32},
+              "parity": {
+                "e": "bin",
+                "o": "xor",
+                "a": {
+                  "e": "bin",
+                  "o": "and",
+                  "a": {"e": "var", "name": "k", "w": 32},
+                  "b": {"e": "const", "v": 1, "w": 32},
+                  "w": 32
+                },
+                "b": {"e": "const", "v": 1, "w": 32},
+                "w": 32
+              }
+            },
+            {
+              "op": "event",
+              "ev": "expect_tx",
+              "loc": "tx_skip_confirmed.py:12",
+              "bar": "full",
+              "idx": {"e": "const", "v": 0, "w": 32},
+              "bytes": {"e": "const", "v": 4096, "w": 32}
+            },
+            {
+              "op": "event",
+              "ev": "arrive",
+              "loc": "tx_skip_confirmed.py:12",
+              "bar": "full",
+              "idx": {"e": "const", "v": 0, "w": 32}
+            },
+            {
+              "op": "event",
+              "ev": "tma_load",
+              "loc": "tx_skip_confirmed.py:13",
+              "desc": "a",
+              "bar": "full",
+              "idx": {"e": "const", "v": 0, "w": 32},
+              "coords": [
+                {
+                  "e": "bin",
+                  "o": "mul",
+                  "a": {"e": "var", "name": "k", "w": 32},
+                  "b": {"e": "const", "v": 64, "w": 32},
+                  "w": 32,
+                  "addr": true
+                },
+                {"e": "const", "v": 0, "w": 32}
+              ]
+            },
+            {
+              "op": "event",
+              "ev": "arrive",
+              "loc": "tx_skip_confirmed.py:14",
+              "bar": "sig",
+              "idx": {"e": "const", "v": 0, "w": 32}
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "observer",
+      "warps": 1,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "event",
+          "ev": "wait",
+          "loc": "tx_skip_confirmed.py:18",
+          "bar": "full",
+          "idx": {"e": "const", "v": 0, "w": 32},
+          "parity": {"e": "const", "v": 0, "w": 32}
+        },
+        {
+          "op": "event",
+          "ev": "wait",
+          "loc": "tx_skip_confirmed.py:19",
+          "bar": "full",
+          "idx": {"e": "const", "v": 0, "w": 32},
+          "parity": {"e": "const", "v": 1, "w": 32}
+        },
+        {
+          "op": "event",
+          "ev": "arrive",
+          "loc": "tx_skip_confirmed.py:20",
+          "bar": "sig2",
+          "idx": {"e": "const", "v": 0, "w": 32}
+        }
+      ]
+    },
+    {
+      "name": "consumer",
+      "warps": 4,
+      "threads_per_issue": 1,
+      "body": [
+        {
+          "op": "event",
+          "ev": "wait",
+          "loc": "tx_skip_confirmed.py:24",
+          "bar": "full",
+          "idx": {"e": "const", "v": 0, "w": 32},
+          "parity": {"e": "const", "v": 0, "w": 32}
+        },
+        {
+          "op": "event",
+          "ev": "arrive",
+          "loc": "tx_skip_confirmed.py:25",
+          "bar": "empty",
+          "idx": {"e": "const", "v": 0, "w": 32}
+        },
+        {
+          "op": "event",
+          "ev": "wait",
+          "loc": "tx_skip_confirmed.py:26",
+          "bar": "sig",
+          "idx": {"e": "const", "v": 0, "w": 32},
+          "parity": {"e": "const", "v": 0, "w": 32}
+        },
+        {
+          "op": "event",
+          "ev": "wait",
+          "loc": "tx_skip_confirmed.py:27",
+          "bar": "sig",
+          "idx": {"e": "const", "v": 0, "w": 32},
+          "parity": {"e": "const", "v": 1, "w": 32}
+        },
+        {
+          "op": "event",
+          "ev": "arrive",
+          "loc": "tx_skip_confirmed.py:28",
+          "bar": "empty",
+          "idx": {"e": "const", "v": 0, "w": 32}
+        },
+        {
+          "op": "if",
+          "loc": "tx_skip_confirmed.py:29",
+          "cond": {
+            "e": "cmp",
+            "o": "ne",
+            "a": {"e": "var", "name": "CONFIRM", "w": 32},
+            "b": {"e": "const", "v": 0, "w": 32},
+            "w": 1
+          },
+          "then": [
+            {
+              "op": "event",
+              "ev": "wait",
+              "loc": "tx_skip_confirmed.py:30",
+              "bar": "sig2",
+              "idx": {"e": "const", "v": 0, "w": 32},
+              "parity": {"e": "const", "v": 0, "w": 32}
+            }
+          ],
+          "else": []
+        },
+        {
+          "op": "event",
+          "ev": "wait",
+          "loc": "tx_skip_confirmed.py:31",
+          "bar": "full",
+          "idx": {"e": "const", "v": 0, "w": 32},
+          "parity": {"e": "const", "v": 0, "w": 32}
+        },
+        {
+          "op": "event",
+          "ev": "wait",
+          "loc": "tx_skip_confirmed.py:32",
+          "bar": "sig",
+          "idx": {"e": "const", "v": 0, "w": 32},
+          "parity": {"e": "const", "v": 0, "w": 32}
+        }
+      ]
+    }
+  ],
+  "case": {
+    "name": "confirm",
+    "inputs": [{"name": "confirmed", "params": {"CONFIRM": 1}}, {"name": "unconfirmed", "params": {"CONFIRM": 0}}]
+  }
+}
