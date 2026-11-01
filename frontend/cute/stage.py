@@ -12,6 +12,10 @@ its options; recorded per compile by host_patches.py). MLIR expands it to
     cute-expand-ops, cute-fold-static, insert-range-for-threadids, canonicalize, cse,
     loop-invariant-code-motion, ..., convert-scf-to-cf, ..., cuda-to-binary
 
+(DSL 4.4.2; 4.6.1 adds propagate-divby-through-control-flow, infer-kernel-smem-usage and
+loop-vectorize before cute-expand-ops, and hoist-speculatable-from-scf-if before
+canonicalize)
+
 The analyzed stage is that exact prefix up to and including the first `cse`: every
 layout function (local_tile, partitions, composition) has been folded into explicit
 crd2idx / add_offset arithmetic and every copy atom expanded into per-thread
@@ -20,7 +24,7 @@ control flow is still structured. This file contains no pass list of its own.
 
 The kernel stage runs with the pass verifier off and verifies every op afterwards; the
 failures are returned and to_kir.py accepts only those its op table documents (with
-cutlass-dsl 4.4.2 the global operand of `cute_nvgpu.arch.copy.SM90.bulk_copy_g2s` loses
+cutlass-dsl 4.4.2 and 4.6.1 the global operand of `cute_nvgpu.arch.copy.SM90.bulk_copy_g2s` loses
 its alignment attribute in `cute-expand-ops`).
 
 The host function is read from a second lowering without `cute-expand-ops`, where a TMA

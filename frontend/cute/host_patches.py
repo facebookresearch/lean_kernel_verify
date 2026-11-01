@@ -17,10 +17,10 @@ patches"); nothing else on the host path is changed:
   P4 DLPack capsules made by cute.runtime.from_dlpack report device kDLCUDA, so the DSL
      types those tensors exactly as CUDA tensors (global memory) at compile time. Each
      runtime tensor remembers the torch tensor it wraps (its memory).
-  P5 BaseDSL.compile_and_cache records the pass pipeline the DSL computes for the
-     compile (its own _get_pipeline + preprocess_pipeline with the target arch) and
-     stops before running it. The DSL has already written (CUTE_DSL_KEEP_IR) and
-     verified the initial MLIR; nothing is lowered, linked or loaded.
+  P5 BaseDSL.compile_and_cache records the initial MLIR it is handed (the DSL has
+     verified it; with locations) and the pass pipeline the DSL computes
+     for the compile (its own _get_pipeline + preprocess_pipeline with the target arch),
+     and stops before running it: nothing is lowered, linked or loaded.
   P6 cute.compile returns a recorder: the host's launch calls record their arguments
      instead of running the kernel (a runtime tensor as the torch tensor it wraps), with
      the sources of each tensor argument's data and the storages its integer arguments
@@ -38,19 +38,24 @@ import types
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+import cutlass
 import torch
 from cutlass import Numeric
 
 KDLCUDA = 2
 METADATA_LIMIT = 1 << 16  # integer tensors up to this many elements keep their contents
+# The initial MLIR is kept in DSL 4.4.2's custom form (the text of its CUTE_DSL_KEEP_IR file)
+# and in generic form otherwise: DSL 4.6.1's custom form of nvvm.barrier with a location
+# does not parse back.
+GENERIC_FORM = cutlass.__version__ != "4.4.2"
 
 
 class _Captured(Exception):
-    """Raised by the patched compile_and_cache once the initial MLIR is on disk."""
+    """Raised by the patched compile_and_cache with the initial MLIR and pipeline."""
 
-    def __init__(self, path: str, pipeline: str):
-        super().__init__(path)
-        self.path = path
+    def __init__(self, mlir: str, pipeline: str):
+        super().__init__("initial MLIR captured before the DSL's pass pipeline")
+        self.mlir = mlir
         self.pipeline = pipeline
 
 
@@ -321,7 +326,11 @@ def installed(num_sms: int):
         # The arch and pipeline exactly as BaseDSL.compile_and_cache computes them.
         arch = self.compile_options.gpu_arch or self.envar.arch
         raise _Captured(
-            str(self.dump_mlir_path),
+            # (+ newline: the text save_ir writes, so 4.4.2 digests are unchanged)
+            module.operation.get_asm(
+                enable_debug_info=True, print_generic_op_form=GENERIC_FORM
+            )
+            + "\n",
             self.preprocess_pipeline(self._get_pipeline(pipeline), arch),
         )
 
@@ -342,8 +351,7 @@ def installed(num_sms: int):
             raise RuntimeError(
                 "cute.compile returned without reaching compile_and_cache"
             )
-        with open(cause.path) as f:
-            text = f.read()
+        text = cause.mlir
         c = Compile(
             len(rec.compiles),
             _qualname(fn),

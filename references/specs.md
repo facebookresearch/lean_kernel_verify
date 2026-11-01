@@ -563,7 +563,7 @@ with at least one note, whatever their outcome (a PASS can have notes).
   selected only for huge inputs (i64 indexing) or by non-default environment
   switches are checked only where a case selects them. Ping-pong consumers that
   split one slot's phases fail P0-2 unless a uniform share assignment also fits
-  (lockstep ledger). CuTe supports sm_100 with DSL 4.4.2 only.
+  (lockstep ledger). CuTe supports sm_100 with DSL 4.4.2 and 4.6.1.
 
 ### Spec model
 

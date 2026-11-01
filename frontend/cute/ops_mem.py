@@ -21,6 +21,7 @@ from . import expr as E, layout as L
 from .interp import ArithIter, Data, Lay, Opaque, Ptr, Remote, Translator, Tup, View
 from .ops import (
     advance,
+    BULK_G2S_ELECTS,
     CLASSIFIERS,
     effect,
     elem_bits,
@@ -253,6 +254,11 @@ def _llvm_ls(tr, op):
         gaccess(tr, op, kind, p, [(n, E.const(bits // p.bits, 64))], bits)
     else:  # elements narrower than the pointer's: one access of n * bits
         gaccess(tr, op, kind, p, [], n * bits)
+    # DSL 4.6.1 lowers cute.memref.load of a global integer to llvm.load: a scalar one
+    # whose value the slice keeps is a metadata read, as there.
+    scalar_int = re.fullmatch(r"i\d+", rtype(tr, op).strip()) if is_load else None
+    if scalar_int and n == 1 and tr.relevant(op.results[0]):
+        return metadata_value(tr, op, p, E.const(0, 64), bits)
     return tr.data(op) if is_load else None
 
 
@@ -373,6 +379,44 @@ def _cp_async(tr, op):
 @effect("cute_nvgpu.arch.copy.SM80.cp_async")
 def _cp_async_kept(tr, op):
     return list(range(1, len(op.operands)))
+
+
+@op("nvvm.cp.async.shared.global")
+def _cp_async_nvvm(tr, op):
+    """DSL 4.6.1's cp.async global -> shared (dst, src[, src-size]) of `size` bytes: a
+    src-size of 0 reads nothing (zero fill); the DSL passes 0 or `size` (asserted)."""
+    src = tr.val(op, 1)
+    if space_of(otype(tr, op, 1)) != "gmem" or not isinstance(src, Ptr):
+        tr.fail(op, "cp.async source is not a kernel tensor pointer")
+    size = int(op.props["size"].split(":")[0])
+    saved = tr.mask
+    if len(op.operands) > 2:
+        n = tr.int_of(op, 2, "cp.async src-size")
+        zero, full = (E.cmp("eq", n, E.const(v, E.width(n))) for v in (0, size))
+        tr.require(
+            op, E.bin("or", zero, full), "cp.async src-size is 0 or the copy size"
+        )
+        tr.mask = E.and1(saved, E.not1(zero))
+    gaccess(tr, op, "gload", src, [], 8 * size)
+    tr.mask = saved
+
+
+@effect("nvvm.cp.async.shared.global")
+def _cp_async_nvvm_kept(tr, op):
+    return list(range(1, len(op.operands)))
+
+
+@op("cute.ptr.load")
+def _ptr_load(tr, op):
+    # DSL 4.6.1's scalar load through a CuTe pointer: register/shared memory is data.
+    if space_of(otype(tr, op, 0)) not in ("rmem", "smem"):
+        tr.fail(op, f"cute.ptr.load from {otype(tr, op, 0)}")
+    return tr.data(op)
+
+
+@effect("cute.ptr.load")
+def _ptr_load_kept(tr, op):
+    return [0] if space_of(otype(tr, op, 0)) not in ("rmem", "smem") else None
 
 
 # ------------------------------------------------------------- TMA and bulk copies
@@ -500,10 +544,10 @@ def _tma_load(tr, op):
     t["uses"].add("gload")
     r = len(coords)
     v = [E.resize(tr.uniform(c), 64) for c in coords] + [
-        E.resize(x, 64) for x in d["shape"] + d["strides"]
+        E.resize(x, 64) for x in d["shape"] + d["strides"] + [d["off"]]
     ]
     tr.warp_event(op, {"op": "event", "ev": "gload", "tensor": d["base"], "loc": tr.loc(op),
-                       **_box_footprint(E.to_json, d["box"], v[:r], v[r : 2 * r], v[2 * r :])})  # fmt: skip
+                       **_box_footprint(E.to_json, d["box"], v[:r], v[r : 2 * r], v[2 * r : 3 * r], v[3 * r])})  # fmt: skip
 
 
 @effect("cute_nvgpu.arch.copy.SM100.tma_load")
@@ -543,11 +587,13 @@ def _tma_store(tr, op):
     kind = "gatomic" if is_reduce else "gstore"
     t["uses"].add(kind)
     r = len(coords)
-    operands = coords + [E.resize(x, 64) for x in d["shape"] + d["strides"]]
+    operands = coords + [
+        E.resize(x, 64) for x in d["shape"] + d["strides"] + [d["off"]]
+    ]
 
     def build(v, j):
         return {"op": "event", "ev": kind, "tensor": d["base"], "loc": tr.loc(op),
-                **_box_footprint(j, d["box"], v[:r], v[r : 2 * r], v[2 * r :])}  # fmt: skip
+                **_box_footprint(j, d["box"], v[:r], v[r : 2 * r], v[2 * r : 3 * r], v[3 * r])}  # fmt: skip
 
     if is_reduce:
         _uni, var = tr.split_mask()
@@ -570,8 +616,9 @@ def _tma_store(tr, op):
     tr.waterfall_event(op, raw + [src.off], operands, build)
 
 
-def _box_footprint(j, box, coords, shape, strides) -> dict:
-    """offsets/mask TExprs of the elements c + i (i in the box) inside [0, shape)."""
+def _box_footprint(j, box, coords, shape, strides, off=None) -> dict:
+    """offsets/mask TExprs of the elements c + i (i in the box) inside [0, shape), at
+    off + sum (c + i) * stride (`off`: the descriptor view's offset from its tensor)."""
     full = [b for b in box if b > 1] or [1]
     axes = {d: k for k, d in enumerate(d for d, b in enumerate(box) if b > 1)}
 
@@ -603,6 +650,8 @@ def _box_footprint(j, box, coords, shape, strides) -> dict:
         inside = node("bin", 1, o="and", a=node("cmp", 1, o="sge", a=pos, b=node("full", 64, v=0)),
                       b=node("cmp", 1, o="slt", a=pos, b=lift(n)))  # fmt: skip
         mask = inside if mask is None else node("bin", 1, o="and", a=mask, b=inside)
+    if off is not None and not E.is_const(off, 0):
+        offsets = node("bin", 64, o="add", a=lift(off), b=offsets)
     return {"offsets": offsets, "mask": mask}
 
 
@@ -617,7 +666,10 @@ def _bulk_g2s(tr, op):
     """cp.async.bulk global -> shared of `size` bytes completing on an mbarrier. KIR has
     no bulk-copy event: a gload carries the footprint (P0-1) and a tma_load on a 1-D
     descriptor over the source tensor's storage (box = size) the transaction bytes the
-    barrier receives (P0-4)."""
+    barrier receives (P0-4). Issuing threads: every executing thread with DSL 4.4.2; with
+    the releases in ops.BULK_G2S_ELECTS the DSL lowers the copy to a full-mask elect.sync
+    and the copy, so it is issued once per warp, as under an explicit elect_one, each
+    issuing warp fully active (as a TMA load)."""
     if _segment(op, 3):
         tr.fail(op, "multicast bulk copy")
     p = tr.val(op, 0)
@@ -629,12 +681,24 @@ def _bulk_g2s(tr, op):
     if p.bits != eb * 8 or nbytes % eb:
         tr.fail(op, "bulk copy of a recast element type or of partial elements")
     n = nbytes // eb
+    saved = tr.mask
+    if tr.k.dsl in BULK_G2S_ELECTS:
+        _uni, var = tr.split_mask()
+        act = tr.active(var)
+        if act is None:
+            tr.fail(
+                op,
+                "bulk copy (lowered to elect.sync) under a lane condition that depends on runtime values",
+            )
+        tr.full_warps(op, act, "bulk copy (lowered to elect.sync)")
+        tr.mask = E.and1(saved, E.ELECT)
     gaccess(tr, op, "gload", p, [(n, E.const(1, 64))])
     name = f"bulk_{p.base}_{n}"
     tr.k.descs.setdefault(
         name, {"bulk": p.base, "box": [n], "scale": 1, "pack": 1, "uses": set()}
     )["uses"].add("tma_load")
     tr.barrier_event(op, "tma_load", tr.val(op, 2), "thread", desc=name, coords=[p.off])
+    tr.mask = saved
 
 
 @effect("cute_nvgpu.arch.copy.SM90.bulk_copy_g2s")
@@ -645,10 +709,12 @@ def _bulk_kept(tr, op):
 # ------------------------------------------------------------------------ mbarriers
 
 
-@op("nvvm.mbarrier.init.shared")
+@op("nvvm.mbarrier.init.shared", "nvvm.mbarrier.init")
 def _mbar_init(tr, op):
     # Several threads initializing one barrier with the same count (the DSL helpers init
     # with every lane of the warp) leave it in the state of one initialization.
+    if len(op.operands) > 2:
+        tr.fail(op, f"predicated {op.name}")
     tr.barrier_event(
         op,
         "bar_init",
@@ -658,9 +724,12 @@ def _mbar_init(tr, op):
     )
 
 
-@op("nvvm.mapa.shared.cluster")
+@op("nvvm.mapa.shared.cluster", "nvvm.mapa")
 def _mapa(tr, op):
-    """mapa: the shared-memory address `ptr` in the CTA of rank `cta` of the cluster."""
+    """mapa: the shared-memory address `ptr` in the CTA of rank `cta` of the cluster
+    (DSL 4.6.1 spells it nvvm.mapa, shared::cta -> shared::cluster pointer)."""
+    if op.name == "nvvm.mapa" and "!llvm.ptr<7>" not in rtype(tr, op):
+        tr.fail(op, f"nvvm.mapa to {rtype(tr, op)} (only a shared::cluster pointer)")
     p = tr.val(op, 0)
     if isinstance(p, Data):
         return p
@@ -692,13 +761,37 @@ def _mbar_txn(tr, op):
         tr.fail(op, f"mbarrier transaction kind {kind}")
 
 
+def _mbar_cta(tr, op):
+    """DSL 4.6.1 mbarrier arrive/expect_tx attributes, where present: CTA scope, release
+    semantics."""
+    for name, want in (("scope", "cta"), ("relaxed", "false")):
+        if name in op.props:
+            _check_attr(tr, op, name, want)
+
+
 @op("nvvm.mbarrier.arrive.shared", "nvvm.mbarrier.arrive")
 def _mbar_arrive(tr, op):
+    _mbar_cta(tr, op)  # DSL 4.6.1: (ptr[, count]) {relaxed, scope}
+    if len(op.operands) > 1 and not E.is_const(tr.int_of(op, 1, "arrive count"), 1):
+        tr.fail(op, "mbarrier arrive with a count other than 1")
     tr.barrier_event(op, "arrive", tr.val(op, 0), "count")
     return [tr.data(op)] * len(op.results)
 
 
-@op("nvvm.mbarrier.try_wait.parity.shared")
+@op("nvvm.mbarrier.arrive.expect_tx", "nvvm.mbarrier.expect_tx")
+def _mbar_expect_tx(tr, op):
+    # DSL 4.6.1's nvvm.mbarrier.txn kinds arrive_expect_tx and expect_tx.
+    if len(op.operands) > 2:
+        tr.fail(op, f"predicated {op.name}")
+    _mbar_cta(tr, op)
+    p = tr.val(op, 0)
+    n = tr.int_of(op, 1, "mbarrier transaction count")
+    tr.barrier_event(op, "expect_tx", p, "thread", bytes=n)
+    if op.name == "nvvm.mbarrier.arrive.expect_tx":
+        tr.barrier_event(op, "arrive", p, "count")
+
+
+@op("nvvm.mbarrier.try_wait.parity.shared", "nvvm.mbarrier.try_wait.parity")
 def _mbar_wait(tr, op):
     if op.results:
         tr.fail(
@@ -709,7 +802,7 @@ def _mbar_wait(tr, op):
     )
 
 
-@op("nvvm.tcgen05.commit.arrive")
+@op("nvvm.tcgen05.commit.arrive", "nvvm.tcgen05.commit")
 def _commit(tr, op):
     """tcgen05.commit (cta_group::1 or ::2): the completion of the issuing thread's prior
     async tcgen05 ops arrives once on the barrier, or with a multicast mask (operand 1,
@@ -730,7 +823,9 @@ def _commit(tr, op):
 
 
 @effect("nvvm.mbarrier.init.shared", "nvvm.mbarrier.txn", "nvvm.mbarrier.arrive.shared",
-        "nvvm.mbarrier.arrive", "nvvm.mbarrier.try_wait.parity.shared", "nvvm.tcgen05.commit.arrive")  # fmt: skip
+        "nvvm.mbarrier.arrive", "nvvm.mbarrier.try_wait.parity.shared", "nvvm.tcgen05.commit.arrive",
+        "nvvm.mbarrier.init", "nvvm.mbarrier.arrive.expect_tx", "nvvm.mbarrier.expect_tx",
+        "nvvm.mbarrier.try_wait.parity", "nvvm.tcgen05.commit")  # fmt: skip
 def _mbar_kept(tr, op):
     return list(range(min(len(op.operands), 2)))
 
@@ -778,6 +873,13 @@ _MAPA = re.compile(r"mapa\.shared::cluster\.u32 (\w+), \$(\d+), \$(\d+)$")
 _BULK_S2CLUSTER = re.compile(
     r"cp\.async\.bulk\.shared::cluster\.shared::cta\.mbarrier::complete_tx::bytes "
     r"\[(\w+)\], \[\$(\d+)\], \$(\d+), \[(\w+)\]$"
+)
+# DSL 4.6.1 helpers emit the mapas and the copy as separate inline PTX ops: `mapa ... $0,
+# $1, $2` alone (its result a shared::cluster address), and the copy over two such results.
+_MAPA_ALONE = re.compile(r"mapa\.shared::cluster\.u32 \$(\d+), \$(\d+), \$(\d+)$")
+_BULK_S2CLUSTER_ARGS = re.compile(
+    r"cp\.async\.bulk\.shared::cluster\.shared::cta\.mbarrier::complete_tx::bytes "
+    r"\[\$(\d+)\], \[\$(\d+)\], \$(\d+), \[\$(\d+)\]$"
 )
 
 
@@ -928,6 +1030,20 @@ def classify_asm(op):
     s2c = _bulk_s2cluster(lines)
     if s2c is not None:
         return ("complete_tx", *(_asm_operand(op, k) for k in s2c))
+    if len(lines) == 1 and not lines[0][0]:
+        m = _MAPA_ALONE.match(lines[0][1])
+        if m and m.group(1) == "0":  # $0 is the (only) output
+            return (
+                "mapa",
+                _asm_operand(op, int(m.group(2))),
+                _asm_operand(op, int(m.group(3))),
+            )
+        m = _BULK_S2CLUSTER_ARGS.match(lines[0][1])
+        if m:  # destination, barrier (mapa results), bytes
+            return (
+                "complete_tx_mapped",
+                *(_asm_operand(op, int(m.group(k))) for k in (1, 4, 3)),
+            )
     wait = _classify_wait(op, lines)
     if wait is not None:
         return wait
@@ -990,6 +1106,30 @@ def _inline_asm(tr, op):
             "thread",
             bytes=tr.int_of(op, kind[2], "bulk copy bytes"),
         )
+    elif kind[0] == "mapa":
+        cta = E.resize(tr.int_of(op, kind[2], "mapa CTA rank"), 32, False)
+        return [
+            Opaque(
+                "cluster_address",
+                (("ptr", _smem_address(tr, op, kind[1])), ("cta", cta)),
+            )
+        ]
+    elif kind[0] == "complete_tx_mapped":
+        dst, bar = (tr.val(op, i) for i in kind[1:3])
+        if not all(
+            isinstance(a, Opaque) and a.kind == "cluster_address" for a in (dst, bar)
+        ):
+            tr.fail(
+                op, "shared::cluster bulk copy whose addresses are not mapa results"
+            )
+        same = tr.uniform(E.cmp("eq", dst.get("cta"), bar.get("cta")))
+        if same is None or not E.is_const(same, 1):
+            tr.fail(
+                op,
+                "shared::cluster bulk copy into one CTA completing on another's barrier",
+            )
+        tr.barrier_event(op, "complete_tx", Remote(bar.get("ptr"), bar.get("cta")), "thread",
+                         bytes=tr.int_of(op, kind[3], "bulk copy bytes"))  # fmt: skip
     return [tr.data(op)] * len(op.results)
 
 
@@ -1046,7 +1186,7 @@ def _asm_kept(tr, op):
         return [kind[2], kind[3]]
     if kind[0] == "st_global":
         return [kind[2]]
-    if kind[0] in ("wait", "complete_tx"):
+    if kind[0] in ("wait", "complete_tx", "complete_tx_mapped"):
         return list(kind[1:])
     return None
 
@@ -1134,8 +1274,13 @@ def _make_tma(tr, op):
     g = tr.val(op, 0)
     if not isinstance(g, View) or not isinstance(g.ptr, Ptr) or g.ptr.space != "gmem":
         tr.fail(op, "TMA descriptor over something other than a kernel tensor")
-    if not E.is_const(g.ptr.off, 0):
-        tr.fail(op, "TMA descriptor over an offset view")
+    # A view whose pointer is offset from the tensor's (e.g. quack's ragged TMA tensor,
+    # create_ragged_tensor_for_tma(ptr_shift=True): base - 2^30 rows, extents 2^30 and
+    # 2^31 - 1) keeps the offset: footprints are offset + sum (c + i) * stride on the
+    # tensor, so P0-1 checks what the TMA really addresses.
+    off = None if E.is_const(g.ptr.off, 0) else E.resize(g.ptr.off, 64)
+    if off is not None and g.ptr.bits != tr.k.tensors[g.ptr.base]["elem_bytes"] * 8:
+        tr.fail(op, "TMA descriptor over an offset view of recast elements")
     atom_t = rtype(tr, op, 0)
     lay = lay_of(tr, op, g)
     dims = _tma_dims(tr, op, atom_t, lay)
@@ -1183,11 +1328,12 @@ def _make_tma(tr, op):
     # stride (the global view may permute or regroup the tensor's modes).
     t = tr.k.tensors[g.ptr.base]
     tdims = [next((i for i, (n, s) in enumerate(zip(t["shape"], t["strides"])) if n is d["shape"] and s is d["stride"]), None)
-             for d in dims]  # fmt: skip
+             if off is None else None for d in dims]  # fmt: skip
     name = f"tma{len(tr.k.descs)}_{g.ptr.base}"
     tr.k.descs[name] = {
         "base": g.ptr.base, "tensor_dims": tdims, "box": box, "shape": shape, "strides": strides,
         "elem_bytes": ebytes, "scale": scale, "pack": pack, "uses": set(),
+        "off": E.const(0, 64) if off is None else off,
     }  # fmt: skip
     ref = quoted(rtype(tr, op, 1))
     base = L.parse_tuple(ref[0])

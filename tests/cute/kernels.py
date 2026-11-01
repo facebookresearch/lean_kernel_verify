@@ -147,6 +147,76 @@ def args_tma_pipeline(inp: dict):
     return args, kwargs, {}
 
 
+# ------------------------------------------- bulk global -> shared copy on an mbarrier
+
+
+def _bulk_g2s(mode: str):
+    """Warp 0 copies one row of 32 floats per CTA with a bulk copy (cp.async.bulk global ->
+    shared, CopyBulkG2SOp) completing on `full`, after an elected arrive.expect_tx of its
+    128 bytes; warp 1 waits and stores the row. Modes: "warp" (every lane of warp 0 runs
+    the copy), "elect" (inside elect_one), "half" (lanes 0-15). DSL 4.4.2 issues the copy
+    on every executing lane; 4.6.1 lowers it behind a full-mask elect.sync (ops.py,
+    BULK_G2S_ELECTS)."""
+
+    @cute.kernel
+    def kernel(mA: cute.Tensor, mOut: cute.Tensor):
+        tidx, _, _ = cute.arch.thread_idx()
+        warp = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+        smem = cutlass.utils.SmemAllocator()
+        full = smem.allocate_array(cutlass.Int64, 1)
+        sA = smem.allocate_tensor(
+            Float32, cute.make_layout((32, 2)), byte_alignment=128
+        )
+        if warp == 0:
+            with cute.arch.elect_one():
+                cute.arch.mbarrier_init(full, 1)
+        cute.arch.mbarrier_init_fence()
+        cute.arch.sync_threads()
+        gA = cute.local_tile(mA, (32,), (None,))
+        atom = cute.make_copy_atom(cpasync.CopyBulkG2SOp(), Float32)
+        bid = cute.arch.block_idx()[0]
+        if warp == 0:
+            with cute.arch.elect_one():
+                cute.arch.mbarrier_arrive_and_expect_tx(full, 32 * 4)
+            if cutlass.const_expr(mode == "warp"):
+                cute.copy(atom, gA[None, bid], sA[None, 0], mbar_ptr=full)
+            elif cutlass.const_expr(mode == "elect"):
+                with cute.arch.elect_one():
+                    cute.copy(atom, gA[None, bid], sA[None, 0], mbar_ptr=full)
+            else:
+                if tidx < 16:
+                    cute.copy(atom, gA[None, bid], sA[None, 0], mbar_ptr=full)
+        if warp == 1:
+            cute.arch.mbarrier_wait(full, 0)
+            mOut[bid * 32 + tidx - 32] = sA[tidx - 32, 0]
+
+    @cute.jit
+    def host(mA: cute.Tensor, mOut: cute.Tensor):
+        kernel(mA, mOut).launch(
+            grid=(mA.shape[0] // 32, 1, 1), block=(64, 1, 1), smem=1024
+        )
+
+    return host
+
+
+_BULK_HOSTS: dict = {}
+
+
+def run_bulk_g2s(a: torch.Tensor, out: torch.Tensor, mode: str) -> None:
+    if mode not in _BULK_HOSTS:
+        _BULK_HOSTS[mode] = _bulk_g2s(mode)
+    cute.compile(_BULK_HOSTS[mode], _cute(a, 0), _cute(out, 0))(a, out)
+
+
+def args_bulk_g2s(inp: dict):
+    rows = inp["rows"]
+    args = [
+        torch.zeros((rows,), dtype=torch.float32),
+        torch.zeros((rows,), dtype=torch.float32),
+    ]
+    return args, {"mode": inp["mode"]}, {}
+
+
 # -------------------------------------------- per-thread copies bounded by metadata
 
 

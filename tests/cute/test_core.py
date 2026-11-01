@@ -22,6 +22,7 @@ addr-marking rules.
 
 import json
 import random
+import re
 import sys
 import tempfile
 import unittest
@@ -516,9 +517,15 @@ def _events(stmts) -> list:
     return out
 
 
-def _asm(asm: str, operands: list, types: list, constraints: str) -> str:
-    return (f'      "llvm.inline_asm"({", ".join(operands)}) <{{asm_dialect = 0 : i64, asm_string = "{asm}", '
-            f'constraints = "{constraints}", has_side_effects}}> : ({", ".join(types)}) -> () loc(#loc3)\n')  # fmt: skip
+def _asm(
+    asm: str, operands: list, types: list, constraints: str, result: str = ""
+) -> str:
+    """An llvm.inline_asm statement; with `result`, an i32 value without side effects."""
+    lhs, ret, side = (
+        (f"{result} = ", "i32", "") if result else ("", "()", ", has_side_effects")
+    )
+    return (f'      {lhs}"llvm.inline_asm"({", ".join(operands)}) <{{asm_dialect = 0 : i64, asm_string = "{asm}", '
+            f'constraints = "{constraints}"{side}}}> : ({", ".join(types)}) -> {ret} loc(#loc3)\n')  # fmt: skip
 
 
 def _elem_address(elem: str, scale: int) -> str:
@@ -811,16 +818,18 @@ class ToKirRulesTest(unittest.TestCase):
                                              [("i", [_tensor_arg(1, 0, 4), _tensor_arg(1, 0, 4)])])  # fmt: skip
 
     def test_dump_of_another_dsl_is_refused(self):
-        for version, native in (("4.6.1", ops.DSL_VERSION), (ops.DSL_VERSION, "4.6.1")):
-            dsl = {
-                "version": version,
-                "installed": {"nvidia-cutlass-dsl-libs-base": native},
-            }
+        # A DSL outside the table, or a native library of another release than the DSL's.
+        for version, lib, native in (
+            ("4.5.2", "nvidia-cutlass-dsl-libs-base", "4.5.2"),
+            ("4.4.2", "nvidia-cutlass-dsl-libs-base", "4.6.1"),
+            ("4.6.1", "nvidia-cutlass-dsl-libs-cu13", "4.4.2"),
+        ):
+            dsl = {"version": version, "installed": {lib: native}}
             with self.assertRaises(Unsupported) as cm:
                 to_kir.translate({}, {"dsl": dsl}, {}, [])
             self.assertIn(
-                f"made with CuTe DSL {version} (native libraries nvidia-cutlass-dsl-libs-base {native}); "
-                f"the op table was checked against {ops.DSL_VERSION}",
+                f"made with CuTe DSL {version} (native library {lib} {native}); "
+                "the op table was checked against 4.4.2 and 4.6.1",
                 str(cm.exception),
             )
 
@@ -1495,6 +1504,30 @@ class ClusterTest(unittest.TestCase):
         (cx,) = [e for e in _events(role.stmts) if e["ev"] == "complete_tx"]
         self.assertEqual(cx["bytes"], E.to_json(E.const(512, 32)))
 
+    def test_split_mapa_and_bulk_copy_into_the_peer(self):
+        # DSL 4.6.1 helpers emit each mapa and the shared::cluster copy as separate inline
+        # PTX; the copy completes on the barrier its mapa result names, in the mapped CTA.
+        mapa = "mapa.shared::cluster.u32 $0, $1, $2;"
+        copy = "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes [$0], [$1], $3, [$2];"
+        body = (
+            _CLUSTER_STAGE
+            + _asm(mapa, ["%a", "%p"], ["i32", "i32"], "=r,r,r", result="%rd")
+            + _asm(mapa, ["%a", "%p"], ["i32", "i32"], "=r,r,r", result="%rb")
+            + _asm(copy, ["%rd", "%a", "%rb", "%n"], ["i32"] * 4, "r,r,r,r")
+        )
+        _k, (role,) = translate(
+            _kernel_stage(body, nargs=0), nwarps=1, cluster=(2, 1, 1)
+        )
+        (cx,) = [e for e in _events(role.stmts) if e["ev"] == "complete_tx"]
+        self.assertEqual(cx["bytes"], E.to_json(E.const(512, 32)))
+        # the peer rank, as in test_cluster_events
+        self.assertEqual(cx["cta"]["e"], "var")
+        lonely = _CLUSTER_STAGE + _asm(
+            copy, ["%a", "%a", "%a", "%n"], ["i32"] * 4, "r,r,r,r"
+        )
+        with self.assertRaisesRegex(Unsupported, "addresses are not mapa results"):
+            translate(_kernel_stage(lonely, nargs=0), nwarps=1, cluster=(2, 1, 1))
+
     def test_cluster_rank_without_clusters_is_zero(self):
         _k, (role,) = translate(_kernel_stage(_CLUSTER_STAGE, nargs=0), nwarps=1)
         (arrive,) = [
@@ -1598,6 +1631,187 @@ class ClusterTest(unittest.TestCase):
         self.assertEqual(
             [e["ev"] for e in _events(roles[0].stmts)], ["gload"]
         )  # x[t] only
+
+
+# CuTe DSL 4.6.1 spellings at the analyzed stage: %bp is an mbarrier in shared memory,
+# %g the global pointer of %arg0, %t0 is tid == 0; BODY runs in every thread.
+_DSL461 = """      %0 = "nvvm.read.ptx.sreg.tid.x"() : () -> i32 loc(#loc1)
+      %c0 = "arith.constant"() <{value = 0 : i32}> : () -> i32 loc(#loc1)
+      %c1 = "arith.constant"() <{value = 1 : i32}> : () -> i32 loc(#loc1)
+      %c2 = "arith.constant"() <{value = 2 : i32}> : () -> i32 loc(#loc1)
+      %c5 = "arith.constant"() <{value = 5 : i32}> : () -> i32 loc(#loc1)
+      %c16 = "arith.constant"() <{value = 16 : i32}> : () -> i32 loc(#loc1)
+      %c32 = "arith.constant"() <{value = 32 : i32}> : () -> i32 loc(#loc1)
+      %c64 = "arith.constant"() <{value = 64 : i32}> : () -> i32 loc(#loc1)
+      %cm = "arith.constant"() <{value = -1 : i32}> : () -> i32 loc(#loc1)
+      %hold = "cute_nvgpu.arch.get_dyn_smem"() : () -> !cute.ptr<i32, smem, align<32>> loc(#loc1)
+      %bar = "cute.recast_iter"(%hold) : (!cute.ptr<i32, smem, align<32>>) -> !cute.ptr<i64, smem, align<32>> loc(#loc3)
+      %bp = "builtin.unrealized_conversion_cast"(%bar) : (!cute.ptr<i64, smem, align<32>>) -> !llvm.ptr<3> loc(#loc3)
+      %gi = "cute.get_iter"(%arg0) : (!cute.memref<i32, gmem, "(128):(1)">) -> !cute.ptr<i32, gmem, align<16>> loc(#loc1)
+      %g = "builtin.unrealized_conversion_cast"(%gi) : (!cute.ptr<i32, gmem, align<16>>) -> !llvm.ptr<1> loc(#loc1)
+      %t0 = "arith.cmpi"(%0, %c0) <{predicate = 0 : i64}> : (i32, i32) -> i1 loc(#loc2)
+BODY"""
+_ON_T0 = """      "scf.if"(%t0) ({
+OPS        "scf.yield"() : () -> () loc(#loc3)
+      }, {
+      }) : (i1) -> () loc(#loc2)
+"""
+_SCOPE = "scope = #nvvm.mem_scope<cta>"
+
+
+def _dsl461(body: str = "", on_t0: str = "") -> str:
+    ops = _ON_T0.replace("OPS", on_t0) if on_t0 else ""
+    return _kernel_stage(_DSL461.replace("BODY", body + ops), elem="i32")
+
+
+class Dsl461Test(unittest.TestCase):
+    """The op-table rows of CuTe DSL 4.6.1's spellings (references/ir_ops_cute.md)."""
+
+    def test_mbarrier_ops(self):
+        on_t0 = f"""        "nvvm.mbarrier.arrive.expect_tx"(%bp, %c64) <{{relaxed = false, {_SCOPE}}}> : (!llvm.ptr<3>, i32) -> () loc(#loc3)
+        "nvvm.mbarrier.try_wait.parity"(%bp, %c0, %c16) <{{useIntrinsic = false}}> : (!llvm.ptr<3>, i32, i32) -> () loc(#loc3)
+        "nvvm.mbarrier.arrive"(%bp, %c1) <{{relaxed = false, {_SCOPE}}}> : (!llvm.ptr<3>, i32) -> () loc(#loc3)
+        "nvvm.mbarrier.expect_tx"(%bp, %c32) <{{{_SCOPE}}}> : (!llvm.ptr<3>, i32) -> () loc(#loc3)
+        "nvvm.tcgen05.commit"(%bp) <{{group = #nvvm.cta_group<cta_1>}}> : (!llvm.ptr<3>) -> () loc(#loc3)
+"""
+        init = '      "nvvm.mbarrier.init"(%bp, %c1) : (!llvm.ptr<3>, i32) -> () loc(#loc3)\n'
+        _k, (role,) = translate(_dsl461(init, on_t0), nwarps=1)
+        evs = _events(role.stmts)
+        self.assertEqual(
+            [(e["ev"], e.get("bytes")) for e in evs],
+            [("bar_init", None), ("expect_tx", E.to_json(E.const(64, 32))), ("arrive", None),
+             ("wait", None), ("arrive", None), ("expect_tx", E.to_json(E.const(32, 32))),
+             ("commit_arrive", None)],
+        )  # fmt: skip
+
+    def test_arrive_needs_count_1_and_release_semantics(self):
+        for on_t0, why in (
+            (f'        "nvvm.mbarrier.arrive"(%bp, %c2) <{{relaxed = false, {_SCOPE}}}> : (!llvm.ptr<3>, i32) -> () loc(#loc3)\n',
+             "mbarrier arrive with a count other than 1"),
+            (f'        "nvvm.mbarrier.arrive.expect_tx"(%bp, %c64) <{{relaxed = true, {_SCOPE}}}> : (!llvm.ptr<3>, i32) -> () loc(#loc3)\n',
+             "relaxed = true (only false is supported)"),
+            (f'        "nvvm.mbarrier.arrive"(%bp, %c1) <{{relaxed = true, {_SCOPE}}}> : (!llvm.ptr<3>, i32) -> () loc(#loc3)\n',
+             "relaxed = true (only false is supported)"),
+            ('        "nvvm.mbarrier.arrive"(%bp) <{relaxed = true}> : (!llvm.ptr<3>) -> () loc(#loc3)\n',
+             "relaxed = true (only false is supported)"),
+            ('        "nvvm.mbarrier.arrive"(%bp, %c1) <{scope = #nvvm.mem_scope<cluster>}> : (!llvm.ptr<3>, i32) -> () loc(#loc3)\n',
+             "scope = #nvvm.mem_scope<cluster> (only cta is supported)"),
+            ('        "nvvm.mbarrier.init"(%bp, %c1, %t0) : (!llvm.ptr<3>, i32, i1) -> () loc(#loc3)\n',
+             "predicated nvvm.mbarrier.init"),
+            (f'        "nvvm.mbarrier.arrive.expect_tx"(%bp, %c64, %t0) <{{relaxed = false, {_SCOPE}}}> : (!llvm.ptr<3>, i32, i1) -> () loc(#loc3)\n',
+             "predicated nvvm.mbarrier.arrive.expect_tx"),
+        ):  # fmt: skip
+            with (
+                self.subTest(why=why),
+                self.assertRaisesRegex(Unsupported, re.escape(why)),
+            ):
+                translate(_dsl461(on_t0=on_t0), nwarps=1)
+
+    def test_vote_ballot_and_popcount(self):
+        # popc(ballot(lane < 5)) == 5 is the index every thread stores to.
+        body = """      %ln = "nvvm.read.ptx.sreg.laneid"() : () -> i32 loc(#loc1)
+      %lt = "arith.cmpi"(%ln, %c5) <{predicate = 2 : i64}> : (i32, i32) -> i1 loc(#loc1)
+      %b = "nvvm.vote.sync"(%cm, %lt) <{kind = #nvvm<vote_sync_kind KIND>}> : (i32, i1) -> i32 loc(#loc1)
+      %n = "math.ctpop"(%b) : (i32) -> i32 loc(#loc1)
+      %k = "cute.make_coord"(%n) : (i32) -> !cute.coord<"?"> loc(#loc3)
+      %z = "arith.constant"() <{value = 0 : i32}> : () -> i32 loc(#loc3)
+      "cute.memref.store"(%arg1, %k, %z) : (!cute.memref<i32, gmem, "(128):(1)">, !cute.coord<"?">, i32) -> () loc(#loc3)
+"""
+        _k, (role,) = translate(_dsl461(body.replace("KIND", "ballot")), nwarps=1)
+        (store,) = _events(role.stmts)
+        self.assertEqual(_vars(store["offsets"]), set())  # a constant index
+        self.assertIn('"v": 5', json.dumps(store["offsets"]))
+        # any / all of (lane < 5) over the full warp: true / false, the index stored to.
+        vote = """      %ln = "nvvm.read.ptx.sreg.laneid"() : () -> i32 loc(#loc1)
+      %lt = "arith.cmpi"(%ln, %c5) <{predicate = 2 : i64}> : (i32, i32) -> i1 loc(#loc1)
+      %b = "nvvm.vote.sync"(%cm, %lt) <{kind = #nvvm<vote_sync_kind KIND>}> : (i32, i1) -> i1 loc(#loc1)
+      %n = "arith.extui"(%b) : (i1) -> i32 loc(#loc1)
+      %k = "cute.make_coord"(%n) : (i32) -> !cute.coord<"?"> loc(#loc3)
+      %z = "arith.constant"() <{value = 0 : i32}> : () -> i32 loc(#loc3)
+      "cute.memref.store"(%arg1, %k, %z) : (!cute.memref<i32, gmem, "(128):(1)">, !cute.coord<"?">, i32) -> () loc(#loc3)
+"""
+        for kind, index in (("any", 1), ("all", 0)):
+            with self.subTest(kind=kind):
+                _k, (role,) = translate(_dsl461(vote.replace("KIND", kind)), nwarps=1)
+                (store,) = _events(role.stmts)
+                self.assertEqual(store["offsets"]["a"], E.to_json(E.const(index, 64)))
+        with self.assertRaisesRegex(
+            Unsupported, "vote_sync_kind uni.*only ballot, any and all"
+        ):
+            translate(_dsl461(vote.replace("KIND", "uni")), nwarps=1)
+
+    def test_global_integer_llvm_load_on_the_slice_is_metadata(self):
+        load = '      %n = "llvm.load"(%g) <{alignment = 4 : i64}> : (!llvm.ptr<1>) -> i32 loc(#loc1)\n'
+        decides = """      %pos = "arith.cmpi"(%n, %c0) <{predicate = 4 : i64}> : (i32, i32) -> i1 loc(#loc2)
+      "scf.if"(%pos) ({
+        %k = "cute.make_coord"(%0) : (i32) -> !cute.coord<"?"> loc(#loc3)
+        "cute.memref.store"(%arg1, %k, %c0) : (!cute.memref<i32, gmem, "(128):(1)">, !cute.coord<"?">, i32) -> () loc(#loc3)
+        "scf.yield"() : () -> () loc(#loc3)
+      }, {
+      }) : (i1) -> () loc(#loc2)
+"""
+        k, _roles = translate(_dsl461(load + decides), nwarps=1)
+        self.assertTrue(k.tensors["%arg0"]["metadata"])
+        k, _roles = translate(_dsl461(load), nwarps=1)  # read, value unused: data
+        self.assertFalse(k.tensors["%arg0"]["metadata"])
+
+    def test_cp_async_with_src_size_0_reads_nothing(self):
+        cp = '        "nvvm.cp.async.shared.global"(%bp, %g, SIZE) <{modifier = #nvvm<load_cache_modifier cg>, size = 16 : i32}> : (!llvm.ptr<3>, !llvm.ptr<1>, i32) -> () loc(#loc3)\n'
+        for size, cond in (("%c16", None), ("%c0", E.to_json(E.const(0, 1)))):
+            with self.subTest(size=size):
+                _k, (role,) = translate(
+                    _dsl461(on_t0=cp.replace("SIZE", size)), nwarps=1
+                )
+                (s,) = role.stmts  # thread 0's gload; with src-size 0 under `if false`
+                (load,) = _events([s])
+                self.assertEqual(load["ev"], "gload")
+                self.assertEqual(load["offsets"]["shape"], [4])  # 16 bytes of i32
+                self.assertEqual(s.get("cond"), cond)
+
+    def test_global_cute_ptr_load_is_refused(self):
+        body = '      %v = "cute.ptr.load"(%gi) : (!cute.ptr<i32, gmem, align<16>>) -> i32 loc(#loc1)\n'
+        with self.assertRaisesRegex(
+            Unsupported, "cute.ptr.load from !cute.ptr<i32, gmem"
+        ):
+            translate(_dsl461(body), nwarps=1)
+
+    def test_allocator_base_through_make_warp_uniform(self):
+        # The DSL 4.6.1 allocator's dynamic shared memory base: ptrtoint, make_warp_uniform,
+        # extsi, then back to a pointer. Here the address is %bar + 8 x lane: lane 0's is
+        # the barrier's.
+        body = """      %lid = "nvvm.read.ptx.sreg.laneid"() : () -> i32 loc(#loc1)
+      %lt = "cute.make_int_tuple"(%lid) : (i32) -> !cute.int_tuple<"?"> loc(#loc1)
+      %pl = "cute.add_offset"(%bar, %lt) : (!cute.ptr<i64, smem, align<32>>, !cute.int_tuple<"?">) -> !cute.ptr<i64, smem, align<32>> loc(#loc1)
+      %a = "cute.ptrtoint"(%pl) : (!cute.ptr<i64, smem, align<32>>) -> i32 loc(#loc1)
+      %u = "cute_nvgpu.arch.make_warp_uniform"(%a) : (i32) -> i32 loc(#loc1)
+      %w = "arith.extsi"(%u) : (i32) -> i64 loc(#loc1)
+      %s = "cute.assume"(%w) : (i64) -> !cute.i64<divby 32> loc(#loc1)
+      %q = "cute.inttoptr"(%s) : (!cute.i64<divby 32>) -> !cute.ptr<i64, smem, align<32>> loc(#loc1)
+      %qp = "builtin.unrealized_conversion_cast"(%q) : (!cute.ptr<i64, smem, align<32>>) -> !llvm.ptr<3> loc(#loc3)
+      "nvvm.mbarrier.init"(%qp, %c1) : (!llvm.ptr<3>, i32) -> () loc(#loc3)
+"""
+        _k, (role,) = translate(_dsl461(body), nwarps=1)
+        self.assertEqual([e["ev"] for e in _events(role.stmts)], ["bar_init"])
+        init = '      "nvvm.mbarrier.init"(%bp, %c1) : (!llvm.ptr<3>, i32) -> () loc(#loc3)\n'
+        _k, (direct,) = translate(_dsl461(init), nwarps=1)
+        self.assertEqual(role.barriers[0].addr, direct.barriers[0].addr)
+
+    def test_p1_named_barrier_arrive_and_nvvm_mma(self):
+        arrive = (
+            '      "nvvm.barrier.arrive"(%c1, %c64) : (i32, i32) -> () loc(#loc3)\n'
+        )
+        _k, (role,) = translate(_dsl461(arrive), nwarps=2, p1=True)
+        (bar,) = _events(role.stmts)
+        self.assertEqual(
+            (bar["ev"], bar["id"], bar["count"], bar["sync"]),
+            ("named_bar", E.to_json(E.const(1, 32)), E.to_json(E.const(64, 32)), False),
+        )
+        mma = '      "nvvm.tcgen05.mma"(%c0) : (i32) -> () loc(#loc3)\n'
+        translate(_dsl461(mma), nwarps=1)  # P0: MMA math is data
+        with self.assertRaisesRegex(
+            Unsupported, re.escape("R4: nvvm.tcgen05.mma (DSL 4.6.1's MMA)")
+        ):
+            translate(_dsl461(mma), nwarps=1, p1=True)
 
 
 if __name__ == "__main__":

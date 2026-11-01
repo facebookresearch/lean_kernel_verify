@@ -30,7 +30,8 @@ python3 -I scripts/lkv.py run CASE.json --src DIR [--inputs a,b]
 # translation only (pure Python, no DSL): re-translate an existing dump
 python3 -I frontend/cute/to_kir.py CASE.json [--out DIR]
 # tests: tests/cute/test_core.py (pure Python: python3 -I tests/cute/test_core.py) and
-# tests/cute/test_frontend.py (tiny CuTe kernels through dump + to_kir; needs the DSL)
+# tests/cute/test_frontend.py (tiny CuTe kernels through dump + to_kir; needs the DSL, and
+# runs once per supported release: tests/cute:test_frontend, :test_frontend_461)
 ```
 
 `scripts/lkv.py run` runs the frontend (`frontend/cute/main.py run`: dump + translate),
@@ -88,6 +89,8 @@ Lean: `python3 -I frontend/emit_lean.py KIR.json -o K.lean && scripts/run_lean_c
   direct call of a `@cute.jit` function (no `cute.compile`) reaching the patched compile
   (P5), a CUDA call on the CPU-only host (`torch.cuda.synchronize()`), a failing torch
   op, an error of the DSL or the frontend.
+* `dsl` (default `4.4.2`) is the CuTe DSL release the kernel's sources target:
+  `scripts/lkv.py` runs `frontend/cute:lkv_cute` for 4.4.2 and `:lkv_cute_461` for 4.6.1.
 * `num_sms` is the device the host sees (P1, P2); grids and persistent tile tables
   derive from it. `max_iters` bounds every KIR `while` (exceeding it is a verdict error,
   never a pass).
@@ -128,7 +131,7 @@ real code at the analyzed revision.
 | P2 | `cutlass.utils.HardwareInfo`: `num_sms` SMs, `num_sms // cluster` clusters | persistent schedulers bake the SM count into the grid |
 | P3 | `torch.Tensor.is_cuda` is True | host validation demands CUDA tensors; the CPU tensors have the same shapes, strides, dtypes and integer contents |
 | P4 | DLPack capsules made by `cute.runtime.from_dlpack` report device kDLCUDA; each runtime tensor remembers the torch tensor it wraps | the DSL's C++ DLTensorWrapper derives the address space from the device: the tensors are typed as global memory exactly as CUDA tensors are |
-| P5 | `BaseDSL.compile_and_cache` computes the pass pipeline as the original does (`preprocess_pipeline(_get_pipeline(pipeline), arch)`), records it and stops | the DSL has already written (`CUTE_DSL_KEEP_IR`) and verified the initial MLIR; nothing is lowered, linked or loaded (unpatched, `cute.compile` runs the whole pipeline and then fails in `cuInit`) |
+| P5 | `BaseDSL.compile_and_cache` records the initial MLIR it is handed and the pass pipeline it computes as the original does (`preprocess_pipeline(_get_pipeline(pipeline), arch)`), and stops | the DSL has verified the module; DSL 4.4.2's is kept in custom form (the text of its `CUTE_DSL_KEEP_IR` file), 4.6.1's in generic form (its custom form of `nvvm.barrier` with a location does not parse back); nothing is lowered, linked or loaded (unpatched, `cute.compile` runs the whole pipeline and then fails in `cuInit`) |
 | P6 | `cute.compile` returns a recorder; calling it records the launch arguments (DSL scalars unwrapped; a runtime tensor as the torch tensor it wraps, the same memory; one that wraps none fails the dump), the sources of each tensor argument's data and the storages its integer arguments point into (P7). Keyword arguments of the compile and of the launch are bound to the jit function's signature (defaults applied; cute.compile's own keywords such as `options` are left out) and recorded positionally; a call that does not fit the signature is a frontend error, not a host rejection. An explicit `cuda.CUstream` launch argument is dropped (the host function's stream argument takes no launch value) | that call is the launch; nothing runs |
 | P7 | a `HostReads` TorchFunctionMode, with a TorchDispatchMode for aten ops (`frontend/ttgir/host_reads.py`, shared with the TTGIR frontend), around each input's host call; one for the whole run | it calls every torch function unchanged and only tracks which data comes from launch arguments (below) |
 | P8 | `torch.Tensor.pin_memory` returns a copy of the tensor (`is_pinned` is True) | page-locked memory changes how copies to the device run, not the data (a host builds a tile table on pinned memory before copying it to the device) |
@@ -143,9 +146,9 @@ literal or a module-level string constant; any other read is an error) and every
 compiler switch (`CUTE_DSL_*`, `TRITON_*`, `MLIR_*`, `LLVM_*`, `NVPTX_*` and the
 `triton.knobs` variables outside those prefixes), except those the case's `env` sets
 (e.g. a kernel package's architecture override for CPU compilation); then it sets
-the case's `env` and its own `CUTE_DSL_ARCH=sm_100a`,
-`CUTE_DSL_KEEP_IR=1` and `CUTE_DSL_DUMP_DIR` (a process scratch directory), which a case
-may not set. So a kernel package's on-disk compile cache is off unless a case turns it
+the case's `env` and its own `CUTE_DSL_ARCH=sm_100a`
+(and with DSL 4.6.1 `CUTE_DSL_LINEINFO=1`: 4.6.1 gives ops source locations only with
+line info), which a case may not set. So a kernel package's on-disk compile cache is off unless a case turns it
 on. Until the dump ends, a read by the exported sources or
 the builder of any other variable (through an alias of `os` or `os.environ`, a key the
 scan cannot see) and any enumeration of the environment from them raise `EnvError` with
@@ -189,29 +192,41 @@ Checked, not assumed:
   on the CPU host where the GPU makes a copy, so a later write to a storage such a move
   returned fails the dump (`HostAliasError`, naming both lines).
 * the case: `elision_flags` are flags of the variant.
-* the DSL: `to_kir` refuses a dump made with a DSL other than `ops.DSL_VERSION`, or whose
-  installed native libraries (`nvidia-cutlass-dsl-libs-base`) are another release.
+* the DSL: dump refuses a case whose `dsl` is not the binary's DSL; `to_kir` refuses a
+  dump made with a DSL outside `ops.DSL_NATIVE`, or whose native library
+  (`nvidia-cutlass-dsl-libs-base` for 4.4.2, `-libs-cu13` for 4.6.1) is another release.
 
-**DSL version.** The frontend loads exactly one CuTe DSL release, nvidia-cutlass-dsl
-4.4.2 (the Python package and `_cutlass_ir` from nvidia-cutlass-dsl-libs-base 4.4.2),
-the release the op table was checked against. `dump.py` records and prints the loaded
-DSL (`dump.json` `"dsl"`); `to_kir.py` accepts only `ops.DSL_VERSION` (the op table's
-issuing threads were checked in the PTX of that release) and records it per variant in
-`kir/report.json` (`"dsl"`) and in the KIR header (`"compiler": {"name":
-"nvidia-cutlass-dsl", "version": ...}`, next to `"target": "sm_100"`).
+**DSL version.** The frontend supports two CuTe DSL releases, one binary each; a case
+names the release its sources target (`dsl`, default 4.4.2) and `scripts/lkv.py` runs the
+matching binary. `lkv_cute` loads nvidia-cutlass-dsl 4.4.2 (the Python package and
+`_cutlass_ir` from nvidia-cutlass-dsl-libs-base 4.4.2) with quack-kernels 0.3.11 and CUDA
+13.0, `lkv_cute_461` nvidia-cutlass-dsl 4.6.1 (the Python package from -libs-core,
+`_cutlass_ir.cu13` from -libs-cu13 4.6.1) with quack-kernels 0.6.1 and CUDA 13.3, both
+with Python 3.14. `dump.py` records and prints the loaded DSL (`dump.json` `"dsl"`);
+`to_kir.py` accepts the releases in `ops.DSL_NATIVE` (the op table's issuing threads were
+checked in the PTX of each) and records it per variant in `kir/report.json` (`"dsl"`) and
+in the KIR header (`"compiler": {"name": "nvidia-cutlass-dsl", "version": ...}`, next to
+`"target": "sm_100"`). Where the releases differ: 4.6.1 spells several ops differently
+(`ir_ops_cute.md`, rows marked 4.6.1), lowers `bulk_copy_g2s` behind `elect.sync`
+(`ops.BULK_G2S_ELECTS`), gives ops source locations only with line info (Environment,
+above), and its pipeline library's `PipelineAsync.producer_tail` waits on every stage's
+empty barrier and no longer arrives (4.4.2: it advances and acquires), which changes a
+load warp's events.
 
 ## The analyzed stage (stage.py)
 
 The DSL compiles a module with one pipeline, `cute-to-nvvm{...}`. Its expansion starts
 with `cute-remove-static-args, materialize-tma-multicast, software-pipeline,
 cute-desugar, cute-expand-ops, cute-fold-static, insert-range-for-threadids,
-canonicalize, cse`; the analyzed stage is exactly that prefix, options included (no pass
-list is hard-coded). Layout functions (local_tile, partitions, composition) are folded
+canonicalize, cse` (DSL 4.6.1 adds `propagate-divby-through-control-flow`,
+`infer-kernel-smem-usage` and `loop-vectorize` before `cute-expand-ops`, and
+`hoist-speculatable-from-scf-if` before `canonicalize`); the analyzed stage is exactly that
+prefix, options included (no pass list is hard-coded). Layout functions (local_tile, partitions, composition) are folded
 into crd2idx/add_offset arithmetic and copy atoms expanded into per-thread
 loads/stores and `cute_nvgpu.arch.*` ops with explicit TMA coordinates, while `scf`
 control flow is still structured. Later passes are not registered as standalone passes.
 
-* **Verifier.** With cutlass-dsl 4.4.2 the pass verifier rejects some kernels after
+* **Verifier.** With cutlass-dsl 4.4.2 and 4.6.1 the pass verifier rejects some kernels after
   `cute-expand-ops`: operand 0 of `cute_nvgpu.arch.copy.SM90.bulk_copy_g2s` (e.g. the
   LSE/dPsum row copies of an attention backward) loses its alignment attribute. The
   prefix runs with the verifier off, every op is verified afterwards, and to_kir accepts
@@ -397,7 +412,9 @@ DSL helper they are located in (`blackwell_helpers.py:869`).
 **Locations.** `loc` is the innermost `file:line` under the source root. Ops the DSL
 builds inside its own helpers (operator overloads in `cutlass/base_dsl/typing.py`,
 pipeline helpers) and ops a pass created carry no source frame; they get the location of
-the closest preceding op in program order that has one.
+the closest preceding op in program order that has one. With DSL 4.6.1, ops built in DSL
+helpers that take no location (inline PTX, `elect.sync`) carry the kernel's definition line
+instead.
 
 ## Validation of the extraction
 
@@ -413,6 +430,11 @@ the closest preceding op in program order that has one.
   whose lanes 16-31 store a second shared buffer to the same tile writes each element
   twice (P0-3 FAIL); a warp-wide TMA reduce is one event. A `st.global.u16`
   scale-factor helper is a 2-byte `gstore` per thread (all specs PASS).
+* A bulk copy (`cp.async.bulk` global -> shared, completing on an mbarrier after one
+  128-byte `arrive_expect_tx`): with 4.4.2 every executing lane issues it (warp-wide: 32
+  copies, 16 lanes: 16, both P0-4 FAIL; inside `elect_one`: one, PASS); with 4.6.1 a warp
+  issues it once (warp-wide: PASS), and inside `elect_one` or on 16 lanes it is refused
+  (the DSL's full-mask `elect.sync` needs the whole warp).
 * Refused: a float compare deciding a store (slicing), `red.global` inline PTX, an
   unknown op in a loop without events, a global view from an integer, `elect.sync` under
   a partial warp, a TMA load or TMA reduce reached by 16 lanes of a warp, a TMA reduce
@@ -467,9 +489,11 @@ the closest preceding op in program order that has one.
   spans them).
 * Across the CTAs of a cluster only synchronization is checked: which CTA's data a copy
   carries is not (a copy sent to the wrong CTA keeps the byte counts).
-* The op table is checked against one DSL release (`ops.DSL_VERSION`, 4.4.2), and its
-  TMA store/reduce rows against ptxas 13.0; moving to another release needs the
-  issuing-thread checks redone before `DSL_VERSION` changes. A TMA store's cache-policy
-  operand is taken to be lane-uniform (a lane-dependent one would add waterfall rounds).
+* The op table is checked against two DSL releases (`ops.DSL_NATIVE`: 4.4.2, and 4.6.1
+  in the PTX its pipeline makes of the test kernels and of an attention backward), and
+  its TMA store rows' waterfall against the SASS of ptxas 13.0 under 4.4.2 only; another
+  release needs the issuing-thread checks redone before it is added to `ops.DSL_NATIVE`.
+  A TMA store's cache-policy operand is taken to be lane-uniform (a lane-dependent one
+  would add waterfall rounds).
 * KIR size grows with warp-cooperative code: the non-broadcast varlen scheduler is
   evaluated per lane (32 per-lane values per step) in every role that runs it.

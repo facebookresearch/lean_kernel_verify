@@ -68,11 +68,11 @@ report.md / report.json: verdict per (variant, input, spec), findings at source 
   `/tmp/lkv_lean_build_$USER` (`LKV_LEAN_BUILD`), and `lkv.py` runs it when needed.
 - **The frontends run the kernel's real host code**, so they need its Python stack:
   a Triton with TLX and torch (TTGIR frontend, `frontend/ttgir/`), or
-  nvidia-cutlass-dsl 4.4.2 exactly (the release the CuTe op table was checked
-  against) and torch (CuTe frontend, `frontend/cute/`), plus whatever the kernel
-  package imports. At this revision `lkv.py run` builds and runs the frontends with
-  Buck2 inside the monorepo that holds the skill; `lkv.py check` (Layer 2 on KIR
-  files) runs anywhere.
+  nvidia-cutlass-dsl 4.4.2 or 4.6.1 exactly (the releases the CuTe op table was
+  checked against; a CuTe case names its release in `dsl`, default 4.4.2) and torch
+  (CuTe frontend, `frontend/cute/`), plus whatever the kernel package imports. At
+  this revision `lkv.py run` builds and runs the frontends with Buck2 inside the
+  monorepo that holds the skill; `lkv.py check` (Layer 2 on KIR files) runs anywhere.
 
 ## Run a case: scripts/lkv.py
 
@@ -186,10 +186,10 @@ A verdict depends on exactly these items (`design.md`, "Trust base"):
 
 1. **The compiler IR** for the analyzed config: TTGIR for
    `GPUTarget("cuda", 100|103)`, or the CuTe `cute-to-nvvm` prefix stage at
-   `sm_100a` with nvidia-cutlass-dsl 4.4.2, produced by the real host code at
-   REV under the frontend's host patches (device queries, device placement,
-   compile/launch interception, the case's `env`, tabled in the frontend docs).
-   Nothing below the IR is checked.
+   `sm_100a` with the case's nvidia-cutlass-dsl (4.4.2 or 4.6.1), produced by the
+   real host code at REV under the frontend's host patches (device queries, device
+   placement, compile/launch interception, the case's `env`, tabled in the frontend
+   docs). Nothing below the IR is checked.
 2. **The op tables** (`ir_ops.md`, `ir_ops_cute.md`): one meaning per op, the
    same for every kernel. Unknown ops are hard errors, and so are data values
    that reach an address, a mask or a barrier operand (slice soundness). Issue
@@ -263,7 +263,7 @@ memory (CuTe) and a per-CTA tile count the partitions capture from an `scf.if`
 work-item correspondence, P1 bug classes other than P1-1 (and P1-1 on TTGIR/TLX,
 TMEM lifetime, tcgen05 fences, a warp of one role running ahead so that its
 arrivals stand in for another's), inputs and variants no case selects. CuTe
-supports sm_100 with DSL 4.4.2 only. Details and the spec-model limits:
+supports sm_100 with DSL 4.4.2 and 4.6.1. Details and the spec-model limits:
 [references/specs.md](references/specs.md), "Limits".
 
 ## References
@@ -304,5 +304,6 @@ $S/tests/lean/run_all.sh                    # Layer 2: positive/negative control
 python3 -I $S/tests/e2e/test_e2e.py         # lkv.py end to end, ~2 min (frontends + Lean, no GPU)
 python3 -I $S/tests/cute/test_core.py       # CuTe translation, pure Python
 # Frontend tests: tests/ttgir/test_translate.py, test_ttgir.py (Triton) and tests/cute/test_frontend.py
-# (CuTe DSL); tests/ttgir/test_gpu_parity.py: CPU-dumped TTGIR == real launch (needs a Blackwell GPU)
+# (CuTe DSL, run once per supported DSL release); tests/ttgir/test_gpu_parity.py: CPU-dumped
+# TTGIR == real launch (needs a Blackwell GPU)
 ```

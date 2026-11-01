@@ -76,8 +76,8 @@ sound but not proved. The architecture and the trust base are in
 - Python 3.10 or newer. `lkv.py check` and the Lean layer use the standard library
   only.
 - For the frontends, the kernel's own Python stack: a Triton with TLX and PyTorch for
-  TLX/Triton kernels, or `nvidia-cutlass-dsl` 4.4.2 exactly and PyTorch for CuTe DSL
-  kernels. No GPU.
+  TLX/Triton kernels, or `nvidia-cutlass-dsl` 4.4.2 or 4.6.1 exactly (the release the
+  case names) and PyTorch for CuTe DSL kernels. No GPU.
 
 ## Quick start
 
@@ -172,7 +172,7 @@ tests/         lean/ (Lean layer), cute/ and ttgir/ (frontends), e2e/ (lkv.py en
 - Refused with an error naming the construct: TLX/Triton 2-CTA kernels and cross-CTA
   constructs (remote barriers, distributed shared memory), im2col TMA, TTGIR
   loop-carried pointers and side-effecting inline asm. CuTe DSL kernels are supported
-  on sm_100 with `nvidia-cutlass-dsl` 4.4.2 only.
+  on sm_100 with `nvidia-cutlass-dsl` 4.4.2 and 4.6.1.
 - Not checked: anything below the compiler IR, numerics, tcgen05 fences, TMEM lifetime
   and P1-1 on TLX/Triton. A P0-2 or P0-4 PASS means the phase ledger found no
   violation, not that the kernel is free of deadlocks or races.

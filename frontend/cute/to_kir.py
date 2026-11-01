@@ -33,7 +33,7 @@ an earlier (skipped) launch of the run may write, directly or through host compu
 is a hard error too: the KIR would read the recorded contents, not what the kernel
 reads. So is a host read, before a launch of the variant, of data an earlier launch may
 write (the host may branch or size the launch differently), and a dump made with a CuTe
-DSL other than the one the op table was checked against (ops.DSL_VERSION).
+DSL other than the ones the op table was checked against (ops.DSL_NATIVE).
 
 Standalone (no CuTe DSL needed): python3 -I to_kir.py CASE.json [--out DIR]
 """
@@ -107,7 +107,7 @@ class Variant:
         self.params: dict = {}  # name -> width
         self.host_args: list = []  # (name, kind, info) per host-function argument
         self.k = Kernel(self.stage, self.src_root, max_iters=int(case.get("max_iters", 4096)),
-                        work=self.notes.get("work", {}))  # fmt: skip
+                        dsl=self.dsl_version, work=self.notes.get("work", {}))  # fmt: skip
 
     # ----------------------------------------------------------------- host side
     def host(self, first_args: list) -> dict:
@@ -816,11 +816,12 @@ def translate_p1(case: dict, dump: dict, rec: dict, launches: list) -> dict | No
 
 def translate(case: dict, dump: dict, rec: dict, launches: list):
     dsl = dump["dsl"]
-    native = dsl.get("installed", {}).get("nvidia-cutlass-dsl-libs-base")
-    if dsl["version"] != ops.DSL_VERSION or native != ops.DSL_VERSION:
-        raise Unsupported("dump", "dsl", f"the dump was made with CuTe DSL {dsl['version']} (native libraries "
-                                         f"nvidia-cutlass-dsl-libs-base {native}); the op table was checked against "
-                                         f"{ops.DSL_VERSION} (references/ir_ops_cute.md)", kind="error")  # fmt: skip
+    lib = ops.DSL_NATIVE.get(dsl["version"], "nvidia-cutlass-dsl-libs-base")
+    native = dsl.get("installed", {}).get(lib)
+    if dsl["version"] not in ops.DSL_NATIVE or native != dsl["version"]:
+        raise Unsupported("dump", "dsl", f"the dump was made with CuTe DSL {dsl['version']} (native library "
+                                         f"{lib} {native}); the op table was checked against "
+                                         f"{' and '.join(ops.DSL_NATIVE)} (references/ir_ops_cute.md)", kind="error")  # fmt: skip
     for f in rec.get("verifier_failures", []):
         if ACCEPTED_FAILURES.get(f["op"], "\0") not in f["error"]:
             raise Unsupported(

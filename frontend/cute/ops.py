@@ -19,9 +19,19 @@ import re
 from . import expr as E, layout as L
 from .interp import ArithIter, Composed, Data, int_width, Lay, Opaque, Ptr, Tup, View
 
-# The CuTe DSL whose op definitions and lowering (issuing threads, checked in its PTX)
-# this table was written against. to_kir.py refuses dumps made with any other version.
-DSL_VERSION = "4.4.2"
+# The CuTe DSL versions whose op definitions and lowering (issuing threads, checked in
+# their PTX) this table was written against, each with the distribution of the native MLIR
+# library it loads. to_kir.py refuses dumps made with any other version.
+DSL_NATIVE = {
+    "4.4.2": "nvidia-cutlass-dsl-libs-base",
+    "4.6.1": "nvidia-cutlass-dsl-libs-cu13",
+}
+
+# The DSL releases whose lowering of cute_nvgpu.arch.copy.SM90.bulk_copy_g2s elects one lane
+# per warp: a full-mask elect.sync before cp.async.bulk, as for a TMA load (checked in the PTX
+# 4.6.1's own pipeline makes of a warp-wide, an elect_one, a 16-lane and a lane-dependent
+# cute.copy with a CopyBulkG2SOp atom). With 4.4.2 every executing thread issues the copy.
+BULK_G2S_ELECTS = frozenset({"4.6.1"})
 
 HANDLERS: dict = {}
 EFFECTS: dict = {}  # op name -> f(tr, op) -> kept operand indices, or None (not an event)
@@ -47,7 +57,8 @@ DATA = {
     "nvvm.mul.packed.f32x2", "nvvm.fma.packed.f32x2", "nvvm.sub.packed.f32x2",
     "nvvm.add.packed.f32x2", "nvvm.fmax", "nvvm.fmin", "nvvm.rcp.approx.ftz.f",
     # Synchronization outside the P0 specs (named barriers, fences, register budgets):
-    "nvvm.barrier", "nvvm.bar.warp.sync", "nvvm.fence.proxy", "nvvm.fence.mbarrier.init",
+    "nvvm.barrier", "nvvm.barrier.arrive", "nvvm.bar.warp.sync", "nvvm.fence.proxy",
+    "nvvm.fence.mbarrier.init",
     "nvvm.setmaxregister",
     # Tensor memory, MMA and bulk-async group bookkeeping:
     "nvvm.tcgen05.wait", "nvvm.cp.async.bulk.commit.group", "nvvm.cp.async.bulk.wait_group",
@@ -60,12 +71,14 @@ DATA = {
     "cute_nvgpu.arch.copy.SM100.tmem_load", "cute_nvgpu.arch.copy.SM100.tmem_store",
     "cute_nvgpu.arch.copy.SM100.copy_s2t",
     "cute_nvgpu.arch.mma.SM100.umma", "cute_nvgpu.arch.mma.SM100.umma_block_scaled",
+    "nvvm.tcgen05.mma", "nvvm.tcgen05.mma.block_scale",
     "cute_nvgpu.make_umma_smem_desc", "llvm.inttoptr",
     # Register vectors (the vector dialect's memory ops, load/store/gather/scatter/
     # transfer_*, are not listed: they may access global memory):
     "vector.broadcast", "vector.extract", "vector.extractelement", "vector.insert", "vector.insertelement",
     "vector.from_elements", "vector.splat", "vector.shape_cast", "vector.shuffle", "vector.transpose",
     "vector.bitcast", "vector.reduction", "vector.multi_reduction", "vector.fma",
+    "vector.to_elements",  # DSL 4.6.1: a register vector split into its elements
 }  # fmt: skip
 DATA_PREFIXES = ("math.",)
 
@@ -407,10 +420,19 @@ def _cast(tr, op):
     if w is None:
         return tr.data(op)
     v = tr.val(op, 0)
-    if isinstance(v, Data):
+    widening = op.name in ("arith.extsi", "arith.extui")
+    if isinstance(v, Data) or widening and _smem_address(v):
         return v
     x = tr.as_int(op, v, "integer cast")
     return E.resize(x, w, op.name in ("arith.extsi", "arith.index_cast"))
+
+
+def _smem_address(v) -> bool:
+    """A shared-memory address (ptrtoint): it fits in 32 bits, so widening keeps it (DSL
+    4.6.1 passes the allocator base through make_warp_uniform and extsi)."""
+    return (
+        isinstance(v, Opaque) and v.kind == "address" and v.get("ptr").space == "smem"
+    )
 
 
 @op("nvvm.mul")
@@ -434,7 +456,7 @@ def _nvvm_mul(tr, op):
     return tr.bind(E.trunc(E.bin("lshr", wide, E.const(32, 64)), 32), op)
 
 
-@op("llvm.intr.ctpop")
+@op("llvm.intr.ctpop", "math.ctpop")
 def _ctpop(tr, op):
     x = tr.int_of(op, 0, "popcount")
     w = E.width(x)
@@ -585,6 +607,11 @@ def _warp_uniform(tr, op):
     v = tr.val(op, 0)
     if isinstance(v, Data):
         return v
+    if _smem_address(v):
+        p = v.get("ptr")
+        _no_elect(tr, op, p.off, "make_warp_uniform")
+        lane0 = E.subst(p.off, {"%lane": E.const(0, 32)})
+        return v.with_(ptr=Ptr(p.space, p.base, lane0, p.bits))
     x = tr.as_int(op, v, "make_warp_uniform")
     _no_elect(tr, op, x, "make_warp_uniform")
     return E.subst(x, {"%lane": E.const(0, 32)})
@@ -654,16 +681,28 @@ def _shfl(tr, op):
     )
 
 
-@op("nvvm.vote.ballot.sync")
+@op("nvvm.vote.ballot.sync", "nvvm.vote.sync")
 def _ballot(tr, op):
+    """vote.sync over the full warp: ballot (the lanes' predicate bits), any (some lane's
+    predicate holds) or all (every lane's does), from the predicate at each lane."""
+    kind = op.props.get("kind", "vote_sync_kind ballot")  # DSL 4.6.1: nvvm.vote.sync
+    mode = next(
+        (m for m in ("ballot", "any", "all") if f"vote_sync_kind {m}" in kind), None
+    )
+    if mode is None:
+        tr.fail(op, f"vote.sync kind {kind} (only ballot, any and all are supported)")
     if not E.is_const(tr.int_of(op, 0, "vote member mask"), -1):
-        tr.fail(op, "vote.ballot.sync with a partial member mask")
-    p = tr.int_of(op, 1, "ballot predicate")
-    _no_elect(tr, op, p, "vote.ballot.sync")
+        tr.fail(op, f"vote.{mode}.sync with a partial member mask")
+    p = tr.int_of(op, 1, "vote predicate")
+    _no_elect(tr, op, p, f"vote.{mode}.sync")
     total = E.const(0, 32)
     for k in range(32):
         bit = E.ext(E.subst(p, {"%lane": E.const(k, 32)}), 32, False)
         total = E.bin("or", total, E.bin("shl", bit, E.const(k, 32)))
+    if mode == "any":
+        total = E.cmp("ne", total, E.const(0, 32))
+    elif mode == "all":
+        total = E.cmp("eq", total, E.const(-1, 32))
     return tr.bind(total, op)
 
 
@@ -1075,6 +1114,33 @@ def _select_modes(tr, op):
     if isinstance(v, Tup):
         return Tup([L.mode(v.t, k) for k in modes])
     tr.fail(op, f"select of a {type(v).__name__}")
+
+
+@op("cute.group_modes")
+def _group_modes(tr, op):
+    """Modes [begin, end) nested into one mode (DSL 4.6.1 keeps the op at the analyzed
+    stage): the leaves, in order, in the structure of the result type."""
+    v = tr.val(op, 0)
+    if isinstance(v, Data):
+        return v
+    if isinstance(v, Tup):
+        ref = L.parse_tuple(quoted(rtype(tr, op))[0])
+        flat = L.leaves(v.t)
+        if len(L.leaves(ref)) != len(flat):
+            tr.fail(op, "group_modes result type and operand differ in leaves")
+        return Tup(L.rebuild(ref, flat))
+    if not isinstance(v, (Lay, View)):
+        tr.fail(op, f"group_modes of a {type(v).__name__}")
+    lay = lay_of(tr, op, v)
+    ref_shape, ref_stride = L.parse_layout(quoted(rtype(tr, op))[-1])
+    out = restructure(
+        tr,
+        op,
+        ref_shape,
+        ref_stride,
+        list(zip(L.leaves(lay.shape), L.leaves(lay.stride))),
+    )
+    return out if isinstance(v, Lay) else View(v.ptr, out)
 
 
 @op("cute.recast_layout")

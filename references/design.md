@@ -54,8 +54,8 @@ revision; `lkv.py check` runs Layer 2 on existing KIR. End-to-end tests:
   patched (`frontend/cute/host_patches.py`): the host sees one SM100 device with
   the case's SM count, the DLPack capsules `cute.runtime.from_dlpack` makes
   report a CUDA device (so the DSL types the tensors as global memory, as for
-  CUDA tensors), `cute.compile` keeps the initial MLIR (arch sm_100a,
-  `CUTE_DSL_KEEP_IR`) and stops before lowering, and calling the compiled kernel
+  CUDA tensors), `cute.compile` records the initial MLIR (arch sm_100a) and
+  stops before lowering, and calling the compiled kernel
   records the launch arguments instead of launching. The analyzed stage is the
   prefix of the DSL's own `cute-to-nvvm` pipeline in which every Python
   construct (`const_expr`, helper inlining, pipeline classes) is resolved,

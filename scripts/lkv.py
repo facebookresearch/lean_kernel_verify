@@ -11,7 +11,8 @@
     python3 -I lkv.py export REV OUT_DIR PATH...
 
 run    dump with the case's frontend (a buck2 binary: CuTe DSL if the case has a
-       "builder", else TTGIR for TLX/Triton; only TTGIR compiles for sm_103) -> to_kir ->
+       "builder", the binary of its `dsl`, else TTGIR for TLX/Triton; only TTGIR compiles
+       for sm_103) -> to_kir ->
        frontend/kir.py -> frontend/emit_lean.py -> scripts/run_lean_check.sh, then
        <out>/report.json and <out>/report.md. Default out:
        /tmp/lkv_runs/<case dir name>/<case name>. The case's `env` reaches the frontend
@@ -244,7 +245,7 @@ def run_frontend(case_path, case, root, out, inputs, target):
     logs.mkdir(parents=True, exist_ok=True)
     sel = ["--inputs", inputs] if inputs else []
     if frontend_of(case) == "cute":
-        kirs, failures = run_cute(case_path, root, fe, logs, sel)
+        kirs, failures = run_cute(case_path, case, root, fe, logs, sel)
     else:
         kirs, failures = run_ttgir(case_path, root, fe, logs, sel, target)
     rejected = [
@@ -255,11 +256,23 @@ def run_frontend(case_path, case, root, out, inputs, target):
     return kirs, failures, rejected
 
 
-def run_cute(case_path, root, fe, logs, sel):
+# The CuTe frontend binary of each DSL a case may name (`dsl`, default 4.4.2).
+CUTE_BINARIES = {
+    "4.4.2": "frontend/cute:lkv_cute",
+    "4.6.1": "frontend/cute:lkv_cute_461",
+}
+
+
+def run_cute(case_path, case, root, fe, logs, sel):
     """The CuTe frontend (dump and to_kir in one binary): ([KIR paths], variants without
     a KIR, each with its kind: "gap" or "error")."""
+    dsl = case.get("dsl", "4.4.2")
+    if dsl not in CUTE_BINARIES:
+        raise RuntimeError(
+            f"the case names CuTe DSL {dsl}; supported: {sorted(CUTE_BINARIES)}"
+        )
     status = buck_run(
-        "frontend/cute:lkv_cute",
+        CUTE_BINARIES[dsl],
         ["run", case_path, "--src", root, "--out", fe, *sel],
         logs / "frontend.log",
     )

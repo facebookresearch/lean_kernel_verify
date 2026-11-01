@@ -143,6 +143,7 @@ class Kernel:
     cluster: tuple = (1, 1, 1)
     smem: tuple = E.const(0, 32)  # dynamic shared memory bytes (expression)
     max_iters: int = 4096
+    dsl: str = "4.4.2"  # the CuTe DSL release of the dump (issuing threads, ops.py)
     work: dict = field(
         default_factory=dict
     )  # work field -> [{"load": tensor, "where": text}]

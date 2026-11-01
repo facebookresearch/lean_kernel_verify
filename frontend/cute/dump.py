@@ -13,7 +13,7 @@
 The environment is pinned first (ttgir.host_env, shared with the TTGIR frontend):
 variables the exported sources and the case's builder read, and compiler switches
 (CUTE_DSL_*, TRITON_*, MLIR_*), come from the case's `env` only, plus the frontend's own
-CUTE_DSL_ARCH, CUTE_DSL_KEEP_IR and CUTE_DSL_DUMP_DIR. The kernel package is then
+CUTE_DSL_ARCH (and CUTE_DSL_LINEINFO with DSL 4.6.1). The kernel package is then
 imported from the exported source directory the case names (`source.src`, or --src),
 never from the build graph. The inputs of a case run in order in one process, like
 consecutive calls of one training process, so host compile caches behave as in
@@ -40,7 +40,6 @@ input for which the host launches nothing. The next inputs still run. Any other 
 CPU-only host) fails the dump.
 """
 
-import atexit
 import hashlib
 import importlib
 import importlib.metadata
@@ -50,7 +49,6 @@ import json
 import platform
 import shutil
 import sys
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -60,16 +58,19 @@ from ..ttgir import host_env
 
 def _pin_env(case: dict, roots: list) -> dict:
     """Pin the environment the DSL and the kernel package read at import time (so a
-    case's `env` needs a fresh process; the CLI runs one case per process). The DSL
-    writes the initial MLIR to a process scratch directory (dump.json keeps copies under
-    <out>/ir/)."""
-    raw = tempfile.mkdtemp(prefix="lkv_cute_raw_ir_")
-    atexit.register(shutil.rmtree, raw, ignore_errors=True)
-    own = {
-        "CUTE_DSL_ARCH": "sm_100a",
-        "CUTE_DSL_KEEP_IR": "1",
-        "CUTE_DSL_DUMP_DIR": raw,
-    }
+    case's `env` needs a fresh process; the CLI runs one case per process), after
+    checking that this process has the case's DSL (`dsl`, default 4.4.2)."""
+    version = importlib.metadata.version("nvidia-cutlass-dsl")
+    if version != case.get("dsl", "4.4.2"):
+        raise SystemExit(
+            f"dump: the case is for CuTe DSL {case.get('dsl', '4.4.2')}, this binary has "
+            f'{version} (scripts/lkv.py picks the binary from the case\'s "dsl")'
+        )
+    own = {"CUTE_DSL_ARCH": "sm_100a"}
+    if version != "4.4.2":
+        # DSL 4.6.1 gives ops source locations only with line info (4.4.2 always does,
+        # and line info would change its pass pipeline).
+        own["CUTE_DSL_LINEINFO"] = "1"
     return host_env.pin(case.get("env", {}), roots, own)
 
 
@@ -134,11 +135,11 @@ def _run(case_path: Path, out: Path, src: str | None, only: list | None) -> dict
         raise SystemExit(
             f"dump: {src_root / case['source']['package']} does not exist; export it first"
         )
+    builder_file = case_path.parent / case["builder"].split(":")[0]
+    pinned = _pin_env(case, [src_root, builder_file])
     ir_dir = out / "ir"
     shutil.rmtree(ir_dir, ignore_errors=True)
     ir_dir.mkdir(parents=True)
-    builder_file = case_path.parent / case["builder"].split(":")[0]
-    pinned = _pin_env(case, [src_root, builder_file])
     sys.dont_write_bytecode = True  # keep the case and source directories clean
     sys.path.insert(0, str(src_root))
 

@@ -790,6 +790,31 @@ def _named_bar_asm(tr, op, sync: bool, idx, cnt) -> None:
     )
 
 
+@handler("nvvm.barrier.arrive")
+def _bar_arrive(tr, op):
+    # DSL 4.6.1's named barrier arrive (id, thread count); 4.4.2 emitted inline bar.arrive.
+    if len(op.operands) != 2:
+        tr.fail(op, f"R7: nvvm.barrier.arrive with {len(op.operands)} operands")
+    _named_bar_asm(tr, op, False, ("op", 0), ("op", 1))
+    return []
+
+
+@effect("nvvm.barrier.arrive")
+def _bar_arrive_kept(tr, op):
+    return list(range(len(op.operands)))
+
+
+@handler("nvvm.tcgen05.mma", "nvvm.tcgen05.mma.block_scale")
+def _nvvm_mma(tr, op):
+    # DSL 4.6.1 lowers CuTe tcgen05 MMA atoms to these ops (4.4.2: cute_nvgpu umma).
+    tr.fail(op, f"R4: {op.name} (DSL 4.6.1's MMA): its TMEM footprint is not decoded")
+
+
+@effect("nvvm.tcgen05.mma", "nvvm.tcgen05.mma.block_scale")
+def _nvvm_mma_kept(tr, op):
+    return []
+
+
 @effect("llvm.inline_asm")
 def _asm_kept_p1(tr, op):
     try:

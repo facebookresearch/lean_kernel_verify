@@ -15,7 +15,8 @@ DSL `frontend_cute.md`, "Case files" (a CuTe case also needs a builder).
    **public host entry point**, so that the real validation, tile tables, grids and flag
    selection run. Name the kernel with `kernel` (TTGIR) or annotate each launched jit
    class under `kernels` (CuTe). Set `num_sms` small (2) so that work items outnumber
-   SMs. Non-default variant switches go in `env` (or TTGIR `module_overrides`).
+   SMs. Non-default variant switches go in `env` (or TTGIR `module_overrides`). A CuTe
+   case names the DSL release its sources target in `dsl` (4.4.2, the default, or 4.6.1).
 2. **Inputs:** only shapes, dtypes and integer metadata matter; data tensors are zeros.
    TTGIR arguments are `{"dtype","shape"}`, `{"dtype","values"}` or `{"ref"}`, and
    `setup` steps call real host helpers. CuTe inputs are the fields the builder reads.

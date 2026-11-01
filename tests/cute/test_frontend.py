@@ -7,12 +7,13 @@
 
 Each test writes a case file, runs the real host path (dump.run: compile on the CPU,
 record the launches, lower to the analyzed stage) and translates it (to_kir.run, which
-validates every KIR with frontend/kir.py). Needs the CuTe DSL: buck target :test_frontend
-(no GPU), built with the DSL the op table was checked against (ops.DSL_VERSION). The TMA,
+validates every KIR with frontend/kir.py). Needs the CuTe DSL (no GPU): buck targets
+:test_frontend and :test_frontend_461, one per DSL of the op table (ops.DSL_NATIVE). The TMA,
 inline-PTX and strided-metadata tests also check the Lean verdicts of their KIR
 (frontend/emit_lean.py, scripts/run_lean_check.sh) when the Lean toolchain is installed.
 """
 
+import importlib.metadata
 import json
 import os
 import re
@@ -26,6 +27,7 @@ from ...frontend.ttgir import host_env
 
 HERE = Path(__file__).resolve().parent
 SKILL = HERE.parents[1]
+DSL = importlib.metadata.version("nvidia-cutlass-dsl")  # this test binary's
 
 
 def run_case(
@@ -35,6 +37,7 @@ def run_case(
     inputs: list,
     kernels: dict | None = None,
     env: dict | None = None,
+    dsl: str = DSL,
 ):
     """dump + to_kir for one case; returns (report, {kernel class: KIR}, dump.json)."""
     tmp = Path(tempfile.mkdtemp(prefix=f"lkv_cute_test_{name}_"))
@@ -45,6 +48,7 @@ def run_case(
         "entry": f"kernels:{entry}",
         "builder": f"{HERE / 'kernels.py'}:{builder}",
         "num_sms": 2,
+        "dsl": dsl,
         "kernels": kernels or {},
         "inputs": inputs,
     }
@@ -123,17 +127,25 @@ class CuteFrontendTest(unittest.TestCase):
             self.assertNotIn("error", e, e)
             self.assertIn("kir", e, e)
 
+    def test_a_case_for_another_dsl_is_refused(self):
+        with self.assertRaisesRegex(
+            SystemExit, f"for CuTe DSL 0.0, this binary has {DSL}"
+        ):
+            run_case("other_dsl", "run_tma_pipeline", "args_tma_pipeline", [{"name": "rows100", "rows": 100}],
+                     dsl="0.0")  # fmt: skip
+
     def test_tma_producer_consumer(self):
         report, kirs, recorded = run_case("tma", "run_tma_pipeline", "args_tma_pipeline", [{"name": "rows100", "rows": 100}],
                                           {"host": {"intended_writes": {"mOut": "all"}}})  # fmt: skip
         self.assert_valid(report)
-        # The dump records the DSL it loaded; it is the one the op table was checked against.
-        self.assertEqual(recorded["dsl"]["version"], ops.DSL_VERSION)
+        # The dump records the DSL it loaded, one the op table was checked against.
+        self.assertEqual(recorded["dsl"]["version"], DSL)
+        self.assertIn(DSL, ops.DSL_NATIVE)
         self.assertTrue(recorded["dsl"]["native"])
         (k,) = kirs.values()
         self.assertEqual(
             (k["target"], k["compiler"]),
-            ("sm_100", {"name": "nvidia-cutlass-dsl", "version": ops.DSL_VERSION}),
+            ("sm_100", {"name": "nvidia-cutlass-dsl", "version": DSL}),
         )
         roles = {r["name"]: r for r in k["roles"]}
         self.assertEqual(sorted(roles), ["warps0_0", "warps1_1"])
@@ -227,6 +239,41 @@ class CuteFrontendTest(unittest.TestCase):
             "TMA load (lowered to elect.sync) with only part of warp(s) [0] active",
             report[0]["error"],
         )
+
+    def test_bulk_copy_issuing_threads_follow_the_dsl(self):
+        # cute.copy with a CopyBulkG2SOp atom: every executing lane issues cp.async.bulk
+        # with DSL 4.4.2; 4.6.1 lowers it behind a full-mask elect.sync (PTX checked,
+        # ops.BULK_G2S_ELECTS), so a warp issues it once and needs every lane active.
+        notes = {"host": {"intended_writes": {"mOut": "all"}}}
+        elects = DSL in ops.BULK_G2S_ELECTS
+        partial = (
+            "bulk copy (lowered to elect.sync) with only part of warp(s) [0] active"
+        )
+        for mode, issuers in (("warp", 1 if elects else 32), ("elect", None if elects else 1),
+                              ("half", None if elects else 16)):  # fmt: skip
+            with self.subTest(mode=mode):
+                report, kirs, _ = run_case(f"bulk_{mode}", "run_bulk_g2s", "args_bulk_g2s",
+                                           [{"name": "i", "rows": 64, "mode": mode}], notes)  # fmt: skip
+                if issuers is None:
+                    self.assertEqual(kirs, {})
+                    self.assertIn(partial, report[0]["error"])
+                    continue
+                self.assert_valid(report)
+                (k,) = kirs.values()
+                role = next(r for r in k["roles"] if r["name"] == "warps0_0")
+                bulk = [
+                    s
+                    for s in loops(role["body"])
+                    if any(e["ev"] == "tma_load" for e in events(s["body"]))
+                ]
+                # a loop over the issuers, or one event
+                got = bulk[0]["ub"]["v"] if bulk else 1
+                self.assertEqual(got, issuers)
+                verdicts = lean_verdicts(self, report[0]["kir"])
+                if verdicts:  # with the Lean toolchain installed
+                    self.assertEqual(
+                        verdicts[("i", "P0-4")], "PASS" if issuers == 1 else "FAIL"
+                    )
 
     def test_strided_metadata_is_recorded_by_offset(self):
         # `load` indices are element offsets from the data pointer.
