@@ -10,9 +10,9 @@ description:
   P0-5 mask elision on host-selected fast paths, plus (CuTe only, reported
   apart) P1-1 TMEM reuse ordering (cross-warp tcgen05 ld/st/cp/mma races). For
   checking a kernel revision or a fix for hangs, out-of-bounds or wrapped
-  addresses, missing or duplicate writes, barrier bugs and TMEM reuse races on
-  degenerate shapes, or writing a case file for a new kernel; verdicts cover the
-  case inputs only.'
+  addresses, missing or duplicate writes, barrier bugs and TMEM reuse races on the
+  shapes callers use (partial tiles, multi-wave grids), or writing a case file for a
+  new kernel; verdicts cover the case inputs only.'
 ---
 
 # lean-kernel-verify: compiler IR to Lean verdicts for five P0 specs and P1-1
@@ -27,7 +27,7 @@ each verdict as a `native_decide` theorem.
 hangs, out-of-bounds or wrapped addresses, missing or duplicate output writes,
 mbarrier parity or expect_tx bugs and (CuTe) unordered TMEM reuse across warps
 (P1-1, e.g. a scale-factor copy into a TMEM region that another warp is still
-loading), especially on empty, partial and multi-wave shapes, including CuTe
+loading), especially on partial and multi-wave shapes, including CuTe
 2-CTA (cluster) kernels for the P0 specs; or to add a case for a new kernel.
 **Do not use it** for numerics, performance, CUDA C++ kernels, TTGIR/TLX 2-CTA
 kernels, or general race/deadlock freedom (see Limits).
@@ -139,10 +139,14 @@ inputs and the annotations the specs need; its `description` says what the input
 trigger. Cases for public kernels go in `cases/`; `tests/e2e/cases/` has a small
 probe case per frontend. [references/cases.md](references/cases.md) says how to
 write a new case (source and public host entry point, inputs, annotations).
-**Degenerate inputs are mandatory**, because verdicts
-cover only the case inputs: a zero-length segment on each side, partial last
-tiles, more work items than SMs with odd and even tile counts, host-argument
-extremes, every host-selected flag variant, and one aligned control input.
+**Choose common inputs**, because verdicts cover only the case inputs: the shapes and
+conditions the kernel's callers produce (partial last tiles, more work items than SMs
+with odd and even tile counts, the callers' head counts and dtypes, the head dims the
+host accepts, every host-selected variant the callers reach) and one aligned control
+input. **Leave out very unlikely inputs unless the user asks for them**: an empty Q
+(e.g. `q_len = 0` in flash attention) or another empty segment, a window of 2^31 - 1 or
+a negative one, head counts the callers rule out, misuse that the docs or the public
+wrapper rule out, and opt-in modes nobody uses.
 
 ## The five P0 specs
 
@@ -294,7 +298,7 @@ table says when to read each):
 | [references/frontend_ttgir.md](references/frontend_ttgir.md)                              | writing a TLX/Triton case, or the TTGIR frontend refuses (case format, environment pinning, host patches, CLC)                |
 | [references/frontend_cute.md](references/frontend_cute.md)                                | writing a CuTe case or builder, or the CuTe frontend refuses (work anchors, analyzed stage, DSL pin)                          |
 | [references/ir_ops.md](references/ir_ops.md), [ir_ops_cute.md](references/ir_ops_cute.md) | an op is unknown or refused, or you need the events an op produces and which threads issue them                               |
-| [references/cases.md](references/cases.md)                                                | choosing a case for a kernel, or writing a new case (fields, annotations, mandatory degenerate inputs)                        |
+| [references/cases.md](references/cases.md)                                                | choosing a case for a kernel, or writing a new case (fields, annotations, which inputs to choose)                             |
 | [references/bug_taxonomy.md](references/bug_taxonomy.md)                                  | someone asks what is covered and why, or which spec to add next (evidence, P1/P2, test-side complements)                      |
 
 ## Tests

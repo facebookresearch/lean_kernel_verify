@@ -72,7 +72,7 @@ Lean: `python3 -I frontend/emit_lean.py KIR.json -o K.lean && scripts/run_lean_c
     "tensors": {"mK": {"segments": {"dim": 0, "offsets": "mCuSeqlensK", "per": "batch"}, "role": "input"}},
     "intended_writes": {"mdK": "all_rows_of_segments"},
     "elision_flags": ["config.full_tiles"]}},
- "inputs": [{"name": "tail_empty_multiwave", "...builder fields...": 0, "why": "..."}]}
+ "inputs": [{"name": "tail_multiwave", "...builder fields...": 0, "why": "..."}]}
 ```
 
 * `entry` is called once per input with `builder(input) -> (args, kwargs, meta)` (CPU

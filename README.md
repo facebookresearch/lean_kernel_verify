@@ -116,9 +116,11 @@ check a fix against its base.
 A case file names the kernel's source, its public host entry point, small concrete
 inputs and the annotations the specs need: segments, work items, intended output
 regions and mask-elision flags. The annotations name values; they never model behavior.
-Because verdicts cover only the case's inputs, degenerate inputs are mandatory: empty
-segments, partial last tiles, more work items than SMs with odd and even tile counts,
-host-argument extremes and every host-selected variant. Minimal cases:
+Because verdicts cover only the case's inputs, choose the shapes and conditions the
+kernel's callers produce: partial last tiles, more work items than SMs with odd and even
+tile counts, and every host-selected variant they reach. Leave out very unlikely inputs
+(an empty query, a window of 2^31 - 1, misuse the docs rule out) unless they are asked
+for. Minimal cases:
 [tests/e2e/cases/probe_tlx.json](tests/e2e/cases/probe_tlx.json) (TLX/Triton) and
 [tests/e2e/cases/probe_cute.json](tests/e2e/cases/probe_cute.json) (CuTe DSL). How to
 write one: [references/cases.md](references/cases.md).

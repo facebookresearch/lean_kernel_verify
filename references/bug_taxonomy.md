@@ -73,8 +73,8 @@ Why ordinary tests miss bugs like these:
 
 Selection criteria: (1) a decision procedure closes it, so the proof is reliable;
 (2) ordinary tests and profilers miss it; (3) it can be extracted mechanically from
-compiler IR, with no hand-written model. Every spec is required to hold on degenerate
-inputs: length 0, a CTA with no work, unaligned tiles, more tiles than SMs.
+compiler IR, with no hand-written model. Every spec is defined on every input, length 0
+and a CTA with no work included; `cases.md` says which inputs a case checks.
 
 ### P0 (implemented by this skill)
 
@@ -150,7 +150,7 @@ Nothing in the chain is hand-modeled per kernel.
 These close most of the "why tests missed it" gaps above without any proof:
 
 * NaN-fill (poison) every output and workspace before the kernel runs;
-* more tiles than SMs, unaligned and zero-length segments;
+* more tiles than SMs and unaligned segments;
 * magnitude checks next to cosine/SQNR;
 * run every autotune config, not only the selected one;
 * bitwise grid-invariance tests (same result for different grid sizes).

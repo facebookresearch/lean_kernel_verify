@@ -552,7 +552,7 @@ with at least one note, whatever their outcome (a PASS can have notes).
 - **Completion/wait work-item correspondence is not modeled**: a mid-run extra
   completion that the waits absorb in order (an MMA commit for a zero-length Q
   tile the consumer skips) looks like a trailing completion, a note. Only two
-  such completions on one CTA give a P0-2 hang (`zero_q_two_k_tiles*` inputs).
+  such completions on one CTA give a P0-2 hang.
 - **P1 classes other than P1-1 are not covered**: shared- and global-memory
   buffer reuse WAR/RAW, deadlocks that depend on timing or ring depth, TMEM
   allocation lifetime and tcgen05 fences, proxy fences, TMA descriptor legality,
@@ -567,9 +567,12 @@ with at least one note, whatever their outcome (a PASS can have notes).
 
 ### Spec model
 
-- Concrete inputs only; the case file must include the degenerate inputs (empty
-  segment, partial tiles, zero-trip loops, more tiles than CTAs, every flag
-  combination), and its `elision_flags` must name every flag that selects a
+- Concrete inputs only: a verdict says nothing about a shape no input has. The
+  case file picks the shapes and conditions the kernel's callers produce
+  (partial tiles, zero-trip loops where a window or block sparsity leaves a
+  tile without work, more tiles than CTAs, every flag combination they reach;
+  very unlikely inputs such as an empty Q are left out unless asked for,
+  `cases.md`), and its `elision_flags` must name every flag that selects a
   mask-elided path. A flag missing there loses nothing: the violations of its
   inputs are reported under P0-1/P0-3.
 - No interleavings are enumerated. Wait cycles that exist in the lockstep model

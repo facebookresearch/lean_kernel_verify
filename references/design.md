@@ -171,11 +171,11 @@ cross-warp pairs and blocked waits (`specs.md`, "P1-1"). Reported apart; its
 FAIL and UNDECIDED are part of the outcome and exit status only with
 `--p1-strict`, its ERRORs (a failed P1 translation, a Lean error) always.
 
-All specs are checked on every input of the case file. Each case file must
-include degenerate inputs: a zero-length segment, partial last tiles, more work
-items than SMs (small SM count), and every host-accepted flag combination the
-case targets, and name in `elision_flags` the flags that select a mask-elided
-fast path.
+All specs are checked on every input of the case file. The case file picks the shapes
+and conditions the kernel's callers produce (partial last tiles, more work items than
+SMs with a small SM count, every host-selected flag combination the callers reach) and
+leaves out very unlikely ones such as empty segments (`cases.md`, "Choose the inputs");
+it names in `elision_flags` the flags that select a mask-elided fast path.
 
 ## Trust base
 
