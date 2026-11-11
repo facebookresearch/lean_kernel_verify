@@ -34,8 +34,14 @@ kernel, the case's included) that may have written each tensor argument's data
 far in the run of data an earlier launch may have written (`stale_reads`,
 host_reads.py). to_kir refuses metadata and inputs that depend on them.
 
-Writes <out>/<spec>.ttgir per specialization of the case's kernel and <out>/dump.json
-(see references/frontend_ttgir.md for its format).
+Writes <out>/<spec>.ttgir and <out>/<spec>.ptx per specialization of the case's kernel and
+<out>/dump.json (see references/frontend_ttgir.md for its format). For the PTX frontend
+(design §5.1) dump.json also has, per spec, the PTX file and its sha256, the compiled
+kernel's tensordesc_meta, global scratch and profile scratch sizes and the ptxas that
+assembled it, and per launch of the case's kernel a LaunchRecord (`launch`,
+capture.launch_record): grid, block, cluster and dynamic shared memory as launched and
+the device parameters, checked against the PTX's `.entry`. The PTX keeps the source paths
+(TRITON_PRESERVE_PTX_SOURCE_PATHS, a setting of the dump like TRITON_CACHE_DIR).
 """
 
 import argparse
@@ -159,7 +165,10 @@ def _run(case: dict, out: Path, wanted: set | None, target: str) -> dict:
     # keeps it from serving one): a process scratch directory, the frontend's own setting.
     cache = tempfile.mkdtemp(prefix="lkv_triton_cache_")
     atexit.register(shutil.rmtree, cache, ignore_errors=True)
-    pinned = host_env.pin(case.get("env", {}), [root], {"TRITON_CACHE_DIR": cache})
+    # Triton rewrites every PTX `.file` to `<source>/<basename>` unless told to keep the
+    # path, which the PTX frontend needs to map locations to the export.
+    own = {"TRITON_CACHE_DIR": cache, "TRITON_PRESERVE_PTX_SOURCE_PATHS": "1"}
+    pinned = host_env.pin(case.get("env", {}), [root], own)
     # Imported only now: Triton reads its environment at import (and load_entry imports
     # the kernel module).
     import triton  # noqa: PLC0415
@@ -167,6 +176,7 @@ def _run(case: dict, out: Path, wanted: set | None, target: str) -> dict:
     # triton._C.libtriton is Triton's native extension module; it ships no type stubs.
     # pyrefly: ignore [missing-import]
     from triton._C import libtriton  # noqa: PLC0415
+    from triton.backends.nvidia.compiler import get_ptxas  # noqa: PLC0415
 
     from . import capture, case_args, gpu_free, provenance  # noqa: PLC0415
     from .host_errors import host_rejection  # noqa: PLC0415
@@ -224,6 +234,7 @@ def _run(case: dict, out: Path, wanted: set | None, target: str) -> dict:
                         "config": launch.config,
                         "args": launch.args,
                         "stale": stale,
+                        "launch": capture.launch_record(launch, kernels[key]),
                     }
                 )
             writes.append(written_storages(launch, write_sets[key]))
@@ -259,9 +270,12 @@ def _run(case: dict, out: Path, wanted: set | None, target: str) -> dict:
     check_exported(root)  # host code may import lazily
 
     compiled = {}
+    ptxas = get_ptxas(int(gpu_free.TARGETS[target].arch))  # a CUDA target: an int
     for key, launch in specs.items():
         kernel = kernels[key]
+        md = kernel.metadata
         (out / f"{key}.ttgir").write_text(kernel.asm["ttgir"])
+        (out / f"{key}.ptx").write_text(kernel.asm["ptx"])
         compiled[key] = {
             "kernel": launch.kernel,
             "ttgir": f"{key}.ttgir",
@@ -270,7 +284,16 @@ def _run(case: dict, out: Path, wanted: set | None, target: str) -> dict:
             "attrs": launch.attrs,
             "specialization": launch.specialization,
             "options": launch.options,
-            "shared_bytes": kernel.metadata.shared,
+            "shared_bytes": md.shared,
+            "ptx": f"{key}.ptx",
+            "ptx_sha256": hashlib.sha256(kernel.asm["ptx"].encode()).hexdigest(),
+            "tensordesc_meta": getattr(md, "tensordesc_meta", None),
+            "global_scratch": {
+                "size": md.global_scratch_size,
+                "align": md.global_scratch_align,
+            },
+            "profile_scratch_size": md.profile_scratch_size,
+            "ptxas": {"path": ptxas.path, "version": ptxas.version},
         }
 
     dump = {

@@ -6,9 +6,13 @@
 """dump: run a kernel's real host code path on a CPU-only host and record
 
   * the initial CuTe MLIR of every kernel the host compiles, plus its analyzed stage
-    (stage.py), and
+    (stage.py), and the PTX (with line info) and cubin the DSL compiles it to,
   * the arguments of every launch the host performs (tensor dtype/shape/stride/storage,
-    integer tensor contents, scalars).
+    integer tensor contents, scalars), and
+  * per launch, the LaunchRecord of every kernel launch its compiled host code makes
+    (host_patches.py P6/P9: grid, block, cluster, dynamic shared memory, attributes and
+    every kernel parameter, CUtensorMaps decoded, addresses resolved to the named
+    tensors; frontend/ptx/launch.py).
 
 The environment is pinned first (ttgir.host_env, shared with the TTGIR frontend):
 variables the exported sources and the case's builder read, and compiler switches
@@ -19,11 +23,24 @@ never from the build graph. The inputs of a case run in order in one process, li
 consecutive calls of one training process, so host compile caches behave as in
 production. GPU-only calls are replaced by host_patches.py.
 
-Output: <out>/dump.json and <out>/ir/
+Output: <out>/dump.json, <out>/ir/ and <out>/ptx/
   {"case", "source", "num_sms", "dsl", "env",
    "compiles": [{"index", "callable", "params", "flags", "digest", "ir", "pipeline",
-                 "stage", "host_stage", "verifier_failures"} | {..., "stage_error"}],
-   "inputs": [{"name", "launches": [{"compile", "args", "hinted"}], "host_reads", "meta", ["host_error"]}]}
+                 "stage", "host_stage", "verifier_failures"} | {..., "stage_error"},
+                 + "ptx": {"file", "sha256", "target", "cubin", "tvm_ffi",
+                           ["lineinfo_check"]} | null,
+                 ["ptx_error"]],
+   "inputs": [{"name", "launches": [{"compile", "args", "hinted", "launch_records",
+                                     ["capture_error"]}], "host_reads", "meta", ["host_error"]}]}
+
+ptx/<NN>_<digest>.ptx and .cubin are compile NN's (the digest is the variant's, of the
+initial MLIR: two variants can compile to the same PTX). A launch record is {"kernel",
+"entry", "ptx": {"file", "sha256"}, "target", "grid", "block", "cluster",
+"smem_dynamic", "attrs", "kernel_attrs", "params"} (host_patches.complete). With
+`lineinfo_check` (DSL 4.4.2) every compile is also compiled without line info
+(ptx/<NN>_<digest>.noline.ptx) and "lineinfo_check" says whether the instructions are the
+same ({"identical", "lines", "differing_lines"} | {"error"}). A capture that fails is
+recorded ("ptx_error", "capture_error") and printed; it changes nothing else.
 
 "dsl" is the CuTe DSL this process loaded (dsl_info); to_kir.py checks its version.
 "env" is the pinned environment (host_env.record). One ttgir.host_reads.HostReads
@@ -40,6 +57,7 @@ input for which the host launches nothing. The next inputs still run. Any other 
 CPU-only host) fails the dump.
 """
 
+import difflib
 import hashlib
 import importlib
 import importlib.metadata
@@ -47,6 +65,7 @@ import importlib.util
 import inspect
 import json
 import platform
+import re
 import shutil
 import sys
 from collections.abc import Callable
@@ -120,15 +139,112 @@ def _resolve(entry: str) -> Callable[..., Any]:
 
 
 def run(
-    case_path: Path, out: Path, src: str | None = None, only: list | None = None
+    case_path: Path,
+    out: Path,
+    src: str | None = None,
+    only: list | None = None,
+    lineinfo_check: bool = False,
 ) -> dict:
     try:
-        return _run(case_path, out, src, only)
+        return _run(case_path, out, src, only, lineinfo_check)
     finally:
         host_env.release()
 
 
-def _run(case_path: Path, out: Path, src: str | None, only: list | None) -> dict:
+def _empty_dir(d: Path) -> Path:
+    shutil.rmtree(d, ignore_errors=True)
+    d.mkdir(parents=True)
+    return d
+
+
+def ptx_code(ptx: str) -> list:
+    """The lines of a PTX module without line info: .loc and .file directives and debug
+    sections dropped, whitespace normalized."""
+    out, skip = [], False
+    for line in ptx.splitlines():
+        s = line.strip()
+        if s.startswith(".section") and ".debug" in s:
+            skip = True
+        if skip:
+            skip = s != "}"
+            continue
+        if s and not s.startswith((".loc", ".file")):
+            out.append(" ".join(s.split()))
+    return out
+
+
+def _lineinfo_check(c) -> dict:
+    """Whether a compile's PTX (c, host_patches.PtxCapture) has the same instructions
+    with and without line info."""
+    if c.ptx is None or c.ptx_noline is None:
+        return {"error": c.lineinfo_error or "no PTX"}
+    a, b = ptx_code(c.ptx), ptx_code(c.ptx_noline)
+    changed = [
+        d
+        for d in difflib.unified_diff(a, b, lineterm="", n=0)
+        if d[:1] in "+-" and not d.startswith(("+++", "---"))
+    ]
+    return {"identical": a == b, "lines": len(a), "differing_lines": len(changed)}
+
+
+def _write_ptx(c, stem: Path, lineinfo_check: bool) -> dict:
+    """Write a compile's PTX and cubin (c, host_patches.PtxCapture) to <stem>.*; the
+    compile's dump.json keys for them ("ptx", "ptx_error")."""
+    if c.error:
+        print(f"dump: PTX capture of {stem.name} failed: {c.error}")
+    error = {"ptx_error": c.error} if c.error else {}
+    if c.ptx is None:
+        return {"ptx": None} | error
+    Path(f"{stem}.ptx").write_text(c.ptx)
+    target = re.search(r"^\s*\.target\s+(\w+)", c.ptx, re.M)
+    entry: dict = {
+        "file": f"{stem}.ptx",
+        "sha256": hashlib.sha256(c.ptx.encode()).hexdigest(),
+        "target": target[1] if target else None,
+        "cubin": None,
+        "tvm_ffi": c.tvm_ffi,
+    }
+    if c.cubin is not None:
+        Path(f"{stem}.cubin").write_bytes(c.cubin)
+        entry["cubin"] = f"{stem}.cubin"
+    if lineinfo_check:
+        if c.ptx_noline is not None:
+            Path(f"{stem}.noline.ptx").write_text(c.ptx_noline)
+        entry["lineinfo_check"] = _lineinfo_check(c)
+    return {"ptx": entry} | error
+
+
+def _launch(la) -> dict:
+    """A launch's dump.json entry: its recorded arguments, then its LaunchRecords."""
+    d = {"compile": la.compile, "args": la.args, "hinted": la.hinted}
+    d["launch_records"] = la.records
+    if la.capture_error:
+        d["capture_error"] = la.capture_error
+    return d
+
+
+def _head_launch_records(result: dict) -> None:
+    """Head every LaunchRecord with its kernel (jit class), PTX file and target, and
+    report the launches whose capture failed."""
+    for inp in result["inputs"]:
+        for la in inp["launches"]:
+            c = result["compiles"][la["compile"]]
+            ptx = c["ptx"] or {}
+            head = {
+                "kernel": c["callable"].rsplit(".", 1)[-1],
+                "ptx": {"file": ptx.get("file"), "sha256": ptx.get("sha256")},
+                "target": ptx.get("target"),
+            }
+            la["launch_records"] = [head | r for r in la["launch_records"]]
+            if "capture_error" in la:
+                print(
+                    f"dump: input {inp['name']}: capture failed: {la['capture_error']}"
+                )
+
+
+def _run(
+    case_path: Path, out: Path, src: str | None, only: list | None, lineinfo_check: bool
+) -> dict:
     case = json.loads(case_path.read_text())
     src_root = Path(src or case["source"]["src"]).resolve()
     if not (src_root / case["source"]["package"]).exists():
@@ -137,9 +253,7 @@ def _run(case_path: Path, out: Path, src: str | None, only: list | None) -> dict
         )
     builder_file = case_path.parent / case["builder"].split(":")[0]
     pinned = _pin_env(case, [src_root, builder_file])
-    ir_dir = out / "ir"
-    shutil.rmtree(ir_dir, ignore_errors=True)
-    ir_dir.mkdir(parents=True)
+    ir_dir, ptx_dir = _empty_dir(out / "ir"), _empty_dir(out / "ptx")
     sys.dont_write_bytecode = True  # keep the case and source directories clean
     sys.path.insert(0, str(src_root))
 
@@ -172,7 +286,7 @@ def _run(case_path: Path, out: Path, src: str | None, only: list | None) -> dict
         "compiles": [],
         "inputs": [],
     }
-    with host_patches.installed(case["num_sms"]) as rec:
+    with host_patches.installed(case["num_sms"], lineinfo_check) as rec:
         rec.reads = HostReads(
             src_root
         )  # one for the run: data may reach a later input (caches)
@@ -190,10 +304,7 @@ def _run(case_path: Path, out: Path, src: str | None, only: list | None) -> dict
                         raise
                     record["host_error"] = rejected
             record["host_reads"] = rec.reads.reads[first_read:]
-            record["launches"] = [
-                {"compile": la.compile, "args": la.args, "hinted": la.hinted}
-                for la in rec.launches[first:]
-            ]
+            record["launches"] = [_launch(la) for la in rec.launches[first:]]
             if not record["launches"] and "host_error" not in record:
                 record["host_error"] = "no launch"
             if "host_error" in record:
@@ -230,6 +341,8 @@ def _run(case_path: Path, out: Path, src: str | None, only: list | None) -> dict
                 "pipeline": c.pipeline,
                 **stages[digest],
             }
+            | _write_ptx(c.capture, ptx_dir / f"{c.index:02d}_{digest}", lineinfo_check)
         )
+    _head_launch_records(result)
     (out / "dump.json").write_text(json.dumps(result, indent=1))
     return result

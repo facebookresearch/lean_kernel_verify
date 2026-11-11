@@ -18,29 +18,66 @@ patches"); nothing else on the host path is changed:
      types those tensors exactly as CUDA tensors (global memory) at compile time. Each
      runtime tensor remembers the torch tensor it wraps (its memory).
   P5 BaseDSL.compile_and_cache records the initial MLIR it is handed (the DSL has
-     verified it; with locations) and the pass pipeline the DSL computes
-     for the compile (its own _get_pipeline + preprocess_pipeline with the target arch),
-     and stops before running it: nothing is lowered, linked or loaded.
-  P6 cute.compile returns a recorder: the host's launch calls record their arguments
-     instead of running the kernel (a runtime tensor as the torch tensor it wraps), with
-     the sources of each tensor argument's data and the storages its integer arguments
-     point into (Recording.reads, the run's ttgir.host_reads.HostReads, which
-     dump.py activates around each host call).
+     verified it; with locations) and the pass pipeline the DSL computes for the compile
+     (its own _get_pipeline + preprocess_pipeline with the target arch): these are what
+     the variant digest and the analyzed stage (stage.py) come from. It then lets the DSL
+     compile that module with its own full pipeline, with line info and the PTX and cubin
+     kept (compile options set on the compile itself, not CUTE_DSL_* variables: the
+     environment would change the initial MLIR and the recorded pipeline), without
+     compile caches, and build the JIT engine of P9. With `lineinfo_check` (DSL 4.4.2),
+     a copy of the module is first compiled without line info, to check that line info
+     does not change the code. A compile that fails here keeps its MLIR (ptx_error).
+  P6 cute.compile returns a launcher: each call records the host's launch arguments (a
+     runtime tensor as the torch tensor it wraps), with the sources of each tensor
+     argument's data and the storages its integer arguments point into (Recording.reads,
+     the run's ttgir.host_reads.HostReads, which dump.py activates around each host
+     call), then calls the compiled function: the DSL's JIT host code runs natively and
+     its kernel launches reach P9 (Launch.records). A failure of that run is recorded on
+     the launch (capture_error); the recorded arguments do not depend on it.
   P8 torch.Tensor.pin_memory returns a copy of the tensor (is_pinned is True): page-
      locked host memory needs a driver, and pinning changes how copies to the device
      run, not the data.
+  P9 The CUDA runtime under the JIT host code is replaced by callbacks
+     (ExecutionEngine.raw_register_runtime), one per runtime function the module
+     declares (_HostRuntime): libraries and kernels load as handles, device queries are
+     answered for P1's device (_device_attrs), the static shared memory of a kernel from
+     its cubin, and _cudaLaunchKernelEx records grid, block, cluster, dynamic shared
+     memory, launch attributes and the bytes of every kernel parameter (sized by the
+     kernel's PTX .entry, frontend/ptx/launch.py) instead of launching. A declared
+     function without a callback stops the engine; an unknown attribute, an unknown
+     kernel or any other call the callbacks do not model fails the launch. The DSL's
+     runtime library is not loaded (get_shared_libs is empty), its cuInit check is
+     skipped and there is one device; the libraries the host code loads are handles that
+     are never unloaded (a real driver would crash on them), and the engine is built
+     without the module's global destructors (the unload; teardown is not captured). A
+     TVM-FFI function is made from that engine, as DSL 4.4.2 does (DSL 4.6.1 re-links
+     the module with JITLink against its runtime library).
+  P10 TVM-FFI (`--enable-tvm-ffi`): the TVM-FFI tensor of a runtime tensor, and every
+     torch tensor a TVM-FFI function is called with, is made from a DLPack capsule marked
+     kDLCUDA (P4 for TVM-FFI), so the generated wrapper takes them as device tensors (its
+     device checks pass and it finds its environment stream).
 """
 
 import ctypes
 import dataclasses
 import inspect
+import os
+import re
+import shutil
+import struct
+import tempfile
 import types
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 import cutlass
 import torch
 from cutlass import Numeric
+
+from ..ptx import launch as ptx_launch
+
 
 KDLCUDA = 2
 METADATA_LIMIT = 1 << 16  # integer tensors up to this many elements keep their contents
@@ -48,15 +85,47 @@ METADATA_LIMIT = 1 << 16  # integer tensors up to this many elements keep their 
 # and in generic form otherwise: DSL 4.6.1's custom form of nvvm.barrier with a location
 # does not parse back.
 GENERIC_FORM = cutlass.__version__ != "4.4.2"
+# CUtensorMap words DSL 4.6.1's software encoder never writes: its lowered host code
+# zeroes and fills w0..w7 of a 16-word alloca, so w8..w15 hold stale stack bytes. They are
+# decoded as zero and the record says so ("unwritten_words"); DSL 4.4.2 writes all 16.
+UNWRITTEN_TMAP_WORDS = [] if cutlass.__version__ == "4.4.2" else list(range(8, 16))
+# Shared memory the device reserves per CTA (SM90+), included in a cubin's .nv.shared.*.
+RESERVED_SMEM = 1024
+# Runtime error code the callbacks return for a call they do not model (cudaErrorUnknown).
+CUDA_ERROR = 999
+# Functions the JIT host code may take from the process instead of a callback: libc's
+# printf and sprintf (host-side diagnostics) and TVM-FFI's own C API (error reporting,
+# the environment stream: none is set, so kernels get the default stream).
+PROCESS_SYMBOLS = ("printf", "sprintf")
+PROCESS_PREFIXES = ("TVMFFI",)
+# Every compile's _HostRuntime, for the life of the process: its callbacks must outlive
+# the JIT engine, which may call them until it is collected.
+_RUNTIMES: list = []
+
+
+@dataclass
+class PtxCapture:
+    """What the DSL's own compile of a module produced (P5)."""
+
+    ptx: str | None = None  # line info on
+    cubin: bytes | None = None
+    ptx_noline: str | None = None  # without line info (lineinfo_check)
+    lineinfo_error: str | None = None  # why that compile failed
+    error: str | None = None  # why the compile or its JIT engine failed
+    tvm_ffi: bool = False  # compiled with --enable-tvm-ffi
 
 
 class _Captured(Exception):
-    """Raised by the patched compile_and_cache with the initial MLIR and pipeline."""
+    """Raised by the patched compile_and_cache with the initial MLIR and pipeline, and
+    with what the DSL's own compile produced from them (P5)."""
 
     def __init__(self, mlir: str, pipeline: str):
         super().__init__("initial MLIR captured before the DSL's pass pipeline")
         self.mlir = mlir
         self.pipeline = pipeline
+        self.capture = PtxCapture()
+        self.compiled = None  # the compiled function (the DSL's JIT executor)
+        self.runtime: _HostRuntime | None = None
 
 
 @dataclass
@@ -69,6 +138,7 @@ class Compile:
     )
     mlir: str  # initial MLIR written by the DSL
     pipeline: str  # the DSL's pass pipeline for this compile
+    capture: PtxCapture = field(default_factory=PtxCapture)
 
 
 @dataclass
@@ -76,6 +146,9 @@ class Launch:
     compile: int
     args: list
     hinted: list  # storages its integer arguments point into (address hints, ttgir.host_reads)
+    # The LaunchRecords of the kernels its compiled host code launched.
+    records: list = field(default_factory=list)
+    capture_error: str | None = None  # why running the compiled host code failed
 
 
 @dataclass
@@ -112,6 +185,25 @@ def _mark_capsule_cuda(capsule) -> None:
     head = _DLTensorHead.from_address(_capsule_ptr(capsule, name) + offset)
     head.device.device_type = KDLCUDA
     head.device.device_id = 0
+
+
+def _cuda_ffi_tensor(t: torch.Tensor):
+    """A TVM-FFI tensor over t's memory whose device is CUDA 0 (P10)."""
+    import tvm_ffi
+
+    capsule = t.__dlpack__()
+    _mark_capsule_cuda(capsule)
+    return tvm_ffi.from_dlpack(capsule)
+
+
+def _ffi_args(values):
+    """Call arguments of a TVM-FFI function with every torch tensor as _cuda_ffi_tensor."""
+    if isinstance(values, (tuple, list)):
+        items = [_ffi_args(v) for v in values]
+        return (
+            type(values)(*items) if hasattr(values, "_fields") else type(values)(items)
+        )
+    return _cuda_ffi_tensor(values) if isinstance(values, torch.Tensor) else values
 
 
 def describe(value):
@@ -194,15 +286,20 @@ def _flat(values) -> list:
     return out
 
 
-def _leaf_names(name: str, value) -> list:
-    """Names of the non-None leaves of a compile argument; tuples and namedtuples
-    flatten in order, as the DSL flattens them into host-function arguments."""
+def _leaves(name: str, value) -> list:
+    """(name, value) of the non-None leaves of a compile or launch argument; tuples and
+    namedtuples flatten in order, as the DSL flattens them into host-function
+    arguments."""
     if value is None:
         return []
     if isinstance(value, (tuple, list)):
         fields = getattr(value, "_fields", None) or [str(i) for i in range(len(value))]
-        return [n for f, v in zip(fields, value) for n in _leaf_names(f"{name}_{f}", v)]
-    return [name]
+        return [x for f, v in zip(fields, value) for x in _leaves(f"{name}_{f}", v)]
+    return [(name, value)]
+
+
+def _leaf_names(name: str, value) -> list:
+    return [n for n, _ in _leaves(name, value)]
 
 
 def _positional(fn, args, kwargs, compile_call: bool = False) -> list:
@@ -274,20 +371,400 @@ def _qualname(fn) -> str:
     return f"{obj.__module__}.{obj.__qualname__}"
 
 
-@contextmanager
-def installed(num_sms: int):
-    """Install P1-P6; yields the Recording the patched compile and launch calls fill."""
-    import cutlass.cute as cute
+def _device_attrs(num_sms: int) -> dict:
+    """cudaDeviceAttr values of P1's device: 16 multiProcessorCount, 75/76 compute
+    capability, 97 maxSharedMemoryPerBlockOptin (227 KiB on SM100)."""
+    return {16: num_sms, 75: 10, 76: 0, 97: 232448}
+
+
+def static_smem(cubin: bytes, entry: str) -> int:
+    """The static shared memory of kernel `entry` in an ELF cubin, as cuFuncGetAttribute
+    reports it (SHARED_SIZE_BYTES): its .nv.shared.<entry> section without the 1 KiB the
+    device reserves at the bottom of every CTA's shared memory, which the section starts
+    with (cudaDevAttrReservedSharedMemoryPerBlock; measured against the driver on GB300,
+    driver 13000); 0 without the section."""
+    (shoff,) = struct.unpack_from("<Q", cubin, 0x28)
+    shentsize, shnum, shstrndx = struct.unpack_from("<HHH", cubin, 0x3A)
+
+    def section(i: int) -> tuple:  # (name offset, type, flags, addr, offset, size, ...)
+        return struct.unpack_from("<IIQQQQIIQQ", cubin, shoff + i * shentsize)
+
+    names = section(shstrndx)[4]
+    want = f".nv.shared.{entry}\0".encode()
+    for i in range(shnum):
+        name, size = section(i)[0], section(i)[5]
+        if cubin[names + name : names + name + len(want)] == want:
+            if size < RESERVED_SMEM:
+                raise RuntimeError(f"{entry}: .nv.shared section of {size} bytes")
+            return size - RESERVED_SMEM
+    return 0
+
+
+class _LaunchAttr(ctypes.Structure):  # cudaLaunchAttribute
+    _fields_ = [
+        ("id", ctypes.c_int32),
+        ("pad", ctypes.c_uint8 * 4),
+        ("val", ctypes.c_uint8 * 64),
+    ]
+
+
+class _LaunchConfig(ctypes.Structure):  # cudaLaunchConfig_t
+    _fields_ = [
+        ("grid", ctypes.c_uint32 * 3),
+        ("block", ctypes.c_uint32 * 3),
+        ("smem", ctypes.c_uint64),
+        ("stream", ctypes.c_void_p),
+        ("attrs", ctypes.POINTER(_LaunchAttr)),
+        ("num_attrs", ctypes.c_uint32),
+    ]
+
+
+_P, _I32, _I64 = ctypes.c_void_p, ctypes.c_int32, ctypes.c_int64
+
+
+class _HostRuntime:
+    """The CUDA runtime functions the JIT host code of one compile calls (P9), as ctypes
+    callbacks. Kernels are handles named by _cudaLibraryGetKernel; launches append to
+    `launches` (raw LaunchRecords), and a call the callbacks cannot answer exactly
+    returns CUDA_ERROR with the reason in `errors`."""
+
+    def __init__(self, num_sms: int):
+        self.device_attrs = _device_attrs(num_sms)
+        self.ptx: str | None = None
+        self.cubin: bytes | None = None
+        self.kernels: dict = {}  # handle -> PTX .entry name
+        self.kernel_attrs: dict = {}  # entry -> {cudaFuncAttribute (str): value} set
+        self.libraries = 0
+        self.launches: list = []
+        self.errors: list = []
+        # name: (result type, argument types)
+        sigs: dict[str, tuple[Any, list[Any]]] = {
+            "_cudaLaunchKernelEx": (_I32, [_P, _P, _P]),
+            "_cudaLaunchKernel": (_I32, [_P, *[_I32] * 6, _P, _I64, _P]),
+            "_cudaLibraryLoadData": (_I32, [_P, _P, _P, _P, _I32, _P, _P, _I32]),
+            "_cudaLibraryGetKernel": (_I32, [_P, _P, ctypes.c_char_p]),
+            "_cuKernelGetAttribute": (_I32, [_P, _I32, _P, _I32]),
+            "_cudaDeviceGetAttribute": (_I32, [_P, _I32, _I32]),
+            "_cudaGetDevice": (_I32, [_P]),
+            "_cudaSetDevice": (_I32, [_I32]),
+            "_cudaKernelSetAttributeForDevice": (_I32, [_P, _I32, _I32, _I32]),
+            "_cudaFuncSetAttribute": (_I32, [_P, _I32, _I32]),
+            "_cudaOccupancyMaxActiveBlocksPerMultiprocessor": (
+                _I32,
+                [_P, _P, _I32, _I64],
+            ),
+            "cuda_dialect_init_library_once": (_I32, [_P, _P, _P, _P]),
+            "cuda_dialect_unload_library_once": (None, [_P]),
+            "cuda_dialect_get_error_name": (_P, [_I32]),
+        }
+        self.callbacks = {
+            name: ctypes.CFUNCTYPE(res, *args)(self._guarded(getattr(self, name), res))
+            for name, (res, args) in sigs.items()
+        }
+        self._error_name = ctypes.create_string_buffer(
+            b"lkv: CUDA runtime call not modeled on the CPU host (see the dump)"
+        )
+
+    def register(self, engine, declared: list) -> None:
+        """Register a callback for every runtime function the module declares; one the
+        callbacks do not cover is an error, unless the process provides it."""
+        unknown = [
+            n
+            for n in declared
+            if n not in self.callbacks
+            and n not in PROCESS_SYMBOLS
+            and not n.startswith(PROCESS_PREFIXES)
+        ]
+        if unknown:
+            raise RuntimeError(
+                f"the JIT host code declares {', '.join(unknown)}, which the CPU host "
+                "runtime does not model (host_patches.py, P9)"
+            )
+        for name in declared:
+            if name in self.callbacks:
+                engine.raw_register_runtime(
+                    name, ctypes.cast(self.callbacks[name], ctypes.c_void_p)
+                )
+
+    def _guarded(self, method, restype):
+        def call(*args):
+            try:
+                return method(*args)
+            except Exception as e:  # noqa: BLE001 - reported through the launch
+                self.errors.append(f"{method.__name__}: {type(e).__name__}: {e}")
+                return CUDA_ERROR if restype is _I32 else None
+
+        return call
+
+    def _entry(self, handle) -> str:
+        if handle not in self.kernels:
+            raise RuntimeError(f"unknown kernel handle {handle:#x}")
+        return self.kernels[handle]
+
+    def _record(self, handle, cfg, cluster: list, attrs: dict, args_p) -> int:
+        entry = self._entry(handle)
+        params = ptx_launch.ptx_params(self.ptx or "", entry)
+        argv = (ctypes.c_void_p * len(params)).from_address(args_p) if params else []
+        for p, ptr in zip(params, argv):
+            if not ptr:
+                raise RuntimeError(f"{entry}: no argument for parameter {p['i']}")
+            p["bytes"] = ctypes.string_at(ptr, p["size"]).hex()
+        self.launches.append(
+            {
+                "entry": entry,
+                "grid": list(cfg.grid),
+                "block": list(cfg.block),
+                "cluster": cluster,
+                "smem_dynamic": cfg.smem,
+                "attrs": attrs,
+                "kernel_attrs": dict(self.kernel_attrs.get(entry, {})),
+                "params": params,
+            }
+        )
+        return 0
+
+    # The callbacks, named as the runtime functions they replace.
+
+    def _cudaLaunchKernelEx(self, cfg_p, handle, args_p) -> int:
+        cfg = _LaunchConfig.from_address(cfg_p)
+        cluster = [1, 1, 1]
+        attrs: dict[str, Any] = {"pdl": False, "cooperative": False}
+        for i in range(cfg.num_attrs):
+            a = cfg.attrs[i]
+            val = bytes(a.val)
+            if a.id == 2:  # cudaLaunchAttributeCooperative
+                attrs["cooperative"] = bool(struct.unpack_from("<i", val)[0])
+            elif a.id == 4:  # cudaLaunchAttributeClusterDimension
+                cluster = list(struct.unpack_from("<3I", val))
+            elif a.id == 6:  # cudaLaunchAttributeProgrammaticStreamSerialization
+                attrs["pdl"] = bool(struct.unpack_from("<i", val)[0])
+            elif a.id == 11:  # cudaLaunchAttributePreferredClusterDimension
+                attrs["preferred_cluster"] = list(struct.unpack_from("<3I", val))
+            else:
+                raise RuntimeError(f"launch attribute {a.id} is not modeled")
+        return self._record(handle, cfg, cluster, attrs, args_p)
+
+    def _cudaLaunchKernel(self, handle, gx, gy, gz, bx, by, bz, args_p, smem, stream):
+        raise RuntimeError(
+            "_cudaLaunchKernel is not modeled (the DSL launches with Ex)"
+        )
+
+    def _cudaLibraryLoadData(self, out, code, *options) -> int:
+        self.libraries += 1
+        ctypes.c_void_p.from_address(out).value = 0x1000 + self.libraries
+        return 0
+
+    def _cudaLibraryGetKernel(self, out, library, name) -> int:
+        handle = 0x100000 + len(self.kernels)
+        self.kernels[handle] = name.decode()
+        ctypes.c_void_p.from_address(out).value = handle
+        return 0
+
+    def _cuKernelGetAttribute(self, out, attr, handle, device) -> int:
+        if attr != 1:  # CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES
+            raise RuntimeError(f"kernel attribute {attr} is not modeled")
+        if self.cubin is None:
+            raise RuntimeError("no cubin for the kernel's static shared memory")
+        ctypes.c_int32.from_address(out).value = static_smem(
+            self.cubin, self._entry(handle)
+        )
+        return 0
+
+    def _cudaDeviceGetAttribute(self, out, attr, device) -> int:
+        if device != 0 or attr not in self.device_attrs:
+            raise RuntimeError(f"device {device} attribute {attr} is not modeled")
+        ctypes.c_int32.from_address(out).value = self.device_attrs[attr]
+        return 0
+
+    def _cudaGetDevice(self, out) -> int:
+        ctypes.c_int32.from_address(out).value = 0
+        return 0
+
+    def _cudaSetDevice(self, device) -> int:
+        if device != 0:
+            raise RuntimeError(f"device {device} (the CPU host has device 0 only)")
+        return 0
+
+    def _cudaKernelSetAttributeForDevice(self, handle, attr, value, device) -> int:
+        return self._cudaFuncSetAttribute(handle, attr, value)
+
+    def _cudaFuncSetAttribute(self, handle, attr, value) -> int:
+        self.kernel_attrs.setdefault(self._entry(handle), {})[str(attr)] = value
+        return 0
+
+    def _cudaOccupancyMaxActiveBlocksPerMultiprocessor(self, out, handle, block, smem):
+        raise RuntimeError("occupancy queries are not modeled")
+
+    def cuda_dialect_init_library_once(self, state, init, load_to_device, set_error):
+        # TVM-FFI's lazy module load: cuda_init(&library), then cuda_load_to_device for
+        # the one device, as CudaDialectJitCompiledFunction._load_cuda_library does.
+        flag = ctypes.c_int64.from_address(state)
+        if flag.value:
+            return 0
+        library = ctypes.c_void_p()
+        rc = ctypes.CFUNCTYPE(_I32, _P)(init)(ctypes.addressof(library))
+        if rc == 0:
+            rc = ctypes.CFUNCTYPE(_I32, _P, _I32)(load_to_device)(
+                ctypes.addressof(library), 0
+            )
+        if rc:
+            ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_char_p)(set_error)(
+                b"RuntimeError", b"lkv: loading the kernels failed (see the dump)"
+            )
+            return rc
+        flag.value = 1
+        return 0
+
+    def cuda_dialect_unload_library_once(self, state) -> None:
+        return None
+
+    def cuda_dialect_get_error_name(self, code):
+        return ctypes.addressof(self._error_name)
+
+
+def _declared(module) -> list:
+    """Names of the functions a lowered (LLVM dialect) module declares but does not
+    define: what its JIT engine must resolve."""
+    out = []
+    for op in module.body.operations:
+        o = op.operation
+        if o.name == "llvm.func" and not (o.regions and len(o.regions[0].blocks)):
+            out.append(o.attributes["sym_name"].value)
+    return out
+
+
+_TENSORMAP = {"kind": "bytes", "size": 128, "align": 64}
+
+
+def _ld_param_fields(ptx: str, name: str) -> list:
+    """(offset, bytes) of every element the kernel reads from parameter `name` with
+    ld.param (a vector load is one element per lane)."""
+    out = set()
+    pattern = (
+        r"ld\.param(?:\.v(\d))?\.[a-z]+(\d+)\s[^;\[]*\[\s*"
+        + re.escape(name)
+        + r"\s*(?:\+\s*(\d+))?\s*\]"
+    )
+    for m in re.finditer(pattern, ptx):
+        n, size, off = int(m[1] or 1), int(m[2]) // 8, int(m[3] or 0)
+        out |= {(off + k * size, size) for k in range(n)}
+    return sorted(out)
+
+
+def _value(raw: bytes, off: int, size: int, tensors: dict) -> dict:
+    """A parameter field: its value and, if it is an address (8 bytes), the named tensors
+    it may point into."""
+    value = int.from_bytes(raw[off : off + size], "little")
+    hits = ptx_launch.resolve(value, tensors) if size == 8 and value else []
+    return {"value": value, "kind": "ptr" if hits else "scalar"} | (
+        {"tensor": hits} if hits else {}
+    )
+
+
+def complete(record: dict, ptx: str, tensors: dict) -> dict:
+    """A raw LaunchRecord with every parameter interpreted (kind):
+      tensormap  a CUtensorMap (`.align 64 .b8[128]`; words the DSL does not write read
+                 as zero) decoded, with the named tensors its global address may be in;
+                 tensormap_error instead if the decoder refuses a bit;
+      aggregate  a struct, as the fields the kernel reads by name with ld.param, named
+                 param<i>_<offset> (only CUtensorMaps have their address taken);
+      ptr, scalar  the value.
+    Every address is resolved against `tensors` (the launch's named leaves,
+    frontend/ptx/launch.py resolve): candidates "tensor", all of them."""
+    for p in record["params"]:
+        raw = bytes.fromhex(p["bytes"])
+        if all(p[k] == v for k, v in _TENSORMAP.items()):
+            written = bytearray(raw)
+            for w in UNWRITTEN_TMAP_WORDS:
+                written[8 * w : 8 * w + 8] = bytes(8)
+            try:
+                d = ptx_launch.decode(bytes(written))
+            except ptx_launch.LaunchError as e:
+                p["tensormap_error"] = str(e)
+                continue
+            p["kind"] = "tensormap"
+            p["tensormap"] = d | {
+                "base": ptx_launch.resolve(d["address"], tensors, d),
+                "unwritten_words": UNWRITTEN_TMAP_WORDS,
+            }
+        elif p["kind"] == "bytes":
+            p["kind"] = "aggregate"
+            p["fields"] = [
+                {"off": off, "size": size, "name": f"param{p['i']}_{off}"}
+                | _value(raw, off, size, tensors)
+                for off, size in _ld_param_fields(ptx, p["name"])
+            ]
+        else:
+            declared_ptr = p["kind"] == "ptr"
+            p |= _value(raw, 0, p["size"], tensors)
+            if declared_ptr:
+                p["kind"] = "ptr"
+    return record
+
+
+def _tensor_table(fn, torch_args) -> dict:
+    """The launch's named torch tensors (compile-parameter leaves) in the form
+    frontend/ptx/launch.py resolve takes."""
+    out = {}
+    for p, a in zip(_params(fn, torch_args), torch_args):
+        for name, t in _leaves(p["name"], a):
+            if isinstance(t, torch.Tensor):
+                s = t.untyped_storage()
+                out[name] = {
+                    "data_ptr": t.data_ptr(),
+                    "storage": [s.data_ptr(), s.data_ptr() + s.nbytes()],
+                    "elem_bytes": t.element_size(),
+                    "shape": list(t.shape),
+                    "strides": list(t.stride()),
+                }
+    return out
+
+
+def _keep(option_cls, stem: str, arch: str, ext: str):
+    """A DSL file-dump compile option (KeepPTX, KeepCUBIN) writing <stem>.<arch>.<ext>."""
+    opt = option_cls(True)
+    opt.dump_path = stem
+    setattr(opt, f"full_{ext}_path", f"{stem}.{arch}.{ext}")
+    return opt
+
+
+def _dumped(stem: str, arch: str, ext: str) -> bytes | None:
+    """The file a DSL file-dump option wrote, <stem>.<arch>.<ext>, if any."""
+    path = Path(f"{stem}.{arch}.{ext}")
+    return path.read_bytes() if path.exists() else None
+
+
+def _ptx(stem: str, arch: str) -> str | None:
+    data = _dumped(stem, arch, "ptx")
+    return None if data is None else data.replace(b"\0", b"").decode()  # NUL-ended
+
+
+def _compile_copy(dsl, mlir: str, pipeline, arch: str, stem: str) -> tuple:
+    """(PTX, error) of the initial MLIR text compiled by the DSL's pipeline with its
+    current options, in a context of its own (the CUDA dialect refuses a second binary of
+    a module in one context); no JIT engine, no TVM-FFI wrapper (host code)."""
+    from cutlass._mlir import ir as _ir
+
+    ir: Any = _ir  # native bindings without stubs (stage.py)
+    hook = dsl.compiler_provider._post_compile_hook
+    dsl.compiler_provider._post_compile_hook = None
+    try:
+        with ir.Context(), ir.Location.unknown():
+            dsl.compiler_provider.compile(
+                ir.Module.parse(mlir),
+                dsl.preprocess_pipeline(dsl._get_pipeline(pipeline), arch),
+            )
+        return _ptx(stem, arch), None
+    except Exception as e:  # noqa: BLE001 - recorded with the compile
+        return None, f"{type(e).__name__}: {e}"
+    finally:
+        dsl.compiler_provider._post_compile_hook = hook
+
+
+def _patch_devices(patch, num_sms: int) -> None:
+    """P1-P4, P8, P10."""
     import cutlass.utils
-    from cutlass.base_dsl.dsl import BaseDSL
     from cutlass.cute import runtime as cute_runtime
-
-    rec = Recording()
-    saved = []
-
-    def patch(obj, name, value):
-        saved.append((obj, name, getattr(obj, name)))
-        setattr(obj, name, value)
 
     props = types.SimpleNamespace(
         multi_processor_count=num_sms, major=10, minor=0, name="lkv-cpu-sm100"
@@ -319,22 +796,182 @@ def installed(num_sms: int):
         _mark_capsule_cuda(self._dlpack_data)
         wrapped = a[0] if a else k.get("tensor")
         self._lkv_source = wrapped if isinstance(wrapped, torch.Tensor) else None
+        if self._lkv_source is not None and hasattr(self, "_tvm_ffi_tensor"):
+            self._tvm_ffi_tensor = _cuda_ffi_tensor(self._lkv_source)  # P10
 
     patch(cute_runtime._Tensor, "__init__", cuda_typed_init)
 
-    def stop_before_passes(self, module, module_hash, function_name, pipeline, *a, **k):
-        # The arch and pipeline exactly as BaseDSL.compile_and_cache computes them.
-        arch = self.compile_options.gpu_arch or self.envar.arch
-        raise _Captured(
-            # (+ newline: the text save_ir writes, so 4.4.2 digests are unchanged)
-            module.operation.get_asm(
-                enable_debug_info=True, print_generic_op_form=GENERIC_FORM
-            )
-            + "\n",
-            self.preprocess_pipeline(self._get_pipeline(pipeline), arch),
+
+def _patch_host_runtime(patch, capturing: list) -> None:
+    """P9: no runtime library, no cuInit, one device; a JIT engine gets the callbacks of
+    the compile being captured (capturing[-1]), and a TVM-FFI function is made from it."""
+    from cutlass.base_dsl import compiler
+    from cutlass.base_dsl.dsl import BaseDSL
+    from cutlass.cutlass_dsl import cuda_jit_executor, tvm_ffi_provider
+
+    patch(BaseDSL, "get_shared_libs", lambda self: [])
+    if hasattr(compiler.Compiler, "_check_cuda_dependencies_once"):  # DSL 4.4.2
+        patch(compiler.Compiler, "_check_cuda_dependencies_once", lambda s, libs: None)
+    patch(cuda_jit_executor.CudaDialectJitCompiledFunction, "num_devices", 1)
+    real_jit = compiler.Compiler.jit
+
+    def jit_with_host_runtime(self, module, *a, **k):
+        if not capturing:
+            raise RuntimeError("a JIT engine built outside a captured compile")
+        # The callbacks can only be registered once the engine exists, but building the
+        # engine registers a module's global destructors (TVM-FFI: the library unload),
+        # which on x86-64 links the whole module then, before the callbacks are there
+        # ("Symbols not found", and a crash when registering). Teardown is not part of
+        # the capture, so the engine is built without them.
+        for op in list(module.body.operations):
+            if op.operation.name == "llvm.mlir.global_dtors":
+                op.operation.erase()
+        engine = real_jit(self, module, *a, **k)
+        capturing[-1].register(engine, _declared(module))
+        return engine
+
+    patch(compiler.Compiler, "jit", jit_with_host_runtime)
+
+    def ffi_function_on_engine(self):
+        # As DSL 4.4.2 makes it; DSL 4.6.1 would re-link the module with JITLink against
+        # the DSL's runtime library, without the callbacks.
+        if self.engine is None:
+            return None
+        import tvm_ffi
+
+        # Compiled eagerly, as the DSL does.
+        for name in ("cuda_init", "cuda_load_to_device"):
+            if self.engine.raw_lookup(name) is None:
+                raise RuntimeError(f"{name} not found in the JIT engine")
+        return tvm_ffi.Function.__from_mlir_packed_safe_call__(
+            self.engine.raw_lookup("__tvm_ffi_" + self.function_name),
+            keep_alive_object=self.engine,
         )
 
-    patch(BaseDSL, "compile_and_cache", stop_before_passes)
+    patch(
+        tvm_ffi_provider.TVMFFIJitCompiledFunctionBase,
+        "_create_tvm_ffi_function",
+        ffi_function_on_engine,
+    )
+
+
+def _capture_compile(dsl, real, args: tuple, kwargs: dict, stem: str, num_sms: int,
+                     lineinfo_check: bool, capturing: list) -> _Captured:  # fmt: skip
+    """P5 for one BaseDSL.compile_and_cache call (`real`, with `args` after self): the
+    initial MLIR and pipeline, then the DSL's own compile of the module with line info
+    and PTX and cubin kept at <stem>.*, no cache, and its JIT engine (P9)."""
+    from cutlass.base_dsl import compiler
+
+    module, _hash, _name, pipeline, *rest = args
+    # The arch and pipeline exactly as BaseDSL.compile_and_cache computes them.
+    arch = dsl.compile_options.gpu_arch or dsl.envar.arch
+    captured = _Captured(
+        # (+ newline: the text save_ir writes, so 4.4.2 digests are unchanged)
+        module.operation.get_asm(
+            enable_debug_info=True, print_generic_op_form=GENERIC_FORM
+        )
+        + "\n",
+        dsl.preprocess_pipeline(dsl._get_pipeline(pipeline), arch),
+    )
+    cap = captured.capture
+    cap.tvm_ffi = bool(dsl.compile_options.enable_tvm_ffi)
+    captured.runtime = runtime = _HostRuntime(num_sms)
+    _RUNTIMES.append(runtime)
+    # The options are swapped, not changed in place: cute.compile hands every compile the
+    # same CompileOptions object, and line info would reach the next initial MLIR.
+    options = dsl.compile_options.options
+    saved = dict(options)
+    if lineinfo_check and not GENERIC_FORM:
+        options[compiler.GenerateLineInfo] = compiler.GenerateLineInfo(False)
+        options[compiler.KeepPTX] = _keep(compiler.KeepPTX, stem + "_nl", arch, "ptx")
+        cap.ptx_noline, cap.lineinfo_error = _compile_copy(
+            dsl, captured.mlir, pipeline, arch, stem + "_nl"
+        )
+    # Once the pipeline has run, the kernels are a binary in the module; line info in the
+    # host code only breaks the TVM-FFI wrapper and the engine (DSL 4.4.2: a call without
+    # a debug location in a function with one), so it is stripped first.
+    provider = dsl.compiler_provider
+    hook = provider._post_compile_hook
+
+    def strip_host_line_info(m):
+        provider.passmanager.PassManager.parse(
+            "builtin.module(strip-debuginfo)", context=m.context
+        ).run(m.operation)
+        if hook is not None:
+            hook(m)
+
+    try:
+        options[compiler.GenerateLineInfo] = compiler.GenerateLineInfo(True)
+        options[compiler.KeepPTX] = _keep(compiler.KeepPTX, stem, arch, "ptx")
+        options[compiler.KeepCUBIN] = _keep(compiler.KeepCUBIN, stem, arch, "cubin")
+        provider._post_compile_hook = strip_host_line_info
+        capturing.append(runtime)
+        # rest = (args_spec, no_cache, no_jit_engine, [func_type]): no cache, an engine.
+        captured.compiled = real(
+            dsl, *args[:4], rest[0], True, False, *rest[3:], **kwargs
+        )
+    except Exception as e:  # noqa: BLE001 - recorded; the MLIR capture stands
+        cap.error = f"{type(e).__name__}: {e}"
+    finally:
+        provider._post_compile_hook = hook
+        capturing.clear()
+        options.clear()
+        options.update(saved)
+        cap.ptx = runtime.ptx = _ptx(stem, arch)
+        cap.cubin = runtime.cubin = _dumped(stem, arch, "cubin")
+    return captured
+
+
+def _run_host_code(captured: _Captured, call_args: tuple, call_kwargs: dict,
+                   tensors: dict) -> tuple:  # fmt: skip
+    """P6: call a captured compile's function as the host did; (its LaunchRecords,
+    completed against `tensors`; why it failed or None)."""
+    compiled, runtime, cap = captured.compiled, captured.runtime, captured.capture
+    if compiled is None or runtime is None:
+        return [], f"not compiled: {cap.error}"
+    if cap.tvm_ffi:
+        call_args = _ffi_args(call_args)
+        call_kwargs = {k: _ffi_args(v) for k, v in call_kwargs.items()}
+    runtime.launches, runtime.errors = [], []
+    try:
+        compiled(*call_args, **call_kwargs)
+    except Exception as e:  # noqa: BLE001 - recorded on the launch
+        runtime.errors.append(f"{type(e).__name__}: {e}")
+    # The module unloads its libraries (P9 handles) when it is collected, possibly after
+    # the patches are gone: it must have none.
+    if getattr(compiled, "jit_module", None) is not None:
+        compiled.jit_module.cuda_library.clear()
+    records = [complete(r, cap.ptx or "", tensors) for r in runtime.launches]
+    return records, "; ".join(runtime.errors) or None
+
+
+@contextmanager
+def installed(num_sms: int, lineinfo_check: bool = False):
+    """Install P1-P10; yields the Recording the patched compile and launch calls fill.
+    `lineinfo_check`: also compile every module without line info (P5, DSL 4.4.2)."""
+    import cutlass.cute as cute
+    from cutlass.base_dsl.dsl import BaseDSL
+    from cutlass.cute import runtime as cute_runtime
+
+    rec = Recording()
+    saved = []
+
+    def patch(obj, name, value):
+        saved.append((obj, name, getattr(obj, name)))
+        setattr(obj, name, value)
+
+    _patch_devices(patch, num_sms)
+    capturing: list = []  # the _HostRuntime of the compile being captured
+    _patch_host_runtime(patch, capturing)
+    scratch = tempfile.mkdtemp(prefix="lkv_cute_ptx_")
+    real_compile_and_cache = BaseDSL.compile_and_cache
+
+    def compile_and_capture(self, *args, **kwargs):
+        stem = os.path.join(scratch, f"{len(rec.compiles):02d}")
+        raise _capture_compile(self, real_compile_and_cache, args, kwargs, stem,
+                               num_sms, lineinfo_check, capturing)  # fmt: skip
+
+    patch(BaseDSL, "compile_and_cache", compile_and_capture)
 
     real_compile = cute.compile
 
@@ -351,28 +988,33 @@ def installed(num_sms: int):
             raise RuntimeError(
                 "cute.compile returned without reaching compile_and_cache"
             )
-        text = cause.mlir
         c = Compile(
             len(rec.compiles),
             _qualname(fn),
             _params(fn, _positional(fn, args, kwargs, compile_call=True)),
             _flags(fn),
-            text,
+            cause.mlir,
             cause.pipeline,
+            cause.capture,
         )
         rec.compiles.append(c)
+        captured = cause
 
         def launch(*call_args, **call_kwargs):
-            call_args = tuple(_positional(fn, call_args, call_kwargs))
+            positional = tuple(_positional(fn, call_args, call_kwargs))
             with rec.reads.paused():
-                call_args = _torch_args(call_args, cute_runtime._Tensor)
-                args = [describe(a) for a in call_args]
-                tensors = [a for a in _flat(call_args) if isinstance(a, torch.Tensor)]
+                torch_args = _torch_args(positional, cute_runtime._Tensor)
+                args = [describe(a) for a in torch_args]
+                tensors = [a for a in _flat(torch_args) if isinstance(a, torch.Tensor)]
                 described = [d for d in _flat(args) if d["kind"] == "tensor"]
                 hinted = rec.reads.pointees([v for d in _flat(args) for v in _ints(d)])
                 for d, src in zip(described, rec.reads.launch(tensors, hinted)):
                     d["sources"] = src
-            rec.launches.append(Launch(c.index, args, hinted))
+                la = Launch(c.index, args, hinted)
+                la.records, la.capture_error = _run_host_code(
+                    captured, call_args, call_kwargs, _tensor_table(fn, torch_args)
+                )
+            rec.launches.append(la)
 
         return launch
 
@@ -382,3 +1024,4 @@ def installed(num_sms: int):
     finally:
         for obj, name, value in reversed(saved):
             setattr(obj, name, value)
+        shutil.rmtree(scratch, ignore_errors=True)

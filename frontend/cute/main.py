@@ -7,9 +7,12 @@
 
   export --rev REV --path fbcode/<pkg dir> --out DIR [--repo DIR]
                                                        export a package at a revision
-  dump CASE.json [--src DIR] [--out DIR] [--inputs a,b] host run: MLIR + launch arguments
+  dump CASE.json [--src DIR] [--out DIR] [--inputs a,b] [--lineinfo-check]
+                                                       host run: MLIR, PTX, launch arguments
+                                                       and launch records
   to_kir CASE.json [--out DIR]                         dump.json + stages -> KIR JSON
-  run CASE.json [--src DIR] [--out DIR] [--inputs a,b]  dump, then to_kir
+  run CASE.json [--src DIR] [--out DIR] [--inputs a,b] [--lineinfo-check]
+                                                       dump, then to_kir
 
 Default output directory: /tmp/lkv_out/<case dir name>/<case name>/. `export` reads the
 repository that contains --repo (default: the current directory).
@@ -80,6 +83,11 @@ def main() -> None:
             p.add_argument(
                 "--inputs", help="comma-separated input names (default: all)"
             )
+            p.add_argument(
+                "--lineinfo-check",
+                action="store_true",
+                help="also compile without line info and compare the PTX (DSL 4.4.2)",
+            )
     args = ap.parse_args()
 
     if args.cmd == "export":
@@ -91,7 +99,11 @@ def main() -> None:
         from . import dump
 
         dump.run(
-            case_path, out, args.src, args.inputs.split(",") if args.inputs else None
+            case_path,
+            out,
+            args.src,
+            args.inputs.split(",") if args.inputs else None,
+            args.lineinfo_check,
         )
     if args.cmd in ("to_kir", "run"):
         from . import to_kir

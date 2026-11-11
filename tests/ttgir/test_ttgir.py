@@ -601,7 +601,12 @@ class TtgirFrontendTest(unittest.TestCase):
                     self.assertEqual("LKV_TEST_BLOCK" in d["env"]["unset"], not env)
                     self.assertIn("LKV_TEST_BLOCK", d["env"]["read_by_sources"])
                     self.assertIn("TRITON_CACHE_DIR", d["env"]["effective"])
-                    self.assertEqual(d["env"]["triton_cache_invalidating"], {})
+                    # The dump sets TRITON_PRESERVE_PTX_SOURCE_PATHS itself (full .file
+                    # paths in the PTX); libtriton lists it as cache-invalidating.
+                    self.assertEqual(
+                        d["env"]["triton_cache_invalidating"],
+                        {"TRITON_PRESERVE_PTX_SOURCE_PATHS": "true"},
+                    )
                     self.assertEqual(d["compiler"]["name"], "triton")
                     (kir,) = self.assert_valid(
                         to_kir.translate(self.out / c["name"] / "dump.json", c)

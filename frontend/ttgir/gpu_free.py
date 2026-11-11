@@ -11,6 +11,7 @@ justification, in references/frontend_ttgir.md ("What dump monkeypatches"). Only
 flags, descriptor shapes) is touched. Launches are intercepted separately (capture.py).
 """
 
+import contextlib
 from types import SimpleNamespace
 from typing import cast
 
@@ -54,6 +55,36 @@ class CpuOnlyCudaDriver:
 
     def get_active_torch_device(self):
         return torch.device("cpu")
+
+
+@contextlib.contextmanager
+def recorded_tma_fills():
+    """While active, the stand-in's `utils.fill_tma_descriptor_tiled` (Triton's launcher calls
+    it to encode a host TensorDescriptor's CUtensorMap) returns its arguments instead of a
+    CUtensorMap: capture.launch_record computes the device parameters with Triton's own
+    launcher code but encodes nothing. Outside it host code calling it fails as before
+    (AttributeError), as does every other descriptor fill (im2col, legacy 1-D/2-D)."""
+    utils = triton_driver.active.utils
+    utils.fill_tma_descriptor_tiled = _tiled_fill
+    try:
+        yield
+    finally:
+        del utils.fill_tma_descriptor_tiled
+
+
+def _tiled_fill(address, swizzle, elem_size, host_dtype, box, shape, strides, padding):
+    """The arguments of make_tensordesc_arg's fill_tma_descriptor_tiled call (shape, strides
+    and box outermost first, in elements; host_dtype is the CUtensorMapDataType)."""
+    return {
+        "address": int(address),
+        "host_dtype": int(host_dtype),
+        "elem_size": int(elem_size),
+        "shape": [int(x) for x in shape],
+        "strides": [int(x) for x in strides],
+        "box": [int(x) for x in box],
+        "swizzle": int(swizzle),
+        "padding": int(padding),
+    }
 
 
 class CudaOnCpu(TorchFunctionMode):
