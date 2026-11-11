@@ -596,14 +596,7 @@ def _tma_store(tr, op):
                 **_box_footprint(j, d["box"], v[:r], v[r : 2 * r], v[2 * r : 3 * r], v[3 * r])}  # fmt: skip
 
     if is_reduce:
-        _uni, var = tr.split_mask()
-        act = tr.active(var)
-        if act is None:
-            tr.fail(
-                op,
-                "TMA reduce (lowered to elect.sync) under a lane condition that depends on runtime values",
-            )
-        tr.full_warps(op, act, "TMA reduce (lowered to elect.sync)")
+        tr.warp_collective(op, "TMA reduce (lowered to elect.sync)")
         saved = tr.mask
         tr.mask = E.and1(saved, E.ELECT)
         tr.thread_event(op, operands, build)
@@ -683,14 +676,7 @@ def _bulk_g2s(tr, op):
     n = nbytes // eb
     saved = tr.mask
     if tr.k.dsl in BULK_G2S_ELECTS:
-        _uni, var = tr.split_mask()
-        act = tr.active(var)
-        if act is None:
-            tr.fail(
-                op,
-                "bulk copy (lowered to elect.sync) under a lane condition that depends on runtime values",
-            )
-        tr.full_warps(op, act, "bulk copy (lowered to elect.sync)")
+        tr.warp_collective(op, "bulk copy (lowered to elect.sync)")
         tr.mask = E.and1(saved, E.ELECT)
     gaccess(tr, op, "gload", p, [(n, E.const(1, 64))])
     name = f"bulk_{p.base}_{n}"

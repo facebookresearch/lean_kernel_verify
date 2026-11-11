@@ -79,5 +79,20 @@ First public release.
 - `lkv.py check` refuses two KIR files of one name (one would overwrite the other's Lean
   file and verdicts). `scripts/build_lean.sh` builds into one directory per `lean/`
   sources and toolchain (its staleness check compares modification times only).
+- P0-2/P0-4: the phase ledger must reach a fixpoint: a round that changes neither the
+  phase bounds, any wait's classification nor the lockstep contents. A cluster whose
+  ledger does not converge (also a 2-cycle) is no longer judged by its last round, whose
+  verdict could depend on the parity of an unrelated role's trip count: P0-2 and P0-4
+  list one `not decided` line for it and are UNDECIDED unless another cluster has a
+  certain counterexample; P1-1's F1 pairs there are not certain either
+  (`tests/lean/ledger_cycle`, `ledger_confirm`, `p1/ledger_cycle`).
+- P0-2: on a barrier array that some role's code initializes, each slot a CTA uses needs
+  exactly one executed `bar_init` there; a slot used without one or initialized twice is
+  a malformed barrier (references/kir.md change 13; `tests/lean/bar_init_once`).
+- CuTe frontend: `shfl.sync`, `vote.sync` and `make_warp_uniform` on the slice need every
+  lane of each warp that reaches them, as `elect.sync` does (a full-mask collective
+  executed by part of a warp is undefined in PTX).
+- TTGIR frontend: two mbarrier arrays, or two in-kernel descriptors, printed with one SSA
+  name in sibling regions are refused instead of merged into one KIR name.
 - Docs: CuTe DSL 4.4.2 compiles with the PTX compiler it embeds (12.9.83), not CUDA
   13.0's ptxas; a TMA reduce is once per warp only behind the DSL's `elect.sync`.

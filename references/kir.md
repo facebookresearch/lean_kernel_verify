@@ -84,6 +84,13 @@ follow items 1 to 3 and 8.
     translation, `lkv.py run --frontend ptx`: frontend_ptx.md); IR.lean's `Ir`
     gained the constructor `ptx`. Layer 2 does not read `ir`, so nothing else
     changes.
+13. **Lean only, no JSON change.** A barrier array that some `bar_init` names
+    needs exactly one executed `bar_init` on each slot that its CTA uses: a slot
+    used without one, or initialized twice, is a malformed barrier (P0-2 FAIL),
+    so an init under a runtime guard or a loop over fewer slots than `num` is
+    checked per CTA. An array no `bar_init` names (hand-written fixtures, a
+    frontend-made slot such as the cluster barrier) is taken as initialized once
+    before the roles start.
 
 ## Top level
 

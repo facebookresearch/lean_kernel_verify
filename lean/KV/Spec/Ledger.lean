@@ -45,10 +45,13 @@ before the other needs: phase k needs k x count minus all other roles' arrivals 
 run (`SlotLedger.needs`). Every wait is credited with a lower bound of its phase
 (re-checks, stale waits and presumed skips at c, skips at c+2). Classifying the repeated
 parities can raise these bounds and change the contents, so classification is repeated
-until both are stable, for at most (the CTA's waits + 2) rounds; if they still change
-then, the last round's are used, without a note. The soundness of these arguments
-against mbarrier semantics is argued here, not proved, so P0-2 and P0-4 verdicts are
-relative to this algorithm (references/design.md, trust base).
+until a round changes neither the bounds, the contents nor any wait's classification, for
+at most (the CTA's waits + 2) rounds. Classification and contents justify each other only
+at that fixpoint: a CTA that does not reach it (also one whose round brings back the state
+of two rounds before, a cycle that never ends) leaves P0-2 and P0-4 not decided
+(`SlotLedger.converged`, `unconverged`). The soundness of these arguments against mbarrier
+semantics is argued here, not proved, so P0-2 and P0-4 verdicts are relative to this
+algorithm (references/design.md, trust base).
 
 Lockstep credit. A second closure also credits phase k with each arriving role's least
 share of the lockstep contents (below) over phases up to k. The contents are an
@@ -181,7 +184,7 @@ structure Evidence where
   role : Nat
   loc : Loc
   wait : Bool
-  deriving Inhabited
+  deriving BEq, Inhabited
 
 structure WaitRec where
   parity : Int
@@ -211,7 +214,7 @@ structure WaitRec where
   else `assumedPhase`): `assumedPhase`, at least the role's previous `lockPhase` on the slot
   (+1 after a parity change), raised by the laps that the lockstep credit shows. -/
   lockPhase : Int := 0
-  deriving Inhabited
+  deriving BEq, Inhabited
 
 /-- An expect_tx (`load = false`) or a tma_load of one role on one slot. -/
 structure TxRec where
@@ -334,6 +337,10 @@ structure SlotLedger where
   roles : Array RoleSlot
   /-- Roles whose code waits on this barrier array. -/
   staticWaiters : Array Nat
+  /-- Some role's code initializes this barrier array: the slot needs exactly one
+  `bar_init` in its CTA (an array no `bar_init` names, as in hand-written fixtures, is taken
+  as initialized once before the roles start). -/
+  initDeclared : Bool
   /-- Lockstep contents of the `lockstep` waited complete phases; `none` if none exist or no
   complete phase is waited for. -/
   contents : Option Contents
@@ -342,6 +349,9 @@ structure SlotLedger where
   uncovered : Array Uncovered
   /-- Transaction events (role, loc) whose phase is unknown. -/
   unattributed : Array (Nat × Loc)
+  /-- The cluster's classification reached a fixpoint (`ledger`); if not, P0-2 and P0-4 are
+  not decided on the cluster (`unconverged`). -/
+  converged : Bool := true
   deriving Inhabited
 
 def SlotLedger.completions (L : SlotLedger) : Int := L.arrivals / L.count
@@ -929,23 +939,30 @@ def deadlocks (L : Array SlotLedger) (bounds : Array (Array WaitPos)) (sizes : A
 /-! ## The ledger -/
 
 mutual
-/-- Names of the barriers a statement waits on (in any branch or loop body). -/
-def Stmt.waitBars : Stmt → List String
-  | .event (.wait bar _ _ _ _) => [bar]
-  | .«for» _ _ _ _ body _ => waitBarsOf body
-  | .«while» _ body _ _ => waitBarsOf body
-  | .«if» _ t e _ => waitBarsOf t ++ waitBarsOf e
+/-- Names of the barriers a statement waits on, or with `init` initializes (in any branch or
+loop body). -/
+def Stmt.bars (init : Bool) : Stmt → List String
+  | .event (.wait bar _ _ _ _) => if init then [] else [bar]
+  | .event (.bar_init bar _ _ _) => if init then [bar] else []
+  | .«for» _ _ _ _ body _ => barsOf init body
+  | .«while» _ body _ _ => barsOf init body
+  | .«if» _ t e _ => barsOf init t ++ barsOf init e
   | _ => []
 
-def waitBarsOf : List Stmt → List String
+def barsOf (init : Bool) : List Stmt → List String
   | [] => []
-  | s :: ss => s.waitBars ++ waitBarsOf ss
+  | s :: ss => s.bars init ++ barsOf init ss
 end
 
 /-- Per barrier array of the host, the roles whose code waits on it. -/
 def staticWaiters (h : Host) : Array (Array Nat) :=
-  let bars := h.kernel.roles.toArray.map (waitBarsOf ·.body)
+  let bars := h.kernel.roles.toArray.map (barsOf false ·.body)
   h.barriers.map fun b => (Array.range bars.size).filter fun r => bars[r]!.contains b.decl.name
+
+/-- Per barrier array of the host, whether some role's code initializes it. -/
+def initDeclared (h : Host) : Array Bool :=
+  let bars := h.kernel.roles.flatMap (barsOf true ·.body)
+  h.barriers.map (bars.contains ·.decl.name)
 
 /-- The CTAs of one cluster, by rank, as one trace (module doc, "Clusters"): role `g` of the
 cluster is role `g % n` (n: the kernel's roles) of the CTA of rank `g / n`. -/
@@ -975,8 +992,8 @@ def ledger (h : Host) (c : ClusterTrace) (precise : Bool := false) : Array SlotL
       for i in [0:b.num] do
         L := L.push { slot := { bar := bi, idx := i, cta := rank }, count := b.count, used := false,
                       firstLoc := "", inits := #[], arrivals := 0, async := false, expectBytes := 0,
-                      tmaBytes := 0, roles := #[], staticWaiters := #[], contents := none, txPhases := #[],
-                      uncovered := #[], unattributed := #[] }
+                      tmaBytes := 0, roles := #[], staticWaiters := #[], initDeclared := false,
+                      contents := none, txPhases := #[], uncovered := #[], unattributed := #[] }
   let slot (s : Slot) : Nat := base[s.cta * nb + s.bar]! + s.idx
   let tx (load : Bool) (n : Int) (loc : Loc) (rs : RoleSlot) : RoleSlot :=
     { rs with tx := rs.tx.push { load, bytes := n, loc, arrivedBefore := rs.total } }
@@ -1008,8 +1025,12 @@ def ledger (h : Host) (c : ClusterTrace) (precise : Bool := false) : Array SlotL
   -- P1-1: partial credit of a multi-warp role's arrive events (module doc)
   let warps := if precise then (Array.range n).map fun g => (h.kernel.roles[g % nr]?.map (·.warps)).getD 1 else #[]
   let positions := (waitBounds L n (·.minPhase)).map (·.map (·.1))
+  -- what a round reads of the round before: the bounds, every slot's contents and waits
+  let state (b : Array (Array WaitPos)) (L : Array SlotLedger) := (b, L.map fun l => (l.contents, l.roles.map (·.waits)))
   let mut bounds : Array (Array WaitPos) := Array.replicate n #[]
   let mut cur := L
+  let mut prev := state bounds cur
+  let mut converged := false
   for _ in [0:positions.foldl (· + ·.size) 2] do
     -- per role and wait position, the prefixes surely before it, without and with the credit
     let may := if precise then mayBeforeReturn cur bounds sizes else #[]
@@ -1021,16 +1042,22 @@ def ledger (h : Host) (c : ClusterTrace) (precise : Bool := false) : Array SlotL
     let classified := classify cur bounds sizes (before sound) (before credited) locAt precise
     let next := waitBounds classified n (·.minPhase)
     let decomposed := decompose classified next locAt
-    let stable := next == bounds && decomposed.map (·.contents) == cur.map (·.contents)
+    let (here, after) := (state bounds cur, state next decomposed)
+    converged := after == here
+    -- back to the state of two rounds before: a 2-cycle, which never converges
+    let cycle := after == prev
+    prev := here
     bounds := next
     cur := decomposed
-    if stable then break
+    if converged || cycle then break
   let blocked := deadlocks cur (waitBounds cur n (·.assumedPhase)) sizes
   let sw := staticWaiters h
+  let inited := initDeclared h
   let mark (rs : RoleSlot) : RoleSlot := { rs with waits := rs.waits.map fun w =>
     { w with blocked := (blocked.find? fun (r, p, _) => r == rs.role && p == w.pos).map (·.2.2) } }
   return (cur.filter (·.used)).map fun l =>
     SlotLedger.attribute { l with staticWaiters := sw[l.slot.bar]!.map (· + l.slot.cta * nr),
+                                  initDeclared := inited[l.slot.bar]!, converged,
                                   roles := l.roles.map fun rs => { mark rs with remote := rs.role / nr != l.slot.cta } }
 
 /-- The clusters of the run whose roles all ran to their end (a trace cut short at an
@@ -1059,8 +1086,17 @@ def Run.ledgers (r : Run) : Ledgers := r.clusters.map fun c => (c.cid, ledger r.
 /-- The ledgers P1-1 uses (`ledger` with `precise`). -/
 def Run.ledgersP1 (r : Run) : Ledgers := r.clusters.map fun c => (c.cid, ledger r.host c true)
 
-/-- `f`'s lines about every slot ledger of every CTA in `Ls`. -/
+/-- `f`'s lines about every slot ledger of every cluster in `Ls` whose ledger converged (the
+others get an `unconverged` line instead). -/
 def forSlots (Ls : Ledgers) (f : Nat × Nat × Nat → SlotLedger → Array Issue) : Array Issue :=
-  Ls.foldl (init := #[]) fun acc (pid, ls) => ls.foldl (init := acc) fun acc L => acc ++ f pid L
+  Ls.foldl (init := #[]) fun acc (pid, ls) => ls.foldl (init := acc) fun acc L =>
+    if L.converged then acc ++ f pid L else acc
+
+/-- The `not decided` line of P0-2 and P0-4 for each cluster in `Ls` whose ledger did not
+converge. -/
+def unconverged (h : Host) (Ls : Ledgers) : Array Issue :=
+  Ls.filterMap fun (pid, ls) => if ls.all (·.converged) then none else
+    some { loc := "", context := s!"{if h.csize ≤ 1 then "cta" else "cluster"} {pidStr pid}",
+           msg := s!"not decided on this input: the barrier ledger of this {if h.csize ≤ 1 then "CTA" else "cluster"} does not converge (its last round still changes the phase classification or the lockstep contents), so its {ls.size} slot(s) are not checked; the lines of this spec that are not `not decided` lines are certain counterexamples" }
 
 end KV

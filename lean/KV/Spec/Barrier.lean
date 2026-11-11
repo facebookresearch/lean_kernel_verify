@@ -37,7 +37,8 @@ purpose, a wrong phase if not); expect_tx bytes with no load in a phase nobody w
 arrive_and_expect_tx), and expect_tx bytes on a slot nobody waits on.
 
 P0-4 is decided on the CTAs whose roles all ran to their end; an input with an
-out-of-bounds metadata load (P0-1) leaves it undecided (Check.lean).
+out-of-bounds metadata load (P0-1) leaves it undecided (Check.lean), and so does a cluster
+whose barrier ledger does not converge (Ledger.lean, `unconverged`).
 -/
 import KV.Spec.Ledger
 
@@ -53,7 +54,7 @@ def RoleOk (L : SlotLedger) (rs : RoleSlot) : Prop :=
 
 /-- The waits are well formed and the transaction bytes, attributed under the first fitting
 share assignment that explains them (Ledger.lean), satisfy the transaction clauses. -/
-def SlotOk (L : SlotLedger) : Prop := (∀ rs ∈ L.roles, RoleOk L rs) ∧ L.TxOk
+def SlotOk (L : SlotLedger) : Prop := L.converged ∧ (∀ rs ∈ L.roles, RoleOk L rs) ∧ L.TxOk
 
 instance (L : SlotLedger) : Decidable (SlotOk L) := by unfold SlotOk RoleOk WaitOk; infer_instance
 

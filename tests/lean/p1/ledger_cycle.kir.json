@@ -1,0 +1,593 @@
+{
+ "kir_version": 1,
+ "kernel": "ledger_cycle",
+ "source": "tests/lean/p1/ledger_cycle.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "var",
+   "name": "GRID",
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "EXTRA",
+   "type": "i32"
+  },
+  {
+   "name": "GRID",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "s0",
+   "count": {
+    "e": "const",
+    "v": 3,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "s1",
+   "count": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "s2",
+   "count": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "s3",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "s4",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "a",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "loc": "lc.py:1",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "w": 1,
+      "a": {
+       "e": "pid",
+       "axis": 0,
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      }
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lc.py:2",
+       "bar": "s2",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lc.py:3",
+       "bar": "s0",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lc.py:4",
+       "bar": "s0",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "n": 2
+      },
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "lc.py:40",
+       "inst": "st",
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "data",
+         "write": true,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 32,
+         "col": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "ncols": 4
+        }
+       ]
+      },
+      {
+       "op": "event",
+       "ev": "tmem_wait",
+       "loc": "lc.py:41",
+       "ld": false
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lc.py:5",
+       "bar": "s2",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lc.py:6",
+       "bar": "s1",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "lc.py:7",
+       "bar": "s2",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lc.py:8",
+       "bar": "s1",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": []
+    }
+   ]
+  },
+  {
+   "name": "b",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "loc": "lc.py:10",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "w": 1,
+      "a": {
+       "e": "pid",
+       "axis": 0,
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      }
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "lc.py:11",
+       "bar": "s1",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lc.py:12",
+       "bar": "s0",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": []
+    }
+   ]
+  },
+  {
+   "name": "c",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "loc": "lc.py:14",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "w": 1,
+      "a": {
+       "e": "pid",
+       "axis": 0,
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      }
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "lc.py:15",
+       "bar": "s0",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lc.py:16",
+       "bar": "s0",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lc.py:17",
+       "bar": "s1",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lc.py:18",
+       "bar": "s2",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "n": 2
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "lc.py:19",
+       "bar": "s1",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": []
+    }
+   ]
+  },
+  {
+   "name": "d",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "lc.py:21",
+     "bar": "s3",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "for",
+     "var": "t",
+     "loc": "lc.py:22",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "EXTRA",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "lc.py:23",
+       "bar": "s3",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ]
+    },
+    {
+     "op": "if",
+     "loc": "lc.py:24",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "w": 1,
+      "a": {
+       "e": "pid",
+       "axis": 0,
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      }
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "lc.py:25",
+       "bar": "s4",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": []
+    }
+   ]
+  },
+  {
+   "name": "e",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "pid",
+       "axis": 0,
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "lc.py:51",
+       "bar": "s2",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "tmem",
+       "loc": "lc.py:52",
+       "inst": "ld",
+       "warp": {
+        "e": "const",
+        "v": 4,
+        "w": 32
+       },
+       "rects": [
+        {
+         "use": "data",
+         "write": false,
+         "lane": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "nlanes": 32,
+         "col": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "ncols": 4
+        }
+       ]
+      },
+      {
+       "op": "event",
+       "ev": "tmem_wait",
+       "loc": "lc.py:53",
+       "ld": true
+      }
+     ],
+     "else": [],
+     "loc": "lc.py:50"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "ledger_cycle",
+  "inputs": [
+   {
+    "name": "extra0",
+    "params": {
+     "EXTRA": 0,
+     "GRID": 1
+    }
+   },
+   {
+    "name": "extra1",
+    "params": {
+     "EXTRA": 1,
+     "GRID": 1
+    }
+   }
+  ]
+ },
+ "tmem": {
+  "cols": 512,
+  "base": "zero"
+ }
+}

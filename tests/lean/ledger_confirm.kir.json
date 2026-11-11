@@ -1,0 +1,260 @@
+{
+ "kir_version": 1,
+ "kernel": "ledger_confirm",
+ "source": "tests/lean/ledger_confirm.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "EXTRA",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "s0",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "s1",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "s2",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "a",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "lcf.py:2",
+     "bar": "s0",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "lcf.py:3",
+     "bar": "s1",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "lcf.py:4",
+     "bar": "s1",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "lcf.py:5",
+     "bar": "s0",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "n": 3
+    },
+    {
+     "op": "event",
+     "ev": "wait",
+     "loc": "lcf.py:6",
+     "bar": "s0",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "parity": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "lcf.py:7",
+     "bar": "s1",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "n": 2
+    }
+   ]
+  },
+  {
+   "name": "b",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "lcf.py:10",
+     "bar": "s1",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "n": 4
+    }
+   ]
+  },
+  {
+   "name": "pad",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "lcf.py:20",
+     "bar": "s2",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "for",
+     "var": "t",
+     "loc": "lcf.py:21",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "EXTRA",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "lcf.py:22",
+       "bar": "s2",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "ledger_confirm",
+  "inputs": [
+   {
+    "name": "at_budget",
+    "params": {
+     "EXTRA": 0
+    }
+   },
+   {
+    "name": "one_more",
+    "params": {
+     "EXTRA": 1
+    }
+   }
+  ]
+ }
+}

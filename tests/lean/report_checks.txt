@@ -47,3 +47,13 @@ eval_errors UNDECIDED negative_barrier_num P0-4
 segmented_gload evaluation error (unexpected): ?: host: segmented tensor
 cluster_pair_tma grid (2,1,1) in clusters (2,1,1): 2 CTA(s) x 3 role(s), 9 events
 cluster_launch grid (4,1,1) in clusters (2,1,1): 4 CTA(s) x 1 role(s), 0 events
+ledger_cycle UNDECIDED extra0 P0-2
+ledger_cycle UNDECIDED extra1 P0-2
+ledger_cycle UNDECIDED extra1 P0-4
+ledger_cycle UNDECIDED hang_elsewhere P0-4
+ledger_cycle !UNDECIDED hang_elsewhere P0-2
+ledger_cycle !do not split into per-role shares
+ledger_cycle !NOTES
+ledger_confirm UNDECIDED at_budget P0-2
+ledger_confirm UNDECIDED at_budget P0-4
+ledger_confirm !UNDECIDED one_more P0-2

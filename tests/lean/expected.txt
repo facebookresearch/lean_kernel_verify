@@ -59,6 +59,11 @@ arrival_counts            count_128        PASS PASS PASS PASS PASS
 arrival_counts            count_32         PASS FAIL PASS PASS PASS
 arrival_counts            count_96         PASS FAIL PASS PASS PASS
 arrival_counts            init_mismatch    PASS FAIL PASS PASS PASS
+# P0-2: a slot of an array the code initializes needs exactly one bar_init in its CTA.
+bar_init_once             once             PASS PASS PASS PASS PASS
+bar_init_once             partial          PASS FAIL PASS PASS PASS
+bar_init_once             double           PASS FAIL PASS PASS PASS
+bar_init_once             cta_skips        PASS FAIL PASS PASS PASS
 atomic_outside_intended   inside           PASS PASS PASS PASS PASS
 atomic_outside_intended   outside          PASS PASS PASS PASS PASS
 atomic_outside_intended   atomic_oob       FAIL PASS PASS PASS PASS
@@ -222,3 +227,10 @@ cluster_launch            grid4            PASS PASS PASS PASS PASS
 cluster_launch            grid3            FAIL FAIL FAIL FAIL FAIL
 cluster_barrier           ok               PASS PASS PASS PASS PASS
 cluster_barrier           follower_skips_arrive PASS FAIL PASS PASS PASS
+# A barrier ledger that does not converge (in CTA 0 the lockstep contents of s0 and s2 alternate, each round's evidencing the other's) leaves P0-2 and P0-4 undecided there, whatever the round count (before, P0-2 failed with 0 or 2 spins of the unrelated role pad and passed with 1 or 3); a certain hang in CTA 1 still FAILs.
+ledger_cycle              extra0           PASS FAIL PASS FAIL PASS
+ledger_cycle              extra1           PASS FAIL PASS FAIL PASS
+ledger_cycle              hang_elsewhere   PASS FAIL PASS FAIL PASS
+# Bounds and contents stable while a wait's classification still changes is no fixpoint: at the round budget (at_budget) the ledger has not converged (P0-2/P0-4 undecided), one round more (one_more) it has (P0-2 a certain hang, P0-4 PASS).
+ledger_confirm            at_budget        PASS FAIL PASS FAIL PASS
+ledger_confirm            one_more         PASS FAIL PASS PASS PASS

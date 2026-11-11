@@ -604,6 +604,7 @@ def _no_elect(tr, op, e, what: str):
 @op("cute_nvgpu.arch.make_warp_uniform")
 def _warp_uniform(tr, op):
     # __shfl_sync(-1, x, 0): every lane gets lane 0's value.
+    tr.warp_collective(op, "make_warp_uniform")
     v = tr.val(op, 0)
     if isinstance(v, Data):
         return v
@@ -623,11 +624,7 @@ def _elect(tr, op):
     undefined otherwise), so each warp reaching it must be fully active under the mask."""
     if op.operands:
         tr.fail(op, "elect.sync with an explicit member mask")
-    _uni, var = tr.split_mask()
-    act = tr.active(var)
-    if act is None:
-        tr.fail(op, "elect.sync under a lane condition that depends on runtime values")
-    tr.full_warps(op, act, "elect.sync")
+    tr.warp_collective(op, "elect.sync")
     return E.ELECT
 
 
@@ -635,10 +632,11 @@ def _elect(tr, op):
 def _shfl(tr, op):
     """PTX shfl.sync on integers: lane l receives the value of source lane j(l), or its
     own value when j(l) is outside its segment."""
-    if int_width(rtype(tr, op)) is None:
-        return tr.data(op)
     if not E.is_const(tr.int_of(op, 0, "shfl member mask"), -1):
         tr.fail(op, "shfl.sync with a partial member mask")
+    tr.warp_collective(op, "shfl.sync")
+    if int_width(rtype(tr, op)) is None:
+        return tr.data(op)
     v = tr.int_of(op, 1, "shfl value")
     b = tr.int_of(op, 2, "shfl lane/offset")
     c = tr.int_of(op, 3, "shfl clamp")
@@ -693,6 +691,7 @@ def _ballot(tr, op):
         tr.fail(op, f"vote.sync kind {kind} (only ballot, any and all are supported)")
     if not E.is_const(tr.int_of(op, 0, "vote member mask"), -1):
         tr.fail(op, f"vote.{mode}.sync with a partial member mask")
+    tr.warp_collective(op, f"vote.{mode}.sync")
     p = tr.int_of(op, 1, "vote predicate")
     _no_elect(tr, op, p, f"vote.{mode}.sync")
     total = E.const(0, 32)

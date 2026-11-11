@@ -115,8 +115,8 @@ lanes with different policies still issue one copy (measured). The frontend side
 
 `elect.sync` picks one active lane per warp; which one is unspecified, so an event under
 ELECT is counted once per warp and its operands must not depend on LANE (hard error).
-With its full member mask every lane of the warp must execute it (PTX: undefined
-otherwise), so it is a hard error when a warp reaching it has only some lanes active
+With the full member mask of `elect.sync`, an integer `shfl.sync`, `vote.sync` or
+`make_warp_uniform` every lane of the warp must execute it (PTX: undefined otherwise), so it is a hard error when a warp reaching it has only some lanes active
 under the current lane mask, or when that depends on runtime values.
 
 Barrier ops need a thread-uniform address and operands; `bar_init`, `wait` and TMA loads
@@ -176,9 +176,9 @@ CTA of rank `r` (thread-uniform): the event's `cta`.
 | `cute.get_flat_coord %i, %lay` | one coordinate per top-level mode: `(i / size(modes before)) % size(mode)` (static leaves of the result type checked) |
 | `cute.append_to_rank %lay, %pad {rank}` | the layout padded with copies of `%pad` to `rank` modes |
 | `nvvm.elect.sync` (no member-mask operand) | `ELECT`; every warp reaching it fully active (above) |
-| `cute_nvgpu.arch.make_warp_uniform %x` | `x[LANE := 0]` (`__shfl_sync(-1, x, 0)`); a shared-memory address (`ptrtoint`, 4.6.1's allocator base) stays that address at LANE := 0 |
-| `nvvm.shfl.sync %mask, %v, %b, %c {kind}` (integer) | lane `l` gets `v` at source lane `j(l)` of its warp, with the PTX rule (`bval = b[4:0]`, `segmask = c[12:8]`, `maxLane`/`minLane`; `up: j = l - bval, ok = j >= maxLane`; `down: j = l + bval, ok = j <= maxLane`; `bfly: j = l ^ bval, ok = j <= maxLane`; `idx: j = minLane \| (bval & ~segmask), ok = j <= maxLane`), its own value when not ok. A table over lanes (or threads) of bound per-lane values. Partial member mask: error. |
-| `nvvm.vote.ballot.sync %mask, %p` / `nvvm.vote.sync {kind = ballot, any, all}` (4.6.1) | ballot: `B = OR_k (zext(p[LANE := k]) << k)`; any / all: `B != 0` / `B == -1`. Partial member mask or another vote kind: error. |
+| `cute_nvgpu.arch.make_warp_uniform %x` | `x[LANE := 0]` (`__shfl_sync(-1, x, 0)`); a shared-memory address (`ptrtoint`, 4.6.1's allocator base) stays that address at LANE := 0; every warp reaching it fully active |
+| `nvvm.shfl.sync %mask, %v, %b, %c {kind}` (integer) | lane `l` gets `v` at source lane `j(l)` of its warp, with the PTX rule (`bval = b[4:0]`, `segmask = c[12:8]`, `maxLane`/`minLane`; `up: j = l - bval, ok = j >= maxLane`; `down: j = l + bval, ok = j <= maxLane`; `bfly: j = l ^ bval, ok = j <= maxLane`; `idx: j = minLane \| (bval & ~segmask), ok = j <= maxLane`), its own value when not ok. A table over lanes (or threads) of bound per-lane values. Partial member mask: error; every warp reaching it fully active. |
+| `nvvm.vote.ballot.sync %mask, %p` / `nvvm.vote.sync {kind = ballot, any, all}` (4.6.1) | ballot: `B = OR_k (zext(p[LANE := k]) << k)`; any / all: `B != 0` / `B == -1`. Partial member mask or another vote kind: error; every warp reaching it fully active. |
 | `cute.static` | the value of its (fully static) type: tuple, layout, composed layout, atom |
 | `cute.make_int_tuple / make_coord / make_shape / make_stride / make_tile` | the result type's tuple with its `?` leaves filled by the operands' dynamic leaves |
 | `cute.get_leaves`, `cute.get_scalars [only_dynamic]`, `cute.to_int_tuple`, `cute.derefine`, `builtin.unrealized_conversion_cast` | leaves / scalars (dynamic positions from the operand type) / identity |

@@ -36,6 +36,9 @@ arrival_counts the arrivals of the 2 waited phase(s) do not split into per-role 
 arrival_counts note: arrival_counts.py:11: cta (0,0,0) slot epi_done[0]: role mma (consumer convention, 2 waits) waits for phases up to 4 but the slot completes 8 times (256 arrivals / count 32): phases 5..8 complete after its last wait
 arrival_counts note: arrival_counts.py:11: cta (0,0,0) slot epi_done[0] role mma: wait #1 (parity 1, consumer convention) synchronizes with phase 4, not phase 2 after its previous wait: phase 3 surely completed before it (the arrivals that surely precede it reach the phase at role epilogue's arrive at arrival_counts.py:21)
 arrival_counts note: arrival_counts.py:5: cta (0,0,0) slot epi_done[0]: 256 arrivals is not a multiple of the count 96: phase 3 gets 64 arrival(s) and never completes; nobody waits for it
+bar_init_once bar_init_once.py:11: cta (0,0,0) slot full[1]: used without a bar_init in this CTA, while the code initializes full: an uninitialized mbarrier
+bar_init_once bar_init_once.py:5: cta (0,0,0) slot full[0]: bar_init 2 times in this CTA (first at bar_init_once.py:5): re-initializing an mbarrier is undefined
+bar_init_once bar_init_once.py:11: cta (1,0,0) slot full[1]: used without a bar_init in this CTA
 atomic_outside_intended note: atomic_outside_intended.py:9: cta (0,0,0) role default: gatomic y: 36 element(s) outside the intended region (rows [64, 100)); harmless only if the reduction leaves the values there unchanged (e.g. it adds zero)
 atomic_outside_intended note: atomic_outside_intended.py:12: cta (0,0,0) role default: tma_reduce z: 1024 element(s) outside the intended region (rows [64, 128)); harmless only if the reduction leaves the values there unchanged (e.g. it adds zero)
 atomic_outside_intended atomic_outside_intended.py:11: cta (0,0,0) role default: tma_store z: 512 element(s) outside the intended region (rows [32, 64))
@@ -128,3 +131,7 @@ cluster_dsmem_relay cluster.py:51: cta (0,0,0) slot peer_full[0]: phase 2: expec
 cluster_multicast cluster.py:70: cta (1,0,0) slot full[0]: phase 1: expect_tx 128 bytes != tma_load 0 bytes landing in it
 cluster_launch grid (3,1,1) is not a multiple of the cluster dims (2,1,1): the launch fails
 cluster_barrier cluster.py:101: cta (0,0,0) slot cluster_barrier[0]: role warp1 of cta (1,0,0) (consumer convention, 1 waits) needs 1 completions but the slot completes 0 times (96 arrivals / count 128): the wait hangs
+ledger_cycle ?: cta (0,0,0): not decided on this input: the barrier ledger of this CTA does not converge
+ledger_cycle lc.py:25: cta (1,0,0) slot s4[0]: role d (consumer convention, 1 waits) needs 1 completions but the slot completes 0 times
+ledger_confirm ?: cta (0,0,0): not decided on this input: the barrier ledger of this CTA does not converge
+ledger_confirm lcf.py:6: cta (0,0,0) slot s0[0]: role a (consumer convention, 2 waits) needs 4 completions but the slot completes 3 times

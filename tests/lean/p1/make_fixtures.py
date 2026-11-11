@@ -1128,6 +1128,34 @@ def cluster_pair():
     return k
 
 
+def ledger_cycle():
+    """tests/lean/ledger_cycle (CTA 0's barrier ledger does not converge: the lockstep
+    contents of s0 and s2 alternate) with TMEM accesses: role a stores cols [0, 4) of lane
+    quarter 0 and waits for it before its second s2 arrive; a new role e waits s2 (parity 0),
+    then loads them. Under one round's contents the pair is unordered (F1), under the other
+    round's ordered only by the contents (U1): with a ledger that does not converge, F1 is
+    not certain and P1-1 is undecided, whichever round the loop stops in."""
+    k = json.loads((HERE.parent / "ledger_cycle.kir.json").read_text())
+    f = "lc.py"
+    then = k["roles"][0]["body"][0]["then"]  # role a, under pid == 0
+    at = next(i for i, s in enumerate(then) if s["loc"] == f"{f}:5")
+    then[at:at] = [
+        tmem("st", c(0), [rect("data", True, c(0), 32, c(0), 4)], f"{f}:40"),
+        twait(False, f"{f}:41"),
+    ]
+    e_body = [
+        wait("s2", c(0), f"{f}:51"),
+        tmem("ld", c(4), [rect("data", False, c(0), 32, c(0), 4)], f"{f}:52"),
+        twait(True, f"{f}:53"),
+    ]
+    pid0 = cmp("eq", {"e": "pid", "axis": 0, "w": 32}, c(0))
+    k["roles"].append(role("e", 1, [if_(pid0, e_body, [], f"{f}:50")]))
+    k["kernel"], k["source"] = "ledger_cycle", "tests/lean/p1/ledger_cycle.kir.json"
+    k["tmem"] = {"cols": 512, "base": "zero"}
+    k["case"]["inputs"] = [i for i in k["case"]["inputs"] if i["params"]["GRID"] == 1]
+    return k
+
+
 FIXTURES = {
     "s2t_race": lambda: s2t("s2t_race", None),
     "s2t_drain": lambda: s2t("s2t_drain", "fix"),
@@ -1152,6 +1180,7 @@ FIXTURES = {
     "meta_oob_p1": meta_oob,
     "hang_vacuous": hang,
     "cluster_pair": cluster_pair,
+    "ledger_cycle": ledger_cycle,
 }
 
 

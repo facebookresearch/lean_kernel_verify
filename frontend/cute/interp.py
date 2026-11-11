@@ -1284,10 +1284,21 @@ class Translator:
                 start = i
         raise SplitWarps(groups)
 
+    def warp_collective(self, op, what: str) -> int:
+        """full_warps of the threads the current mask activates (refused if that depends
+        on runtime values)."""
+        act = self.active(self.split_mask()[1])
+        if act is None:
+            self.fail(
+                op, f"{what} under a lane condition that depends on runtime values"
+            )
+        return self.full_warps(op, act, what)
+
     def full_warps(self, op, act: list, what: str) -> int:
         """The number of warps among the threads `act` (threads() indices), each of which
-        must be fully active: `what` runs elect.sync with the full member mask, undefined
-        in PTX when a lane of the warp does not execute it."""
+        must be fully active: `what` is (or lowers to) a warp collective with the full
+        member mask (elect.sync, shfl.sync, vote.sync), undefined in PTX when a lane of
+        the warp does not execute it."""
         lanes: dict = {}
         for i in act:
             lanes[i // 32] = lanes.get(i // 32, 0) + 1

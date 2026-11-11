@@ -32,7 +32,9 @@
   bad_layout pin, and every spec of its input that kind's outcome; the other UNDECIDED
   outcomes are exactly P0-2..P0-5 of the four inputs with an out-of-bounds metadata load
   (meta_oob_load out_of_range, eval_errors meta_oob, meta_masked_load unmasked_empty,
-  meta_oob_elided out_of_range) where nothing but the `not decided` line is listed.
+  meta_oob_elided out_of_range) and P0-2/P0-4 of ledger_cycle's inputs and ledger_confirm
+  at_budget (a barrier ledger that does not converge) where nothing but the `not decided`
+  line is listed.
 * probe_tlx / probe_cute: the probe kernels of kernels/ through the real TTGIR and CuTe
   frontends (`lkv.py run`), with degenerate inputs (an empty tensor, fewer elements than
   one block). The seeded bugs (a floor grid; threads past the end) must be the only FAILs.
@@ -193,7 +195,7 @@ ONE_INPUT = {"case": {"inputs": [{"name": "a"}]}}
 NOT_DECIDED = (
     "oob.py:5: cta (1,0,0) role default: not decided on this input: 1 role trace(s) stop "
     "at an out-of-bounds metadata load (P0-1), so their later events are unknown; the "
-    "other lines of this spec are certain counterexamples"
+    "lines of this spec that are not `not decided` lines are certain counterexamples"
 )
 UNDECIDED_OUT = (
     f"""\
@@ -832,8 +834,9 @@ class EndToEnd(unittest.TestCase):
     def assert_outcomes(self, report):
         """Every evaluation error has the kind EVAL_ERROR_KINDS pins, and every spec of its
         input that kind's outcome; the other UNDECIDED outcomes are the specs of the inputs
-        with an out-of-bounds metadata load that list nothing but the `not decided` line
-        (its other lines are certain counterexamples), and there is no other ERROR."""
+        with an out-of-bounds metadata load or a barrier ledger that does not converge that
+        list nothing but the `not decided` line (its other lines are certain
+        counterexamples), and there is no other ERROR."""
         outcomes, evals, only_marker = {}, {}, set()
         for v, i in runs_of_report(report):
             if i["eval_error"]:
@@ -864,6 +867,9 @@ class EndToEnd(unittest.TestCase):
             ("meta_masked_load", "unmasked_empty"),
             ("meta_oob_elided", "out_of_range"),
         }
+        unconverged = {
+            ("ledger_cycle", i) for i in ("extra0", "extra1", "hang_elsewhere")
+        } | {("ledger_confirm", "at_budget")}
         self.assertTrue(of_kind("kernel") <= outcomes["FAIL"])
         self.assertEqual(outcomes["ERROR"], of_kind("unexpected"))
         self.assertEqual(
@@ -871,7 +877,7 @@ class EndToEnd(unittest.TestCase):
             of_kind("limit")
             | {
                 (*x, label)
-                for x in stopped
+                for x in stopped | unconverged
                 for label in SPECS[1:]
                 if (*x, label) in only_marker
             },
@@ -879,6 +885,9 @@ class EndToEnd(unittest.TestCase):
         # A stopped input FAILs a spec it has a certain counterexample for.
         self.assertIn(("meta_oob_load", "out_of_range", "P0-3"), outcomes["FAIL"])
         self.assertIn(("meta_oob_elided", "out_of_range", "P0-2"), outcomes["FAIL"])
+        # So does a CTA's certain hang beside a CTA whose ledger does not converge.
+        self.assertIn(("ledger_cycle", "hang_elsewhere", "P0-2"), outcomes["FAIL"])
+        self.assertIn(("ledger_cycle", "extra1", "P0-2"), outcomes["UNDECIDED"])
 
     def assert_shell_env_ignored(self, name, report):
         """The frontend dropped SHELL_ENV and the report lists the dropped values."""

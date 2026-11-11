@@ -355,7 +355,9 @@ checks on the same trace.
   unsigned (`unsignedCmp`) `scf.for` bounds, pointers or tensors carried by loops or
   yielded by `scf.if` (the `ptrs += BLOCK` / `offs += BLOCK` idioms: compute them from
   the loop index instead), pointers to sub-byte element types, side-effecting inline
-  asm, two `tensormap_create` into one scratch buffer.
+  asm, two `tensormap_create` into one scratch buffer, two mbarrier arrays (or two
+  loaded in-kernel descriptors) printed with one SSA name in sibling regions such as two
+  partitions (KIR barrier and tensor names are kernel-wide).
 * Malformed op text the translation does not expect is a `KirError` naming the op and
   its loc, never a crash.
 * Event locations: every event's `loc` is a line of the exported sources.

@@ -36,3 +36,5 @@ s2t_race !UNDECIDED
 meta_oob_p1 UNDECIDED oob P1-1
 cluster_pair grid (2,1,1) in clusters (2,1,1): 2 CTA(s) x 2 role(s), 35 events; P1: 9 TMEM accesses, 0 conflicting pair(s) classified
 cluster_pair !NOTES
+ledger_cycle UNDECIDED extra0 P1-1
+ledger_cycle UNDECIDED extra1 P1-1

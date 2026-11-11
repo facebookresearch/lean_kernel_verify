@@ -1,8 +1,9 @@
 # Expected P1-1 verdicts of every (fixture, input) of tests/lean/p1 (P1 KIR, written by
 # make_fixtures.py); run_all.sh compares them with the VERDICT lines KV.runP1 prints and
 # with the native_decide theorems. An undecided input (out-of-bounds metadata load, an
-# unordered pair under an inconsistent named barrier, or a pair ordered only under the
-# lockstep contents) is a refuted theorem: FAIL here.
+# unordered pair under an inconsistent named barrier or in a CTA whose ledger does not
+# converge, or a pair ordered only under the lockstep contents) is a refuted theorem: FAIL
+# here.
 # fixture              input                       P1-1
 s2t_race               one_mblock                  PASS
 s2t_race               two_mblocks                 FAIL
@@ -70,3 +71,5 @@ cluster_pair           ordered                     PASS
 cluster_pair           last_unwaited               FAIL
 cluster_pair           last_unwaited_one_block     PASS
 cluster_pair           leader_only_release         FAIL
+ledger_cycle           extra0                      FAIL
+ledger_cycle           extra1                      FAIL

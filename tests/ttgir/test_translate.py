@@ -641,6 +641,52 @@ class StructureTest(unittest.TestCase):
         ):
             build(ttgir(GEMM_ARGS, body), GEMM_SNAP)
 
+    def test_one_name_for_two_values_in_sibling_partitions_is_refused(self):
+        # The printer may reuse an SSA name in sibling regions, but KIR barrier and
+        # tensor names are kernel-wide: partition1's own %bar (or %scr) is not
+        # partition0's.
+        caps = {"arg3": "!tt.ptr<f16>", "arg4": "i32", "arg5": "i32", "arg6": BAR}
+        consts = "".join(PRELUDE.splitlines(True)[:6])  # isolated: no outer constants
+        own = f"""      %bar = ttg.local_alloc : () -> {BAR} loc(#loc2)
+      ttng.init_barrier %bar, 1 : {BAR} loc(#loc2)
+"""
+        load = tma()
+        for old, new in zip(("%a_ptr", "%M", "%K", "%b0"), caps):
+            load = load.replace(old, "%" + new)
+        cases = {
+            "barrier": (
+                own + f"      ttng.arrive_barrier %bar, 1 : {BAR} loc(#loc3)\n",
+                own + f"      ttng.wait_barrier %bar, %c0_i32 : {BAR} loc(#loc4)\n",
+                "%bar",
+            ),
+            "descriptor": (load, load, "%scr"),
+        }
+        sig = ", ".join(f"%{n}: {t} loc(unknown)" for n, t in caps.items())
+        for kind, (p0, p1, name) in cases.items():
+            for p1_name in (name, name + "_0"):
+                parts = [
+                    f"    partition{i}({sig}) num_warps(1) {{\n{consts}{p}"
+                    "      ttg.warp_return loc(#loc1)\n    }"
+                    for i, p in enumerate((p0, p1.replace(name, p1_name)))
+                ]
+                body = (
+                    "    ttg.warp_specialize(%a_ptr, %M, %K, %b0)\n    default {\n"
+                    "      ttg.warp_yield loc(#loc1)\n    }\n"
+                    + "\n".join(parts)
+                    + f" : ({', '.join(caps.values())}) -> () loc(#loc1)\n"
+                )
+                with self.subTest(kind=kind, p1_name=p1_name):
+                    if p1_name != name:
+                        kir = build(ttgir(GEMM_ARGS, body), GEMM_SNAP)
+                        self.assertEqual(kir_contract.validate(kir), [])
+                        names = {x["name"] for x in kir["barriers"] + kir["tensors"]}
+                        self.assertLessEqual({name[1:], p1_name[1:]}, names)
+                        continue
+                    with self.assertRaisesRegex(
+                        to_kir.KirError, rf"{name} also names the {kind} of .* line"
+                    ):
+                        build(ttgir(GEMM_ARGS, body), GEMM_SNAP)
+
     def test_clc_query_in_a_branch_without_events_advances_the_counter(self):
         body = f"""    %resp = ttg.local_alloc : () -> !ttg.memdesc<1xi64, #shared1, #smem, mutable> loc(#loc2)
     %pos = arith.cmpi sgt, %n, %c0_i32 : i32 loc(#loc2)

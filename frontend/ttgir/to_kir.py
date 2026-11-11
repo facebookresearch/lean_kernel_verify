@@ -120,6 +120,8 @@ class Translator:
         self.work_fields = work_fields
         self.tensors: dict[str, dict] = {}
         self.barriers: dict[str, dict] = {}
+        # (kind, KIR name) -> the op whose value has that name (_claim).
+        self.claimed: dict[tuple, Op] = {}
         self.metadata: set[str] = set()
         self.written: set[str] = set()
         self.uses_clc = False
@@ -852,6 +854,7 @@ class Translator:
                 f"TMA load through a descriptor created in the kernel with runtime extents "
                 f"is not in KIR v1: {op.where()}"
             )
+        self._claim("descriptor", name, dev["op"])
         shape = [
             K.ext(e, 64, False) for e in dev["shape"]
         ]  # unsigned extents, as in _clipped_store
@@ -1064,6 +1067,18 @@ class Translator:
             )
         self.tensors[name] = {"name": name, "kind": "global", "elem_bytes": elem}
 
+    def _claim(self, kind: str, name: str, op: Op) -> str:
+        """`name`, the SSA name of the value `op` defines (a descriptor: writes), as a
+        kernel-wide KIR `kind` name. Sibling regions may print one name for two values
+        (mlir_text.py), which KIR would merge: refused."""
+        first = self.claimed.setdefault((kind, name), op)
+        if first is not op:
+            raise KirError(
+                f"{op.where()}: %{name} also names the {kind} of {first.where()} "
+                f"(sibling regions reuse SSA names; KIR {kind} names are kernel-wide)"
+            )
+        return name
+
     def _bar(self, v: Value, op: Op) -> dict:
         s = self._sym(v)
         if s["k"] == "barray":
@@ -1167,7 +1182,11 @@ class Translator:
             md = K.memdesc_type(self._type(v))
             if not md or md[1] != "i64" or len(md[0]) != 1:
                 raise KirError(f"{op.where()} is not an mbarrier array")
-            return {"k": "barray", "name": v.name, "num": md[0][0]}
+            return {
+                "k": "barray",
+                "name": self._claim("barrier", v.name, op),
+                "num": md[0][0],
+            }
         if n == "ttg.memdesc_index":
             src = sym(op.operands[0])
             if src["k"] != "barray":

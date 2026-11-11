@@ -59,7 +59,9 @@ before b is issued or b before a. P1-1 holds iff every such pair is ordered unde
 and every access is in range. FAIL: a pair not ordered even under `lock` (F1); an access
 outside lanes [0, 128) or the allocation's columns (F2); an ld/st outside the lane quarter
 of its warp (F3). Undecided (the theorem is refuted, the report says `not decided`): U1 a
-pair ordered under `lock` but not under `sound`, when no certain counterexample exists.
+pair ordered under `lock` but not under `sound`, when no certain counterexample exists; an
+F1 pair in a cluster with a named barrier used with two counts, or whose ledger does not
+converge (its lockstep contents, and so `lock`, are one round's: Ledger.lean).
 Notes (no effect on the verdict): N1 a same-role pair involving a cp/mma that conflicts, is
 not a PTX pipelined pair and is not separated by a completion; N2 an intra-role cross-warp
 ld/st pair with no bar.sync of the role between the first one's completion and the second;
@@ -511,8 +513,9 @@ structure P1Out where
   ok : Bool
   issues : Array Issue
   notes : Array Issue
-  /-- Some issue is a certain counterexample: F2, F3, or F1 in a CTA whose named barriers
-  each have one count. A refuted P1-1 without one is undecided on the input. -/
+  /-- Some issue is a certain counterexample: F2, F3, or F1 in a cluster whose named barriers
+  each have one count and whose ledger converged. A refuted P1-1 without one is undecided on
+  the input. -/
   certain : Bool
   accesses : Nat
   pairs : Nat
@@ -524,9 +527,9 @@ structure P1Out where
 
 /-- P1-1's verdict lines and notes on run `r` with its P1 ledgers `Ls = r.ledgersP1`. Issue
 order: a stopped-trace line, then per CTA the certain counterexamples (F2, F3, and F1 where
-every named barrier has one count) or, with an inconsistent named barrier, a `not decided`
-line and its F1 lines; then the U1 lines, after a `not decided` line if nothing above is
-certain. -/
+every named barrier has one count and the ledger converged) or, with an inconsistent named
+barrier or a ledger that does not converge, a `not decided` line and its F1 lines; then the
+U1 lines, after a `not decided` line if nothing above is certain. -/
 def analyze (r : Run) (Ls : Ledgers) : P1Out := Id.run do
   let h := r.host
   let mut ok := true
@@ -545,16 +548,25 @@ def analyze (r : Run) (Ls : Ledgers) : P1Out := Id.run do
     let bad := C.named.filter (!·.consistent)
     let fails := pairIssues h C ps .fail
     let ranges := rangeIssues h (cols r) C
-    let und : Array Issue := if bad.isEmpty || fails.isEmpty then #[] else
-      #[{ loc := "", context := s!"{if h.csize ≤ 1 then "cta" else "cluster"} {pidStr C.pid}",
-          msg := s!"not decided on this input: named barrier(s) {(bad.map (·.id)).toList} are used with two counts, so they order nothing; the unordered pairs below may be ordered by them" }]
+    -- F1 is certain only if the named barriers each have one count and the cluster's ledger
+    -- converged (else the lockstep contents behind `lock` are one round's, not a fixpoint's)
+    let why : Option String :=
+      if !bad.isEmpty then
+        some s!"named barrier(s) {(bad.map (·.id)).toList} are used with two counts, so they order nothing; the unordered pairs below may be ordered by them"
+      else if !C.ledger.all (·.converged) then
+        some s!"the barrier ledger of this {if h.csize ≤ 1 then "CTA" else "cluster"} does not converge, so the lockstep contents the pairs below are judged under are one round's, not a fixpoint's; they may be ordered under another round's"
+      else none
+    let und : Array Issue := match why with
+      | some w => if fails.isEmpty then #[] else
+        #[{ loc := "", context := s!"{if h.csize ≤ 1 then "cta" else "cluster"} {pidStr C.pid}", msg := s!"not decided on this input: {w}" }]
+      | none => #[]
     let hang : Array Issue := match C.blocked[0]? with
       | some (role, loc) =>
         #[{ loc := loc, context := s!"{if h.csize ≤ 1 then "cta" else "cluster"} {pidStr C.pid} role {h.gRoleName C.pid role}",
             msg := s!"the P1 ledger finds {C.blocked.size} wait(s) that never return in the lockstep model (P0-2): happens-before after them is vacuous, so other P1-1 lines may be their consequences" }]
       | none => #[]
     ok := ok && ctaOkWith (cols r) C ps
-    certain := certain || !ranges.isEmpty || (bad.isEmpty && !fails.isEmpty)
+    certain := certain || !ranges.isEmpty || (why.isNone && !fails.isEmpty)
     issues := issues ++ ranges ++ und ++ fails
     lockLines := lockLines ++ pairIssues h C ps .lockOnly
     nlock := nlock + (ps.filter (·.2.2 == .lockOnly)).size
@@ -577,7 +589,7 @@ def analyze (r : Run) (Ls : Ledgers) : P1Out := Id.run do
   | some (pid, t) =>
     let line : Issue :=
       { loc := (t.events.back?.map (·.loc)).getD "", context := h.roleCtx pid t.role,
-        msg := s!"not decided on this input: {stops.size} role trace(s) stop at an out-of-bounds metadata load (P0-1), so their later events are unknown; the other lines of this spec are certain counterexamples" }
+        msg := s!"not decided on this input: {stops.size} role trace(s) stop at an out-of-bounds metadata load (P0-1), so their later events are unknown; the lines of this spec that are not `not decided` lines are certain counterexamples" }
     issues := #[line] ++ issues
   | none => pure ()
   return { ok, issues, notes, certain, accesses := nacc, pairs := npairs, lockOnly := nlock, named := nnamed,

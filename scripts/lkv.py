@@ -58,9 +58,10 @@ A verdict is per (KIR variant, input, spec), and it has one of four outcomes:
              refuted without a certain counterexample (Lean prints
              `UNDECIDED <input> <spec>`: an `evaluation error (model limit)` such as a
              division by zero, a role trace stopped at an out-of-bounds metadata load
-             before anything certain was found, or P1-1 pairs that only the lockstep
-             contents or named barriers used with two counts might order), or the variant
-             is a construct the frontend refuses by design (every spec of its inputs).
+             before anything certain was found, a cluster whose barrier ledger does not
+             converge (P0-2, P0-4), or P1-1 pairs that only the lockstep contents or
+             named barriers used with two counts might order), or the variant is a
+             construct the frontend refuses by design (every spec of its inputs).
 Notes are findings that are not certain violations (references/specs.md); they are listed
 per spec and source line and never change a verdict. Verdicts cover only the case's
 inputs.
@@ -1256,9 +1257,9 @@ def markdown(report):
         "failed (a frontend or Lean failure, an INCONSISTENT verdict, an unexpected",
         "evaluation error). UNDECIDED: not decided where LKV has a known limit (a construct",
         "the frontend refuses by design, an out-of-bounds metadata load, a division by zero,",
-        "P1-1 pairs only the lockstep contents order); not an error. Exit status: 1 FAIL,",
-        "2 ERROR, else 0. Notes are findings that are not violations; they never change a",
-        "verdict (references/specs.md).",
+        "a barrier ledger that does not converge, P1-1 pairs only the lockstep contents",
+        "order); not an error. Exit status: 1 FAIL, 2 ERROR, else 0. Notes are findings that",
+        "are not violations; they never change a verdict (references/specs.md).",
         "",
     ]
     for section in (

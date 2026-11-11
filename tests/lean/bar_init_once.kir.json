@@ -1,0 +1,47 @@
+{
+  "kir_version": 1,
+  "kernel": "bar_init_once",
+  "source": "tests/lean/bar_init_once.kir.json",
+  "ir": "ttgir",
+  "grid": [{"e": "var", "name": "CTAS", "w": 32}, {"e": "const", "v": 1, "w": 32}, {"e": "const", "v": 1, "w": 32}],
+  "params": [{"name": "CTAS", "type": "i32"}, {"name": "INIT_CTAS", "type": "i32"}, {"name": "INITS", "type": "i32"}],
+  "tensors": [],
+  "barriers": [
+    {"name": "full", "count": {"e": "const", "v": 1, "w": 32}, "num": {"e": "const", "v": 2, "w": 32}}
+  ],
+  "roles": [
+    {"name": "producer", "warps": 1, "threads_per_issue": 1, "body": [
+      {"op": "if", "loc": "bar_init_once.py:3",
+       "cond": {"e": "cmp", "o": "slt", "w": 1, "a": {"e": "pid", "axis": 0, "w": 32}, "b": {"e": "var", "name": "INIT_CTAS", "w": 32}},
+       "then": [
+        {"op": "for", "var": "i", "loc": "bar_init_once.py:4",
+         "lb": {"e": "const", "v": 0, "w": 32}, "ub": {"e": "var", "name": "INITS", "w": 32}, "step": {"e": "const", "v": 1, "w": 32},
+         "body": [
+          {"op": "event", "ev": "bar_init", "bar": "full", "loc": "bar_init_once.py:5",
+           "idx": {"e": "bin", "o": "srem", "w": 32, "a": {"e": "var", "name": "i", "w": 32}, "b": {"e": "const", "v": 2, "w": 32}},
+           "count": {"e": "const", "v": 1, "w": 32}}
+         ]}
+       ],
+       "else": []},
+      {"op": "for", "var": "k", "loc": "bar_init_once.py:10",
+       "lb": {"e": "const", "v": 0, "w": 32}, "ub": {"e": "const", "v": 2, "w": 32}, "step": {"e": "const", "v": 1, "w": 32},
+       "body": [
+        {"op": "event", "ev": "arrive", "bar": "full", "loc": "bar_init_once.py:11", "idx": {"e": "var", "name": "k", "w": 32}}
+       ]}
+    ]},
+    {"name": "consumer", "warps": 1, "threads_per_issue": 1, "body": [
+      {"op": "for", "var": "k", "loc": "bar_init_once.py:20",
+       "lb": {"e": "const", "v": 0, "w": 32}, "ub": {"e": "const", "v": 2, "w": 32}, "step": {"e": "const", "v": 1, "w": 32},
+       "body": [
+        {"op": "event", "ev": "wait", "bar": "full", "loc": "bar_init_once.py:21",
+         "idx": {"e": "var", "name": "k", "w": 32}, "parity": {"e": "const", "v": 0, "w": 32}}
+       ]}
+    ]}
+  ],
+  "case": {"name": "bar_init_once", "inputs": [
+    {"name": "once", "params": {"CTAS": 2, "INIT_CTAS": 2, "INITS": 2}, "intended_writes": {}},
+    {"name": "partial", "params": {"CTAS": 1, "INIT_CTAS": 1, "INITS": 1}, "intended_writes": {}},
+    {"name": "double", "params": {"CTAS": 1, "INIT_CTAS": 1, "INITS": 3}, "intended_writes": {}},
+    {"name": "cta_skips", "params": {"CTAS": 2, "INIT_CTAS": 1, "INITS": 2}, "intended_writes": {}}
+  ]}
+}

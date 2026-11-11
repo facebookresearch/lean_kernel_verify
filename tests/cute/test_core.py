@@ -14,10 +14,11 @@ of loop-carried and warp-specialized code validates with frontend/kir.py (a loop
 value that changes structure is rejected, a carried shuffle reads the previous
 iteration's values); every op of the kernel is classified (unknown ops, vector memory
 ops and side-effecting inline PTX off the slice are rejected, st.global inline PTX
-becomes a gstore), global views built from data and elect.sync under a partial warp are
-rejected; to_kir's metadata-write, provenance (metadata and host reads against skipped
-launches), DSL-version (Python package and native libraries), validate-before-write and
-per-role addr-marking rules.
+becomes a gstore), global views built from data and elect.sync, shfl.sync,
+vote.ballot.sync and make_warp_uniform under a partial warp are rejected; to_kir's
+metadata-write, provenance (metadata and host reads against skipped launches),
+DSL-version (Python package and native libraries), validate-before-write and per-role
+addr-marking rules.
 """
 
 import json
@@ -767,6 +768,57 @@ class ElectTest(unittest.TestCase):
             translate(_kernel_stage(body), nwarps=1)
         self.assertIn("nvvm.elect.sync at k.py:12", str(cm.exception))
         self.assertIn("part of warp(s) [0]", str(cm.exception))
+
+
+class WarpCollectiveTest(unittest.TestCase):
+    """shfl.sync, vote.ballot.sync and make_warp_uniform name every lane in their member
+    mask (-1): as for elect.sync, each warp reaching one must be fully active."""
+
+    PRELUDE = """      %l = "nvvm.read.ptx.sreg.laneid"() : () -> i32 loc(#loc1)
+      %c1 = "arith.constant"() <{value = 1 : i32}> : () -> i32 loc(#loc1)
+      %c16 = "arith.constant"() <{value = 16 : i32}> : () -> i32 loc(#loc1)
+      %c31 = "arith.constant"() <{value = 31 : i32}> : () -> i32 loc(#loc1)
+      %cm = "arith.constant"() <{value = -1 : i32}> : () -> i32 loc(#loc1)
+      %x = "arith.constant"() <{value = 0.000000e+00 : f32}> : () -> f32 loc(#loc1)
+      %lt = "arith.cmpi"(%l, %c16) <{predicate = 2 : i64}> : (i32, i32) -> i1 loc(#loc2)
+"""
+    OPS = {
+        "nvvm.shfl.sync": '"nvvm.shfl.sync"(%cm, %l, %c1, %c31) <{kind = #nvvm<shfl_kind idx>}> : (i32, i32, i32, i32) -> i32',
+        "nvvm.vote.ballot.sync": '"nvvm.vote.ballot.sync"(%cm, %lt) : (i32, i1) -> i32',
+        "cute_nvgpu.arch.make_warp_uniform": '"cute_nvgpu.arch.make_warp_uniform"(%l) : (i32) -> i32',
+    }
+
+    def stage(self, op: str, guarded: bool) -> str:
+        """y[r] = 0.0 for the result r of `op`, under `lane < 16` if guarded."""
+        use = f"""      %r = {op} loc(#loc3)
+      %c = "cute.make_coord"(%r) : (i32) -> !cute.coord<"?"> loc(#loc3)
+      "cute.memref.store"(%arg1, %c, %x) : (!cute.memref<f32, gmem, "(128):(1)">, !cute.coord<"?">, f32) -> () loc(#loc3)
+"""
+        if guarded:
+            use = (
+                '      "scf.if"(%lt) ({\n'
+                + use
+                + """        "scf.yield"() : () -> () loc(#loc2)
+      }, {
+      }) : (i1) -> () loc(#loc2)
+"""
+            )
+        return _kernel_stage(self.PRELUDE + use)
+
+    def test_collective_in_full_warps_is_translated(self):
+        for name, op in self.OPS.items():
+            with self.subTest(op=name):
+                k, roles = translate(self.stage(op, False), nwarps=1)
+                self.assertIn("gstore", [e["ev"] for e in _events(roles[0].stmts)])
+                self.assertEqual(to_kir.validate(as_kir(k, roles)), [])
+
+    def test_collective_under_a_partial_lane_mask_is_rejected(self):
+        for name, op in self.OPS.items():
+            with self.subTest(op=name):
+                with self.assertRaises(Unsupported) as cm:
+                    translate(self.stage(op, True), nwarps=1)
+                self.assertIn(f"{name} at k.py:12", str(cm.exception))
+                self.assertIn("part of warp(s) [0]", str(cm.exception))
 
 
 def _tensor_arg(block: int, offset: int, n: int, dtype: str = "int32") -> dict:

@@ -11,7 +11,9 @@ the declared count, A the arrivals (arrive: n x threads_per_issue, or n x warps 
 per_warp; commit_arrive: 1) and K = A / C the completions. A violation is certain in the
 extracted model:
 
-* a malformed barrier: C <= 0, or a `bar_init` of the slot with another count;
+* a malformed barrier: C <= 0, a `bar_init` of the slot with another count, or, when some
+  role's code initializes the barrier array, a slot with not exactly one `bar_init` in its
+  CTA (used uninitialized, or re-initialized: undefined in PTX);
 * a hang: a role whose waits need R > K completions (R: the `assumedPhase` of its last
   wait, from the phase classification of Ledger.lean: a stale wait may return at once, so
   it counts at its lower bound; a presumed skip counts at the phase it skips to, because if
@@ -36,7 +38,8 @@ extracted model:
   barriers do.
 
 P0-2 is decided on the CTAs whose roles all ran to their end; an input with an
-out-of-bounds metadata load (P0-1) leaves it undecided (Check.lean).
+out-of-bounds metadata load (P0-1) leaves it undecided (Check.lean), and so does a cluster
+whose barrier ledger does not converge (Ledger.lean, `unconverged`).
 
 Notes (no effect on the verdict): phases that complete after a role's last wait (R < K,
 e.g. CUTLASS producer_tail's trailing arrive_and_expect_tx, or an empty barrier's final
@@ -56,7 +59,8 @@ def MissedDataWait (L : SlotLedger) (r : Nat) : Prop :=
   L.touches r = false ∧ 0 < L.completions ∧ 0 < L.tmaBytes
 
 def SlotOk (L : SlotLedger) : Prop :=
-  0 < L.count ∧ (∀ i ∈ L.inits, i.1 = L.count) ∧ (∀ rs ∈ L.roles, RoleOk L rs) ∧
+  L.converged ∧ 0 < L.count ∧ (L.initDeclared → L.inits.size = 1) ∧
+  (∀ i ∈ L.inits, i.1 = L.count) ∧ (∀ rs ∈ L.roles, RoleOk L rs) ∧
   (0 < L.lockstep → L.contents.isSome) ∧ ∀ r ∈ L.staticWaiters, ¬ MissedDataWait L r
 
 instance (L : SlotLedger) : Decidable (SlotOk L) := by
@@ -102,6 +106,11 @@ def slotIssues (h : Host) (pid : Nat × Nat × Nat) (L : SlotLedger) : Array Iss
   if L.count ≤ 0 then
     return #[issue L.firstLoc s!"declared arrival count {L.count} is not positive"]
   let mut out := #[]
+  if L.initDeclared then
+    match L.inits[0]?, L.inits[1]? with
+    | none, _ => out := out.push (issue L.firstLoc s!"used without a bar_init in this CTA, while the code initializes {h.barriers[L.slot.bar]!.decl.name}: an uninitialized mbarrier")
+    | some (_, l0), some (_, l1) => out := out.push (issue l1 s!"bar_init {L.inits.size} times in this CTA (first at {l0}): re-initializing an mbarrier is undefined")
+    | _, _ => pure ()
   for (n, loc) in L.inits do
     if n != L.count then out := out.push (issue loc s!"bar_init count {n} != declared count {L.count}")
   for rs in L.roles do

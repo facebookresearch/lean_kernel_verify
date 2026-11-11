@@ -318,6 +318,10 @@ arrays of one, and a run with an index of unknown range stays whole. Arrays are 
 `mbar_<start byte>`. An event's address `C + sum k_i t_i` is resolved to `(array
 containing C', (C - start)/8 + sum (k_i/8) t_i)`, C' the constant part of the expanded
 address (`v59 = (c & 1) + 29` hides constant 29 from the address `8 * v59`).
+The arrays ignore the conditions around an init, which its `bar_init` event keeps: P0-2
+checks that each slot a CTA uses has exactly one executed `bar_init` there. The threads
+of one role that init a slot (with one count) give one `bar_init` (`ir_ops_cute.md`: one
+initialization); two roles that both init it give two, a P0-2 FAIL.
 `threads_per_issue` is the gcd of the role's arrive issuer counts (1 when some arrive is
 counted per thread); each arrive gets `n = issuers / gcd`.
 
@@ -437,8 +441,8 @@ instead.
   issues it once (warp-wide: PASS), and inside `elect_one` or on 16 lanes it is refused
   (the DSL's full-mask `elect.sync` needs the whole warp).
 * Refused: a float compare deciding a store (slicing), `red.global` inline PTX, an
-  unknown op in a loop without events, a global view from an integer, `elect.sync` under
-  a partial warp, a TMA load or TMA reduce reached by 16 lanes of a warp, a TMA reduce
+  unknown op in a loop without events, a global view from an integer, `elect.sync`,
+  `shfl.sync`, `vote.ballot.sync` or `make_warp_uniform` under a partial warp, a TMA load or TMA reduce reached by 16 lanes of a warp, a TMA reduce
   inside `elect_one` or with coordinates that depend on the lane, a `vector.store`, two
   global views swapped by a loop (a loop-carried value that changes structure), and a
   kernel writing its own metadata.
@@ -479,11 +483,14 @@ default, `legacy`, is the translation above.
   (data); TMEM accesses, tcgen05.wait and named barriers are events of the P1 slice only
   (P1-1), fences and TMEM lifetime are not checked; so are values that travel through register memory (`rmem` fragments): a
   predicate or index read back from registers that decides an event is a slice error
-  (e.g. an epilogue's per-thread predicate fragments).
+  (e.g. an epilogue's per-thread predicate fragments). A warp collective whose result
+  is only data (a float `shfl.sync` of a reduction) is dropped with it, so its lane mask
+  is not checked (the PTX translation checks every one).
 * Non-constant cluster dims, multicast bulk copies (non-tensor), im2col TMA,
   result-returning `try_wait`, barrier inits at runtime addresses,
-  `wait`/`bar_init`/TMA loads under a runtime-dependent lane mask, `elect.sync` or a
-  TMA load under a partial or runtime-dependent lane mask, loops with thread-varying
+  `wait`/`bar_init`/TMA loads under a runtime-dependent lane mask, `elect.sync`, an
+  integer `shfl.sync`, `vote.sync`, `make_warp_uniform` or a TMA load under a partial or
+  runtime-dependent lane mask, loops with thread-varying
   bounds, a loop-carried value that changes structure, sub-element global accesses and
   inline PTX other than data statements, one blocking wait loop, one bulk reduce, one
   shared::cluster bulk copy or one unguarded `st.global` (8 to 64 bits, or a vector of
