@@ -17,8 +17,8 @@ and grid; each distinct specialization is compiled once with
 `triton.compile(ASTSource(fn, signature, constexprs, attrs), target=<target>,
 options=...)`, the same call JITFunction makes on a cache miss on that GPU.
 
-An input the host refuses (host_errors.py: the exported sources raise, or a torch check
-they call fails) keeps the launches made before the exception and records the exception
+An input the host refuses (host_errors.py: a `raise` or `assert` statement of the
+exported sources raises, or a torch check they call fails) keeps the launches made before the exception and records the exception
 and its innermost source line as "host_error"; so does, with "no launch of <kernel>", an
 input for which the host makes no launch of the case's kernel. The next inputs still run.
 Any other exception raised by the host call fails the dump.

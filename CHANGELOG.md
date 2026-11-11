@@ -67,5 +67,17 @@ First public release.
 - CuTe dump: the LaunchRecord address candidates of a launch whose TVM-FFI environment
   stream is not the jit function's last parameter are no longer shifted by one
   parameter.
+- CuTe frontend: `addr` marks follow the `let`s of one role only (each role numbers its
+  variables independently), so a value that bounds a loop in one role is no longer
+  marked as an address because another role's variable of the same name reaches one
+  (false P0-1 wraps). The CPU device stand-in reports `shared_memory_per_block_optin`.
+- Both frontends: an input counts as rejected by the host only if the exception comes
+  from a `raise` or `assert` statement of the kernel's sources or from a torch check they
+  call; any other exception at a source line (a failing builtin, a device property the
+  CPU stand-in lacks, also in an assert's condition or a raise's message) fails the dump
+  instead of silently dropping the input.
+- `lkv.py check` refuses two KIR files of one name (one would overwrite the other's Lean
+  file and verdicts). `scripts/build_lean.sh` builds into one directory per `lean/`
+  sources and toolchain (its staleness check compares modification times only).
 - Docs: CuTe DSL 4.4.2 compiles with the PTX compiler it embeds (12.9.83), not CUDA
   13.0's ptxas; a TMA reduce is once per warp only behind the DSL's `elect.sync`.

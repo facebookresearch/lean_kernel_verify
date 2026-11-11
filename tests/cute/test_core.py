@@ -17,7 +17,7 @@ ops and side-effecting inline PTX off the slice are rejected, st.global inline P
 becomes a gstore), global views built from data and elect.sync under a partial warp are
 rejected; to_kir's metadata-write, provenance (metadata and host reads against skipped
 launches), DSL-version (Python package and native libraries), validate-before-write and
-addr-marking rules.
+per-role addr-marking rules.
 """
 
 import json
@@ -929,6 +929,29 @@ class ToKirRulesTest(unittest.TestCase):
         to_kir.mark_addr({"roles": [{"body": body}]})
         self.assertTrue(offset["addr"] and offset["a"]["addr"])
         self.assertNotIn("addr", flag)
+
+    def test_addr_marks_follow_the_lets_of_the_same_role(self):
+        # Both roles define v31; only the producer's v31 reaches an offset. The consumer's
+        # v31 bounds a loop: its wrap is not an address wrap.
+        def v31(src):
+            return {"e": "bin", "w": 32, "o": "add", "a": {"e": "var", "w": 32, "name": src},
+                    "b": {"e": "const", "w": 32, "v": 127}}  # fmt: skip
+
+        def use(e):
+            return {"op": "let", "var": "v31", "expr": e}
+
+        to_addr, to_bound = v31("tile"), v31("window")
+        producer = [use(to_addr),
+                    {"op": "event", "ev": "gload", "tensor": "x", "mask": None, "loc": "k.py:1",
+                     "offsets": {"t": "splat", "shape": [1], "w": 32,
+                                 "a": {"e": "var", "w": 32, "name": "v31"}}}]  # fmt: skip
+        consumer = [use(to_bound),
+                    {"op": "for", "var": "i", "lb": {"e": "const", "w": 32, "v": 0},
+                     "ub": {"e": "var", "w": 32, "name": "v31"},
+                     "step": {"e": "const", "w": 32, "v": 1}, "body": []}]  # fmt: skip
+        to_kir.mark_addr({"roles": [{"body": producer}, {"body": consumer}]})
+        self.assertTrue(to_addr.get("addr"))
+        self.assertNotIn("addr", to_bound)
 
 
 # P1 pass (ops_tmem.py): warp 1 copies scale factors into TMEM cols [80, 84) of the

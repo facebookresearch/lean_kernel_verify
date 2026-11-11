@@ -545,12 +545,13 @@ def parse_lean(text, k, status):
     return [inputs[n] for n in names]
 
 
+def variant_name(path):
+    return path.name.removesuffix(".json").removesuffix(".kir")
+
+
 def check_kir(path, lean_dir, sources, timeout):
     """Validate, emit and check one KIR file; returns its report entry."""
-    entry = {
-        "variant": path.name.removesuffix(".json").removesuffix(".kir"),
-        "kir": str(path),
-    }
+    entry = {"variant": variant_name(path), "kir": str(path)}
     k = json.loads(path.read_text())
     entry.update(
         kernel=k.get("kernel"),
@@ -592,6 +593,13 @@ def check_kir(path, lean_dir, sources, timeout):
 
 
 def layer2(kirs, out, sources, jobs, timeout):
+    # Each variant gets out/lean/<variant>.lean: two KIR files with one name would overwrite
+    # each other's Lean file and verdicts.
+    dup = sorted(n for n, c in Counter(map(variant_name, kirs)).items() if c > 1)
+    if dup:
+        raise RuntimeError(
+            f"KIR files with the same name: {', '.join(dup)} (check them in separate runs)"
+        )
     lean_dir = out / "lean"
     lean_dir.mkdir(parents=True, exist_ok=True)
     for old in [*lean_dir.glob("*.lean"), *lean_dir.glob("*.out")]:
@@ -1410,7 +1418,9 @@ def main():
                 "kernel's PTX, experimental); default $LKV_FRONTEND, else legacy",
             )
         else:
-            p.add_argument("kir", nargs="+", help="KIR JSON files")
+            p.add_argument(
+                "kir", nargs="+", help="KIR JSON files (distinct file names)"
+            )
             p.add_argument("--out", required=True, help="output directory")
             p.add_argument("--name", default="kir", help="report title")
         p.add_argument("--src", help="exported source tree (default: the case's)")

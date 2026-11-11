@@ -1389,9 +1389,15 @@ def _nodes(node):
 
 def mark_addr(kir: dict) -> None:
     """Set "addr" on every add/sub/mul/shl and trunc whose value reaches a global-memory
-    offset, a TMA coordinate or a metadata load index, through any chain of `let`s (Lean
-    reports their wraps and lossy truncations as P0-1 violations)."""
-    stmts = [s for r in kir["roles"] for s in _statements(r["body"])]
+    offset, a TMA coordinate or a metadata load index, through any chain of `let`s of its
+    role (Lean reports their wraps and lossy truncations as P0-1 violations). Each role has
+    its own variables (kir.md), numbered independently: a name in one role is not the same
+    variable as that name in another."""
+    for r in kir["roles"]:
+        _mark_role(list(_statements(r["body"])))
+
+
+def _mark_role(stmts: list) -> None:
     lets: dict = {}
     seeds: list = []
     for s in stmts:

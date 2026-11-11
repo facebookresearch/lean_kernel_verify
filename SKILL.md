@@ -66,7 +66,8 @@ report.md / report.json: verdict per (variant, input, spec), findings at source 
   `scripts/lean.sh` takes the toolchain from `LEAN_TOOLCHAIN_DIR` (a directory with
   `bin/lean` and `lib/lean`), else the `lean` on `PATH` (e.g. from elan);
   `scripts/build_lean.sh` compiles `lean/KV` and the native `libKV.so` into
-  `/tmp/lkv_lean_build_$USER` (`LKV_LEAN_BUILD`), and `lkv.py` runs it when needed.
+  `/tmp/lkv_lean_build_$USER/<hash>`, one directory per `lean/` sources and toolchain
+  (`LKV_LEAN_BUILD` overrides it), and `lkv.py` runs it when needed.
 - **The frontends run the kernel's real host code**, so they need its Python stack:
   a Triton with TLX and torch (TTGIR frontend, `frontend/ttgir/`), or
   nvidia-cutlass-dsl 4.4.2 or 4.6.1 exactly (the releases the CuTe op table was
@@ -83,7 +84,7 @@ report.md / report.json: verdict per (variant, input, spec), findings at source 
 # 2. Run: dump -> to_kir -> kir.py -> emit_lean -> Lean -> report.
 python3 -I $S/scripts/lkv.py run CASE.json --src SRC
 # 3. Read /tmp/lkv_runs/<case dir>/<case name>/report.md (or --out DIR).
-python3 -I $S/scripts/lkv.py check K.kir.json... --out DIR   # Layer 2 alone on KIR files
+python3 -I $S/scripts/lkv.py check K.kir.json... --out DIR   # Layer 2 alone on KIR files (distinct names)
 ```
 
 - The frontend is CuTe if the case has a `builder`, else TTGIR. `run` options:

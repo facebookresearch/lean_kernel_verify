@@ -80,15 +80,16 @@ Lean: `python3 -I frontend/emit_lean.py KIR.json -o K.lean && scripts/run_lean_c
   process, like consecutive calls of one training process, so host compile caches
   behave as in production. If the host refuses an input (the rule both frontends share,
   `frontend/ttgir/host_errors.py`: the innermost frame of the exception is under the
-  source root, e.g. a validation `raise`, or a torch check the sources call fails, e.g.
-  `torch._assert_async`), `dump.json` records the exception and its innermost source line
+  source root and a `raise` or `assert` statement there raised it, or a torch check the
+  sources call fails, e.g. `torch._assert_async`), `dump.json` records the exception and its innermost source line
   as `host_error`, `kir/report.json` lists it as a `(host)` entry, and the next inputs
   still run; launches made before the exception are kept. An input for which the host
   launches nothing is recorded the same way, with `host_error` "no launch". `lkv.py`
   lists both under the inputs the host rejected. Any other exception fails the dump: a
   direct call of a `@cute.jit` function (no `cute.compile`) reaching the patched compile
   (P5), a CUDA call on the CPU-only host (`torch.cuda.synchronize()`), a failing torch
-  op, an error of the DSL or the frontend.
+  op or builtin, a device property P1 does not provide (an `AttributeError` at a source
+  line), an error of the DSL or the frontend.
 * `dsl` (default `4.4.2`) is the CuTe DSL release the kernel's sources target:
   `scripts/lkv.py` runs `frontend/cute:lkv_cute` for 4.4.2 and `:lkv_cute_461` for 4.6.1.
 * `num_sms` is the device the host sees (P1, P2); grids and persistent tile tables
@@ -127,7 +128,7 @@ real code at the analyzed revision.
 
 | # | Patch | Why it is faithful |
 |---|---|---|
-| P1 | `torch.cuda.is_available / device_count / get_device_properties / get_device_capability / current_device`: one SM100 device (cc 10.0) with `num_sms` SMs | the host picks the SM100 path and sizes grids and tile tables from these |
+| P1 | `torch.cuda.is_available / device_count / get_device_properties / get_device_capability / current_device`: one SM100 device (cc 10.0) with `num_sms` SMs and 232448 bytes of opt-in shared memory per block (`shared_memory_per_block_optin`); reading a property it lacks fails the dump | the host picks the SM100 path and sizes grids and tile tables from these |
 | P2 | `cutlass.utils.HardwareInfo`: `num_sms` SMs, `num_sms // cluster` clusters | persistent schedulers bake the SM count into the grid |
 | P3 | `torch.Tensor.is_cuda` is True | host validation demands CUDA tensors; the CPU tensors have the same shapes, strides, dtypes and integer contents |
 | P4 | DLPack capsules made by `cute.runtime.from_dlpack` report device kDLCUDA; each runtime tensor remembers the torch tensor it wraps | the DSL's C++ DLTensorWrapper derives the address space from the device: the tensors are typed as global memory exactly as CUDA tensors are |

@@ -66,8 +66,8 @@ tensor argument of a launch carries "sources", "hinted" lists the storages its i
 arguments point into, and "host_reads" lists the input's host reads of data passed to an
 earlier launch of the run ("after" and the sources' launch counts are run-wide);
 to_kir.py decides from the kernels' write sets which of them are stale. An input the host
-refuses (ttgir.host_errors: the exported sources raise, e.g. a validation check, or a
-torch check they call fails) keeps the launches made before the exception and records the
+refuses (ttgir.host_errors: the exported sources raise, a `raise` or `assert` statement such as a
+validation check, or a torch check they call fails) keeps the launches made before the exception and records the
 exception and its innermost source line as "host_error"; so does, with "no launch", an
 input for which the host launches nothing. The next inputs still run. Any other exception
 (a direct call of a @cute.jit function reaching the patched compile, a CUDA call on the

@@ -20,7 +20,8 @@
 # native_decide run the evaluator as native code instead of in the IR interpreter
 # (~20x faster). The toolchain is the one scripts/lean.sh selects.
 #
-# Env: LKV_LEAN_BUILD  build directory (default /tmp/lkv_lean_build_$USER; see below)
+# Env: LKV_LEAN_BUILD  build directory (default /tmp/lkv_lean_build_$USER/<hash of the
+#                     lean/ sources and the toolchain>; see below)
 set -euo pipefail
 
 S="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -36,7 +37,11 @@ else
   # neither, build in a new private directory (not reused).
   BUILD_USER="$(id -un 2>/dev/null)" || BUILD_USER="${USER:-}"
   if [[ -n "$BUILD_USER" ]]; then
-    OUT="/tmp/lkv_lean_build_$BUILD_USER"
+    # One subdirectory per (lean/ sources, toolchain): the staleness checks below compare
+    # mtimes only, so another checkout's build with older files would be reused as is.
+    KEY="$( { echo "$PREFIX"; cd "$SRC" && find . -name '*.lean' | sort | xargs sha256sum; } \
+      | sha256sum | cut -c1-16)"
+    OUT="/tmp/lkv_lean_build_$BUILD_USER/$KEY"
   else
     OUT="$(mktemp -d "${TMPDIR:-/tmp}/lkv_lean_build.XXXXXX")"
   fi

@@ -41,15 +41,15 @@ violation, an internal error, a case annotation error, a target or location mism
 ERROR). Every KIR it writes has passed `frontend/kir.py`.
 
 The inputs run in order in one process. If the host refuses an input (`host_errors.py`:
-the innermost frame of the exception is under `src_root`, e.g. a validation `raise` or
-`assert`, or a torch check the sources call fails, e.g. `torch._assert_async`), dump.json
+the innermost frame of the exception is under `src_root` and a `raise` or `assert`
+statement there raised it, not the evaluation of its operands, or a torch check the sources call fails, e.g. `torch._assert_async`), dump.json
 records the exception and its innermost source line as the input's `host_error`, keeps the
 launches made before it, and the next inputs still run. An input for which the host makes
 no launch of `kernel` gets `host_error` "no launch of <kernel> (the host launched: ...)".
 `lkv.py run` lists both under the inputs the host code rejected, so a fix whose host now
 refuses some trigger inputs is checked on the others in the same run. Any other exception
-of the host call fails the dump: a failing torch op, a device call the patches below do
-not answer, an error of Triton or of the frontend.
+of the host call fails the dump: a failing torch op or builtin, a device call or property
+the patches below do not answer, an error of Triton or of the frontend.
 
 ## Case file
 

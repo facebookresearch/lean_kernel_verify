@@ -137,6 +137,12 @@ def run_checked(x, check, BLOCK=128):
         torch._check(not too_long, lambda: "run_checked: x is too long")
     if check == "torch_error" and too_long:
         torch.cat([x, torch.zeros(2, 2)])  # a failing torch op is not a validation
+    if check == "attribute" and too_long:
+        _ = torch.cuda.get_device_properties(0).lkv_no_such_property  # nor is a patch gap
+    if check == "assert_attribute":  # also while an assert or a raise evaluates it
+        assert not too_long or torch.cuda.get_device_properties(0).lkv_no_such_property
+    if check == "raise_attribute" and too_long:
+        raise ValueError(torch.cuda.get_device_properties(0).lkv_no_such_property)
     if check == "skip_empty" and x.numel() == 0:
         return
     probe[(triton.cdiv(x.numel(), BLOCK),)](x, x.numel(), BLOCK=BLOCK)
@@ -709,12 +715,20 @@ class TtgirFrontendTest(unittest.TestCase):
                     to_kir.translate(self.out / c["name"] / "dump.json", c)
                 )
                 self.assertEqual([i["name"] for i in kir["case"]["inputs"]], ["ok"])
-        # A torch op failing in the host code is not the host refusing the input.
+        # A torch op failing in the host code is not the host refusing the input, nor is
+        # any other exception a raise or an assert statement does not raise itself: here a
+        # device property the patches do not provide, read on a plain line, in an assert's
+        # condition or in a raise's message.
         c = checked("torch_error", 300)
         with self.assertRaisesRegex(
             RuntimeError, "Tensors must have same number of dimensions"
         ):
             dump.run(c, self.out / c["name"])
+        for check in ("attribute", "assert_attribute", "raise_attribute"):
+            with self.subTest(check=check):
+                c = checked(check, 300)
+                with self.assertRaisesRegex(AttributeError, "lkv_no_such_property"):
+                    dump.run(c, self.out / c["name"])
 
     def test_warmup_is_not_a_launch(self):
         c = case(

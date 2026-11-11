@@ -738,6 +738,14 @@ class Unit(unittest.TestCase):
             mark.write_text('{"rev": "bbbbbbbbbbbb", "paths": []}')
             self.assertEqual(lkv_py.source_rev(case, root, d), "bbbbbbbbbbbb")
 
+    def test_check_refuses_two_kir_files_with_one_name(self):
+        # Both would be checked as out/lean/k.lean: one file's verdicts for both.
+        with tempfile.TemporaryDirectory() as d:
+            kirs = [Path(d) / s / "k.kir.json" for s in ("base", "fix")]
+            with self.assertRaisesRegex(RuntimeError, "same name: k "):
+                lkv_py.layer2(kirs, Path(d) / "out", None, 1, 1)
+            self.assertFalse((Path(d) / "out").exists())
+
     def test_target_reaches_the_ttgir_dump(self):
         calls = []
 

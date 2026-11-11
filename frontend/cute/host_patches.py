@@ -10,7 +10,8 @@ patches"); nothing else on the host path is changed:
 
   P1 torch.cuda.is_available / device_count / get_device_properties /
      get_device_capability / current_device: one SM100 device (compute capability 10.0)
-     with `num_sms` SMs.
+     with `num_sms` SMs and 232448 bytes of opt-in shared memory per block; a property
+     it lacks fails the dump (host_errors: not a host rejection).
   P2 cutlass.utils.HardwareInfo: `num_sms` SMs, `num_sms // cluster_size` clusters.
   P3 torch.Tensor.is_cuda is True: host validation demands CUDA tensors; the tensors are
      CPU tensors with the same shapes, strides, dtypes and integer contents.
@@ -985,7 +986,11 @@ def _patch_devices(patch, num_sms: int) -> None:
     from cutlass.cute import runtime as cute_runtime
 
     props = types.SimpleNamespace(
-        multi_processor_count=num_sms, major=10, minor=0, name="lkv-cpu-sm100"
+        multi_processor_count=num_sms,
+        major=10,
+        minor=0,
+        name="lkv-cpu-sm100",
+        shared_memory_per_block_optin=232448,  # as _device_attrs (attribute 97)
     )
     patch(torch.cuda, "is_available", lambda: True)
     patch(torch.cuda, "device_count", lambda: 1)
