@@ -6,7 +6,8 @@
 """lkv: lean-kernel-verify end to end, one command per case.
 
     python3 -I lkv.py run CASE.json [--src DIR] [--out DIR] [--inputs a,b]
-                                    [--target sm_100|sm_103] [--jobs N] [--no-p1] [--p1-strict]
+                                    [--target sm_100|sm_103] [--frontend legacy|ptx]
+                                    [--jobs N] [--no-p1] [--p1-strict]
     python3 -I lkv.py check KIR.json... --out DIR [--src DIR] [--jobs N] [--p1-strict]
     python3 -I lkv.py export REV OUT_DIR PATH...
 
@@ -20,6 +21,10 @@ run    dump with the case's frontend (a buck2 binary: CuTe DSL if the case has a
        compiler and the kernel (frontend/ttgir/host_env.py) and the report repeats its
        record (dump.json "env": the case's env, the shell values it ignored, the
        effective values, Triton's cache-invalidating variables).
+       --frontend selects to_kir's Layer-1 translation (default $LKV_FRONTEND, else
+       legacy): legacy translates the TTGIR / CuTe DSL MLIR, ptx the kernel's PTX
+       (references/frontend_ptx.md); run sets LKV_FRONTEND for the frontend, and the
+       report names the translation (report.json "translation").
 check  the Layer-2 half of `run` on existing KIR files (e.g. tests/lean fixtures).
 export write fbsource PATHs at REV under OUT_DIR with read-only `sl files`/`sl cat`: a
        file with the first-party modules it imports at OUT_DIR/<path below fbcode/>
@@ -199,7 +204,14 @@ def export(rev, out, paths, package_root=None):
 
 def buck_run(target, args, log_path):
     """Run a frontend binary; its output goes to log_path. Returns the exit status."""
-    cmd = ["buck2", "run", f"{TARGETS}/{target}", "--", *map(str, args)]
+    cmd = [
+        "buck2",
+        "run",
+        "--client-metadata=id=lean_kernel_verify",
+        f"{TARGETS}/{target}",
+        "--",
+        *map(str, args),
+    ]
     log(f"{' '.join(cmd)}  (log: {log_path})")
     with open(log_path, "w") as f:
         return subprocess.run(
@@ -1222,7 +1234,7 @@ def md_p1(report):
 
 def markdown(report):
     out = [f"# lkv report: {report['case']}", ""]
-    for key in ("case_file", "frontend", "target", "rev", "src", "out"):
+    for key in ("case_file", "frontend", "translation", "target", "rev", "src", "out"):
         if report.get(key):
             out.append(f"- {key.replace('_', ' ')}: {code(str(report[key]))}")
     if report.get("error"):
@@ -1307,6 +1319,8 @@ def cmd_run(args):
     case = json.loads(case_path.read_text())
     if frontend_of(case) == "cute" and args.target != "sm_100":
         die("lkv: the CuTe frontend compiles for sm_100 only")
+    if args.frontend not in ("legacy", "ptx"):  # a default from $LKV_FRONTEND
+        die(f"lkv: LKV_FRONTEND={args.frontend!r}: expected legacy or ptx")
     if FBCODE is None:
         die(
             f"lkv: run builds the frontend with buck2, so the skill must be inside an "
@@ -1317,10 +1331,12 @@ def cmd_run(args):
     ).resolve()
     out.mkdir(parents=True, exist_ok=True)
     root = src_root(case_path, case, args.src)
+    os.environ["LKV_FRONTEND"] = args.frontend  # read by both frontends' to_kir
     report = {
         "case": case["name"],
         "case_file": str(case_path),
         "frontend": frontend_of(case),
+        "translation": args.frontend,
         "target": args.target,
         "rev": source_rev(case, root, args.src),
         "src": str(root),
@@ -1385,6 +1401,13 @@ def main():
                 choices=("sm_100", "sm_103"),
                 default="sm_100",
                 help="GPU the TTGIR frontend compiles for",
+            )
+            p.add_argument(
+                "--frontend",
+                choices=("legacy", "ptx"),
+                default=os.environ.get("LKV_FRONTEND") or "legacy",
+                help="Layer-1 translation: legacy (TTGIR / CuTe DSL MLIR) or ptx (the "
+                "kernel's PTX); default $LKV_FRONTEND, else legacy",
             )
         else:
             p.add_argument("kir", nargs="+", help="KIR JSON files")

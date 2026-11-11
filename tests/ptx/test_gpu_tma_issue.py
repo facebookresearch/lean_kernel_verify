@@ -32,7 +32,7 @@ executing lane; stores (tensor and bulk) once per distinct (descriptor or global
 coordinates, shared address, bulk size) among a warp's executing lanes, the cache policy
 not part of it. Each compiler version must also be one the op table names as
 validated (tma.ISSUE_PTXAS), so a toolchain bump fails here first, and the GPU's target
-one it admits (tma.ISSUE_TARGETS: sm_100 until this passes on GB300, sm_103a).
+one it admits (tma.ISSUE_TARGETS: sm_100 and sm_103, measured on a GB200 and a GB300).
 """
 
 import ctypes as C

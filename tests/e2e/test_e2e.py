@@ -39,7 +39,9 @@
   An input the host rejects (a `raise` in its validation) and, for TLX, one it makes no
   launch for are listed as rejected with the reason; the other inputs still get verdicts.
   The shell sets a TRITON_* and a CUTE_DSL_* variable: the frontend must drop both and
-  the report must list them as ignored shell values.
+  the report must list them as ignored shell values. probe_cute runs twice: by default
+  (the legacy translation, KIR `ir` "cute-mlir") and with `--frontend ptx` (KIR `ir`
+  "ptx", the same verdicts); the report names the translation.
 
 Outputs: $LKV_E2E_OUT (default /tmp/lkv_e2e_$USER), one directory per test.
 """
@@ -69,12 +71,14 @@ _spec.loader.exec_module(lkv_py)
 
 
 def lkv(cmd: str, name: str, *args: str, env: dict | None = None) -> dict:
-    """Run `lkv.py cmd args` into OUT/name, with `env` added to the environment; return
-    its report.json, whose result gives the exit status (0, 1 and 2 all write one)."""
+    """Run `lkv.py cmd args` into OUT/name, with `env` added to the environment (less a
+    shell LKV_FRONTEND: `run` takes the default translation unless args say otherwise);
+    return its report.json, whose result gives the exit status (0, 1 and 2 all write one)."""
     out = OUT / name
+    shell = {k: v for k, v in os.environ.items() if k != "LKV_FRONTEND"}
     r = subprocess.run(
         [sys.executable, "-I", str(LKV), cmd, *args, "--out", str(out)],
-        env={**os.environ, **(env or {})},
+        env={**shell, **(env or {})},
     )
     if r.returncode not in (0, 1, 2) or not (out / "report.json").exists():
         raise AssertionError(f"lkv.py {cmd} exited {r.returncode}; see {out}")
@@ -98,6 +102,11 @@ def runs(report: dict) -> dict:
 
 def failing(verdicts: dict) -> set:
     return {s for s, v in verdicts.items() if v != "PASS"}
+
+
+def kir_irs(report: dict) -> set:
+    """The `ir` of every KIR a report's variants were checked from."""
+    return {json.loads(Path(v["kir"]).read_text())["ir"] for v in report["variants"]}
 
 
 def runs_of_report(report: dict) -> list:
@@ -915,9 +924,23 @@ class EndToEnd(unittest.TestCase):
         )
 
     def test_probe_cute(self):
+        report = self.probe_cute("probe_cute")
+        self.assertEqual(report["translation"], "legacy")  # the default
+        self.assertEqual(kir_irs(report), {"cute-mlir"})
+
+    def test_probe_cute_ptx(self):
+        report = self.probe_cute("probe_cute_ptx", "--frontend", "ptx")
+        self.assertEqual(report["translation"], "ptx")
+        self.assertEqual(kir_irs(report), {"ptx"})
+        md = (OUT / "probe_cute_ptx/report.md").read_text()
+        self.assertIn("- translation: `ptx`", md)
+
+    def probe_cute(self, out, *args):
+        """`lkv.py run` of probe_cute into OUT/out (args: lkv.py options) and its checks;
+        returns the report."""
         case = str(HERE / "cases/probe_cute.json")
-        report = lkv("run", "probe_cute", case, env=SHELL_ENV)
-        self.assert_shell_env_ignored("probe_cute", report)
+        report = lkv("run", out, case, *args, env=SHELL_ENV)
+        self.assert_shell_env_ignored(out, report)
         self.assertEqual(report["result"]["outcome"], "FAIL")  # the seeded bug
         got = runs(report)
         self.assertEqual(sorted(i for _, i in got), ["n0", "n100", "n128"])
@@ -927,7 +950,7 @@ class EndToEnd(unittest.TestCase):
             want = {"P0-1", "P0-3"} if name != "n128" else set()
             self.assertEqual(failing(verdicts), want, name)
         self.assert_rejected(
-            "probe_cute",
+            out,
             report,
             {
                 "n200": r"^ValueError: probe takes at most 128 elements at lkv_e2e_probe_cute\.py:\d+$"
@@ -938,6 +961,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(
             {x["status"] for x in report["p1_not_checked"]}, {"not_applicable"}
         )
+        return report
 
 
 if __name__ == "__main__":

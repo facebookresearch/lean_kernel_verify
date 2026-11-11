@@ -60,6 +60,11 @@ lean/KV: every role of every CTA evaluated per input into event traces, then per
 report.md / report.json: a verdict per (variant, input, spec), findings at source file:line
 ```
 
+`lkv.py run --frontend ptx` (opt-in; the default is `legacy`, the IR translation above)
+makes both frontends translate the kernel's PTX instead, with one shared core and one PTX
+op table ([references/frontend_ptx.md](references/frontend_ptx.md)); the KIR then has
+`ir` `"ptx"`, and the report names the translation.
+
 The frontends keep only the ops that define control flow, addresses, masks, barrier
 operands or events, and stop with an error if a dropped op feeds one of them. A verdict
 rests on the compiler IR (nothing below it is checked), the op tables,
@@ -131,6 +136,7 @@ write one: [references/cases.md](references/cases.md).
 tests/lean/run_all.sh                    # Lean layer: verdicts, counterexamples and notes of every KIR fixture
 python3 -I tests/cute/test_core.py       # CuTe translation, pure Python
 python3 -I tests/e2e/test_e2e.py Unit    # lkv.py's reading of Lean's output, its report and command line
+python3 -I tests/ptx/test_translate.py   # PTX translation, pure Python (also the other tests/ptx/test_*.py)
 ```
 
 The other tests need the frontends: `tests/ttgir/test_translate.py` and
@@ -143,12 +149,13 @@ needs a Blackwell GPU).
 
 ```
 SKILL.md       the same workflow as an Agent Skill, for coding agents
-frontend/      Layer 1: ttgir/ (TLX/Triton) and cute/ (CuTe DSL) frontends,
-               kir.py (the KIR contract), emit_lean.py (KIR to Lean)
+frontend/      Layer 1: ttgir/ (TLX/Triton) and cute/ (CuTe DSL) frontends, ptx/ (their
+               PTX translation, --frontend ptx), kir.py (the KIR contract), emit_lean.py
+               (KIR to Lean)
 lean/KV/       Layer 2: the KIR AST, the evaluator and the specs (Spec/)
 scripts/       lkv.py (run, check, export) and the Lean build and check scripts
 references/    the documentation below
-tests/         lean/ (Lean layer), cute/ and ttgir/ (frontends), e2e/ (lkv.py end to end)
+tests/         lean/ (Lean layer), cute/, ttgir/ and ptx/ (frontends), e2e/ (lkv.py end to end)
 ```
 
 ## Documentation
@@ -161,6 +168,7 @@ tests/         lean/ (Lean layer), cute/ and ttgir/ (frontends), e2e/ (lkv.py en
 | [references/kir.md](references/kir.md)                                                                         | KIR, the JSON contract between the layers                            |
 | [references/frontend_ttgir.md](references/frontend_ttgir.md), [frontend_cute.md](references/frontend_cute.md) | the frontends: case formats, host patches, translation, refusals     |
 | [references/ir_ops.md](references/ir_ops.md), [ir_ops_cute.md](references/ir_ops_cute.md)                     | the op tables: which IR op becomes which KIR event or value          |
+| [references/frontend_ptx.md](references/frontend_ptx.md), [ir_ops_ptx.md](references/ir_ops_ptx.md)           | the PTX translation (`--frontend ptx`) and its op table              |
 | [references/cases.md](references/cases.md)                                                                     | writing a case file                                                  |
 | [references/bug_taxonomy.md](references/bug_taxonomy.md)                                                       | which bug classes are checked, and why                               |
 

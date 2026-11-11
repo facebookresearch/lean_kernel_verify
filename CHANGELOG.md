@@ -16,15 +16,19 @@ First public release.
 - `scripts/lkv.py`: `run` (case file to report), `check` (the Lean layer on KIR files)
   and `export`; `run` and `export` still need the monorepo LKV is developed in (see the
   README's Status section).
-- Tests: the Lean layer's KIR fixtures (`tests/lean`), the frontends' tests and the
-  end-to-end tests of `lkv.py`.
+- Tests: the Lean layer's KIR fixtures (`tests/lean`), the frontends' tests, the PTX
+  translation's tests (`tests/ptx`) and the end-to-end tests of `lkv.py`.
 - KIR `ir` accepts `"ptx"` (KIR translated from PTX; references/kir.md change 12).
-- Preview: `LKV_FRONTEND=ptx` makes both frontends translate the kernel's PTX
-  (`frontend/ptx/`) instead of their IR, into KIR with `ir` `"ptx"`, for kernels whose
-  global accesses are plain loads and stores (no TMA, tcgen05, clusters or CLC yet, no
-  P1 pass); the default, `legacy`, is the translation above. With CuTe DSL 4.4.2 its
-  source locations are best effort, as report.json `loc_quality` and report.md say
-  (references/frontend_ttgir.md and frontend_cute.md, "PTX translation").
+- `lkv.py run --frontend ptx` (opt-in; the default, `legacy`, is the translation above;
+  `$LKV_FRONTEND` sets the default) makes both frontends translate the kernel's PTX
+  instead of their IR, with one shared core (`frontend/ptx/`) and one PTX op table
+  (references/frontend_ptx.md, ir_ops_ptx.md), into KIR with `ir` `"ptx"`: global and
+  metadata accesses, mbarriers, TMA and bulk copies (packed sub-byte formats too),
+  tcgen05 commits, CLC (TLX), clusters and 2-CTA kernels and the P1 pass (CuTe).
+  Refusals name the PTX instruction, its source line and its PTX line. report.json
+  `translation` and a line of report.md name the translation of a run. With CuTe DSL
+  4.4.2 the source locations are best effort, as report.json `loc_quality` and report.md
+  say.
 - PTX translation: a TMA or bulk copy that several lanes of a warp may execute follows
   the issuing rules measured on Blackwell hardware for each PTX compiler the frontends
   use (`tests/ptx/test_gpu_tma_issue.py`): loads and reduces once per lane with that
@@ -33,7 +37,7 @@ First public release.
   cache policy not part of the key. It is translated only if the kernel's compiler (CuTe:
   its cubin's `.note.nv.tkinfo`; TTGIR: the `ptxas` the dump now records in every
   LaunchRecord) is one of `frontend/ptx/tma.py` `ISSUE_PTXAS` and the kernel targets
-  sm_100 (`ISSUE_TARGETS`: sm_103 once the hardware test passes on GB300), else refused.
+  sm_100 or sm_103 (`ISSUE_TARGETS`, measured on a GB200 and a GB300), else refused.
   A store whose copies would depend on the lane `elect.sync` picks is refused, as a load
   or reduce is.
 - CuTe dump: the LaunchRecord address candidates of a launch whose TVM-FFI environment

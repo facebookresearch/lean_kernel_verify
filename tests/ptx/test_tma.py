@@ -788,7 +788,7 @@ class Gate(unittest.TestCase):
             self.assertEqual(f.refusals == [], ok)
 
     def test_unvalidated_target_refused(self):
-        # measured on sm_100a (GB200) only: sm_103a waits for the GB300 run (D15)
+        # measured on sm_100a (GB200) and sm_103a (GB300) only
         body = (
             PRE.format(n=2)
             + TMAP64
@@ -798,13 +798,13 @@ class Gate(unittest.TestCase):
         recs = records(TWO, "cute", 32)
         pol = T.policy("cute", src_root=SRC, params=T.param_table(recs, "cute", None, []),
                        tensors={n: {"elem_bytes": b} for n, b in TWO_T.items()}, ptxas=OK)  # fmt: skip
-        for target, ok in (("sm_100a", True), ("sm_103a", False)):
+        for target, ok in (("sm_100a", True), ("sm_103a", True), ("sm_120a", False)):
             f = T.translate(
                 kernel(body, TWO, 32).replace("sm_100a", target), "k", recs, pol
             )
             self.assertEqual(f.refusals == [], ok)
             if not ok:
-                self.assertIn("for sm_103", f.refusals[0]["msg"])
+                self.assertIn("for sm_120", f.refusals[0]["msg"])
                 self.assertIn("tma.ISSUE_TARGETS", f.refusals[0]["msg"])
 
     def test_tkinfo_version(self):

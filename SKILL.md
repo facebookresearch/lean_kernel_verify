@@ -45,6 +45,7 @@ kernel sources exported at REV + case file (host entry point, config, small conc
   |   TLX/Triton: triton.compile -> TTGIR (sm_100 or sm_103)        frontend/ttgir/dump.py
   |   CuTe DSL:   cute.compile -> initial MLIR -> analyzed stage     frontend/cute/main.py
   |   op table + program slicing (refuses on anything unknown)      to_kir
+  |   (opt-in --frontend ptx: the kernel's PTX instead of the IR, frontend/ptx/)
   v
 KIR JSON per compiled flag set: roles, structured control flow, exact-width integer exprs,
   |   events, inputs; frontend/kir.py (contract check) -> frontend/emit_lean.py
@@ -88,8 +89,9 @@ python3 -I $S/scripts/lkv.py check K.kir.json... --out DIR   # Layer 2 alone on 
 - The frontend is CuTe if the case has a `builder`, else TTGIR. `run` options:
   `--inputs a,b`, `--target sm_103` (TTGIR only), `--jobs N` (default min(8,
   CPUs)), `--timeout S` (per Lean file, default 3600), `--src DIR` (default: the
-  case's `src_root` / `source.src`). `LKV_FRONTEND=ptx` previews a PTX translation
-  (frontend docs, "PTX translation"); the default is `legacy`.
+  case's `src_root` / `source.src`), `--frontend ptx` (translate the kernel's PTX
+  instead of its IR, with one shared core for both frontends: `frontend_ptx.md`; default
+  `legacy`, or `$LKV_FRONTEND` when set; report.json `translation` says which ran).
 - **Check a fix:** put base and fix in two source directories, run the same cases
   with each `--src`, and compare FAIL locations. Done when every confirmed
   root's FAIL is gone and no new FAIL appears; inputs the fixed host now rejects
@@ -202,7 +204,9 @@ A verdict depends on exactly these items (`design.md`, "Trust base"):
    one write per distinct (coordinates, shared-memory source) among its lanes
    (ptxas issues it in a waterfall loop; DSL 4.4.2 compiles with its embedded
    ptxas 12.9.83); a TMA load or reduce is one per executing lane, which is one
-   per warp because the DSL emits it behind `elect.sync`.
+   per warp because the DSL emits it behind `elect.sync`. With `--frontend ptx`,
+   items 1 and 2 are the kernel's PTX and the PTX op table (`ir_ops_ptx.md`), whose
+   TMA and bulk-copy issuing rules are measured on hardware per compiler version.
 3. **`native_decide` (T1)**: the Lean compiler and the native `libKV.so`.
 4. **The ledger algorithm** for P0-2 and P0-4, argued sound in Ledger.lean but
    not proved: a PASS there means "the ledger found no violation".
@@ -285,7 +289,9 @@ table says when to read each):
   [frontend_cute.md](references/frontend_cute.md) (the dump, host patches, translation,
   refusals), with the op tables [ir_ops.md](references/ir_ops.md) (TTGIR) and
   [ir_ops_cute.md](references/ir_ops_cute.md) (CuTe): which IR op becomes which KIR event
-  or value;
+  or value; with `--frontend ptx`, the shared PTX translation
+  [frontend_ptx.md](references/frontend_ptx.md) and its op table
+  [ir_ops_ptx.md](references/ir_ops_ptx.md);
 - KIR: [kir.md](references/kir.md), the JSON contract between the layers;
 - Layer 2 and the report: [specs.md](references/specs.md) (each spec's Prop, notes,
   outcomes, evaluation errors, Lean's report lines, report.json, limits);
@@ -300,6 +306,8 @@ table says when to read each):
 | [references/frontend_ttgir.md](references/frontend_ttgir.md)                              | writing a TLX/Triton case, or the TTGIR frontend refuses (case format, environment pinning, host patches, CLC)                |
 | [references/frontend_cute.md](references/frontend_cute.md)                                | writing a CuTe case or builder, or the CuTe frontend refuses (work anchors, analyzed stage, DSL pin)                          |
 | [references/ir_ops.md](references/ir_ops.md), [ir_ops_cute.md](references/ir_ops_cute.md) | an op is unknown or refused, or you need the events an op produces and which threads issue them                               |
+| [references/frontend_ptx.md](references/frontend_ptx.md)                                  | running with `--frontend ptx`: how the PTX becomes roles and events, work anchors, how to read a refusal                      |
+| [references/ir_ops_ptx.md](references/ir_ops_ptx.md)                                      | with `--frontend ptx`: an instruction is unknown or refused, its events and issuing threads (TMA, sub-byte)                   |
 | [references/cases.md](references/cases.md)                                                | choosing a case for a kernel, or writing a new case (fields, annotations, which inputs to choose)                             |
 | [references/bug_taxonomy.md](references/bug_taxonomy.md)                                  | someone asks what is covered and why, or which spec to add next (evidence, P1/P2, test-side complements)                      |
 
@@ -309,6 +317,7 @@ table says when to read each):
 $S/tests/lean/run_all.sh                    # Layer 2: positive/negative controls per spec (tests/lean/p1: P1-1)
 python3 -I $S/tests/e2e/test_e2e.py         # lkv.py end to end, ~2 min (frontends + Lean, no GPU)
 python3 -I $S/tests/cute/test_core.py       # CuTe translation, pure Python
+python3 -I $S/tests/ptx/test_translate.py   # PTX translation, pure Python (and tests/ptx/test_*.py)
 # Frontend tests: tests/ttgir/test_translate.py, test_ttgir.py (Triton) and tests/cute/test_frontend.py
 # (CuTe DSL, run once per supported DSL release); tests/ttgir/test_gpu_parity.py: CPU-dumped
 # TTGIR == real launch (needs a Blackwell GPU)

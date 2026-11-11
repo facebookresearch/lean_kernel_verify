@@ -458,35 +458,15 @@ instead.
   out-of-bounds write of its seeded unmasked fill from P0-1 to P0-5 in Lean, and a
   misspelled flag is refused.
 
-## PTX translation (preview)
+## PTX translation
 
-`LKV_FRONTEND=ptx` in the environment of `lkv.py run` (or of `to_kir`) makes `to_kir`
-translate the PTX the dump records for each variant (`ptx/NN_<digest>.ptx`) instead of
-the analyzed stage. The shared PTX core (`frontend/ptx/`) gives the roles, events and
-barriers, and `to_kir` assembles them with the variant's tensors, inputs and checks as
-above: the same variant names and `kir/report.json`; the KIR has `ir` `"ptx"`
-(`kir.md`), every tensor shape and stride leaf is an i64 param, the scalar params are
-the kernel-parameter bytes the PTX reads, and `logs/frontend.log` shows `[to_kir]
-LKV_FRONTEND=ptx: translating the PTX`. The preview covers global loads and stores,
-metadata loads, mbarriers and their waits, named barriers, TMA and bulk copies,
-tcgen05 (a P0 no-op; `tcgen05.commit` arrives on its mbarrier) and `work`;
-cluster-scope instructions (2-CTA kernels), CuTe CLC and anything else it does not
-translate are refused as gaps, and there is no P1 pass
-(P1 is `not_applicable` without tcgen05 in the PTX, else `refused`). A TMA or bulk copy
-is issued under the PTX's own predicates and `elect.sync`; one that several lanes of a
-warp may execute is translated by the issuing rules measured on hardware (loads and
-reduces once per lane, stores once per distinct descriptor, coordinates and shared
-source, or global address and shared source: `frontend/ptx/tma.py`, "Issuing threads")
-only if the cubin's compiler (its `.note.nv.tkinfo`) is one they were measured for
-(`tma.ISSUE_PTXAS`: both DSLs' embedded compilers are) and the kernel targets sm_100
-(`tma.ISSUE_TARGETS`), else refused. DSL 4.4.2's PTX names
-wrong source files, so only its line numbers are used, read in the kernel's own source
-file (a `.loc` on a blank or comment position is skipped; a `where` anchor matches by
-line): these locations are best effort, which the variant's `kir/report.json` entry
-(`"loc_quality": "line_only"`), report.json `loc_quality` and report.md's environment
-section say. Under 4.6.1 locations are exact (an inline asm block's instructions take
-the location of its start). Unset or `legacy` is the translation above and the default;
-any other value is an error.
+`lkv.py run --frontend ptx` (or `LKV_FRONTEND=ptx`) makes `to_kir` translate the PTX the
+dump records for each variant (`ptx/NN_<digest>.ptx`) instead of the analyzed stage, with
+the shared PTX translation of both frontends and its op table: `frontend_ptx.md` and
+`ir_ops_ptx.md` (TMA and bulk copies, clusters and 2-CTA kernels, packed sub-byte TMA,
+the P1 pass, refusals; with DSL 4.4.2, source lines are best effort). The case files,
+the dump, the variant names and `kir/report.json` stay; the default, `legacy`, is the
+translation above.
 
 ## Limitations
 

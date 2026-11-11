@@ -78,11 +78,11 @@ Events, by policy `tma` (frontend/cute/ops_mem.py, frontend/ttgir/to_kir.py):
   Bulk copies (both): g2s a `gload` of the n elements and a `tma_load` of the bulk
   descriptor (coordinate: the element offset) on the mbarrier; s2g a `gstore`; reduce a
   `gatomic`. commit_group/wait_group are drops (ops.py).
-Issuing threads (design §5.7, D15; measured on sm_100a hardware for every compiler in
-ISSUE_PTXAS: tests/ptx/test_gpu_tma_issue.py). An instruction is issued under the PTX's own
-predicates and elect.sync; one that at most one lane of each warp executes (statically) is
-issued once per executing thread, as before D15. One that several lanes of a warp may
-execute follows ptxas's lowering, the same for every validated version:
+Issuing threads (design §5.7, D15; measured on sm_100a and sm_103a hardware for every
+compiler in ISSUE_PTXAS: tests/ptx/test_gpu_tma_issue.py). An instruction is issued under
+the PTX's own predicates and elect.sync; one that at most one lane of each warp executes
+(statically) is issued once per executing thread, as before D15. One that several lanes of
+a warp may execute follows ptxas's lowering, the same for every validated version:
   * TMA load and bulk g2s: once per executing lane, never merged (an ELECT loop issues
     each lane's copy with that lane's operands, identical ones too): a tma_load (its
     footprint gload, the bulk gload) per lane, with the lane's coordinates or offset; the
@@ -98,7 +98,7 @@ Such an instruction is refused (gap) unless the variant's compiler (policy `ptxa
 the V-string of its cubin's .note.nv.tkinfo, tkinfo_version; TTGIR the `ptxas --version`
 one frontend/ttgir/dump.py records in each LaunchRecord) is in ISSUE_PTXAS: another
 ptxas may lower it otherwise; and its target (policy `target`, the PTX .target) in
-ISSUE_TARGETS: sm_100 only until the GB300 run of the hardware test validates sm_103.
+ISSUE_TARGETS (sm_100, sm_103).
 Scope is one warp (the ptxas loops are per warp); the mbarrier of a load must be the
 same for every lane, and a load one thread issues may have lane-dependent operands. Not
 measured: multicast and cta_group::2 TMA loads and shared::cluster bulk copies, translated
@@ -106,11 +106,11 @@ only where one lane of each warp issues them (cluster.py); prefetch is a drop.
 Transaction bytes (P0-4): the KIR box x elem_bytes, including out-of-bounds fill; packed
 sub-byte formats count their packed global bytes (launch.kir_desc), as the CuTe frontend,
 also 16U4_ALIGN16B / 16U6_ALIGN16B whose shared-memory copy is wider, and also into each
-CTA of a multicast and (twice) on a cta_group::2 leader's mbarrier (measured on sm_100a:
-tests/ptx/test_gpu_tma_subbyte.py). Their footprints are in bytes too; the hardware traps
-on a dim-0 coordinate that is not a multiple of 32 (16U4_ALIGN8B) or 128 (the 16-byte
-aligned formats) elements, on any reduce and on a 16U4_ALIGN16B store: a KIR assert per
-issuing thread (_PACKED). A packed Triton or in-kernel descriptor is a gap.
+CTA of a multicast and (twice) on a cta_group::2 leader's mbarrier (measured on sm_100a and
+sm_103a: tests/ptx/test_gpu_tma_subbyte.py). Their footprints are in bytes too; the
+hardware traps on a dim-0 coordinate that is not a multiple of 32 (16U4_ALIGN8B) or 128
+(the 16-byte aligned formats) elements, on any reduce and on a 16U4_ALIGN16B store: a KIR
+assert per issuing thread (_PACKED). A packed Triton or in-kernel descriptor is a gap.
 Coordinates: PTX lists them innermost first, KIR outermost first (all of shape, strides,
 box, coords reversed); i32, signed. mark_addr (translate.py) marks them like the offsets.
 Clusters (cluster.py): a load's destination is the issuing CTA's shared memory; a TMA
@@ -131,20 +131,20 @@ from .interp import Data, Translator
 PREFIXES = ("cp.async.bulk", "cp.reduce.async.bulk", "tensormap.")  # mem.py routes here
 # The compilers whose TMA / bulk issuing (module doc) was measured on hardware: CuTe DSL
 # 4.4.2's embedded nvPTXCompiler, DSL 4.6.1's, Triton's ptxas-blackwell (CUDA 13.3), CUDA
-# 13.0 and 12.8 ptxas (sm_100a; 12.8 cannot target sm_103a).
+# 13.0 and 12.8 ptxas (12.8 on sm_100a only: it cannot target sm_103a).
 ISSUE_PTXAS = frozenset({"12.9.83", "13.3.27", "13.3.33", "13.0.88", "12.8.93"})
-# ... and the targets it was measured on (GB200); sm_103 once test_gpu_tma_issue.py passes
-# on GB300 (design D15, GPU test (c)).
-ISSUE_TARGETS = frozenset({"sm_100"})
-# The packed sub-byte CUtensorMap formats, as measured on sm_100a (GB200, driver 13000:
+# ... and the targets it was measured on: GB200 (sm_100a) and GB300 (sm_103a), the same
+# counts for every compiler that targets both.
+ISSUE_TARGETS = frozenset({"sm_100", "sm_103"})
+# The packed sub-byte CUtensorMap formats, as measured on GB200 and GB300 (driver 13000:
 # tests/ptx/test_gpu_tma_subbyte.py) -> (the multiple of the format's elements a dim-0 TMA
 # coordinate must be, the TMA kinds through such a descriptor). Any other coordinate or
 # kind traps (CUDA_ERROR_ILLEGAL_INSTRUCTION): 32 elements are the 16 global bytes every
 # format's dim-0 coordinate must be aligned to; the 16-byte-aligned formats need 128 (the
 # only box width their encoder accepts); none reduces, and 16U4_ALIGN16B does not store.
 # Trust item: a plain format traps too off that 16-byte grid (measured for UINT8 at
-# dim-0 coordinates 1, 3 and 17), which is not asserted (nor by either legacy frontend):
-# such a copy is modeled as performed, its footprint and bytes counted.
+# dim-0 coordinates 1, 3 and 17 on GB200), which is not asserted (nor by either legacy
+# frontend): such a copy is modeled as performed, its footprint and bytes counted.
 _PACKED = {
     "16U4_ALIGN8B": (32, ("load", "store")),
     "16U4_ALIGN16B": (128, ("load",)),

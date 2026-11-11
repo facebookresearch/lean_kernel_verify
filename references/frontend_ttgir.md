@@ -228,11 +228,11 @@ tensors)}` or `{"kind": "desc", dtype, elem_bytes, shape, strides, block_shape, 
 base}`.
 `<key>` hashes kernel, signature, constexprs, attrs and options.
 
-For the PTX frontend a spec also has `ptx`, `ptx_sha256`, `tensordesc_meta`,
-`global_scratch`, `profile_scratch_size` and `ptxas` (`path`, `version`: the release
-Triton reads, e.g. 13.3), and each launch a LaunchRecord `launch` (grid, block, cluster,
-dynamic shared memory, attrs, params) with `ptxas`, the full version `ptxas --version`
-prints (e.g. 13.3.33), which gates the TMA issuing rules.
+For the PTX translation (`frontend_ptx.md`) a spec also has `ptx`, `ptx_sha256`,
+`tensordesc_meta`, `global_scratch`, `profile_scratch_size` and `ptxas` (`path`,
+`version`: the release Triton reads, e.g. 13.3), and each launch a LaunchRecord `launch`
+(grid, block, cluster, dynamic shared memory, attrs, params) with `ptxas`, the full
+version `ptxas --version` prints (e.g. 13.3.33), which gates the TMA issuing rules.
 
 ## KIR produced
 
@@ -361,25 +361,14 @@ checks on the same trace.
 * Event locations: every event's `loc` is a line of the exported sources.
 * Case: `elision_flags` are boolean constexprs of the kernel.
 
-## PTX translation (preview)
+## PTX translation
 
-`LKV_FRONTEND=ptx` in the environment of `lkv.py run` (or of `to_kir`) makes `to_kir`
-translate the PTX `dump` writes next to each TTGIR (`<spec>.ptx`) instead of the TTGIR.
-The shared PTX core (`frontend/ptx/`) gives the roles, events and barriers, and `to_kir`
-assembles them as above: the same names, tensors, params, inputs, checks and
-`[to_kir] ... FAILED` lines; the KIR has `ir` `"ptx"` (`kir.md`), and `logs/to_kir.log`
-shows `[to_kir] LKV_FRONTEND=ptx: translating the PTX`. Locations are the innermost
-`.loc` frame under `src_root`. The preview covers global loads and stores, metadata
-loads, mbarriers and their waits, named barriers, TMA and bulk copies, tcgen05 (a P0
-no-op; `tcgen05.commit` arrives on its mbarrier), CLC (as the TTGIR translation models
-it), and `work`; cluster-scope instructions (2-CTA kernels) and anything else it does not
-translate are refused as gaps. A TMA or bulk copy that several lanes
-of a warp may execute (TLX's are elected, one lane) follows the issuing rules measured on
-hardware (`frontend/ptx/tma.py`, "Issuing threads") only if the LaunchRecord's `ptxas`
-is one they were measured for (`tma.ISSUE_PTXAS`) and the kernel targets sm_100
-(`tma.ISSUE_TARGETS`), else it is refused; a dump without that key leaves such copies
-refused. Unset or `legacy` is the TTGIR translation and the
-default; any other value is an error.
+`lkv.py run --frontend ptx` (or `LKV_FRONTEND=ptx`) makes `to_kir` translate the PTX
+`dump` writes next to each TTGIR (`<spec>.ptx`) instead of the TTGIR, with the shared PTX
+translation of both frontends and its op table: `frontend_ptx.md` and `ir_ops_ptx.md`
+(TMA and bulk copies, CLC, refusals). The case file, the dump, the names, tensors,
+params, inputs, checks and `[to_kir] ... FAILED` lines stay; the default, `legacy`, is
+the TTGIR translation above.
 
 ## Limitations
 

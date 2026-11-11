@@ -80,10 +80,9 @@ follow items 1 to 3 and 8.
     fields and `emit_lean.py` emits `none` / `false` for them. P0-2 and P0-4
     decide one ledger per cluster (references/specs.md, shared notions and P0-4).
 12. **`ir: "ptx"`.** `ir` gains the value `"ptx"`, for KIR translated from the
-    kernel's PTX instead of TTGIR or CuTe DSL MLIR (the frontends'
-    `LKV_FRONTEND=ptx` preview, "PTX translation" in frontend_ttgir.md and
-    frontend_cute.md); IR.lean's `Ir` gained the constructor `ptx`. Layer 2 does
-    not read `ir`, so nothing else changes.
+    kernel's PTX instead of TTGIR or CuTe DSL MLIR (the opt-in PTX translation,
+    `lkv.py run --frontend ptx`: frontend_ptx.md); IR.lean's `Ir` gained the
+    constructor `ptx`. Layer 2 does not read `ir`, so nothing else changes.
 
 ## Top level
 
