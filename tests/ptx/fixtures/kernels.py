@@ -84,13 +84,24 @@ def kir_errors(facts) -> list:
                 "shape": [{"e": "const", "w": 64, "v": 4096}], "strides": [{"e": "const", "w": 64, "v": 1}],
                 "segments": None, "role": "output" if n in facts.written else "input",
                 "metadata": t["metadata"]} for n, t in facts.tensors.items()]  # fmt: skip
+    metadata = {n: [0] * 4096 for n, t in facts.tensors.items() if t["metadata"]}
+    if facts.clc:  # what frontend/ttgir/to_kir.py declares for CLC (sync.py)
+        c = lambda v, w=64: {"e": "const", "w": w, "v": v}  # noqa: E731
+        tensors.append({"name": "__clc_response", "kind": "desc", "elem_bytes": 1, "shape": [c(16, 32)],
+                        "strides": [c(1)], "box": [16], "segments": None, "role": "input",
+                        "metadata": False})  # fmt: skip
+        for n, strides in (("__clc_schedule", [4, 1]), ("__clc_launched", [1])):
+            tensors.append({"name": n, "kind": "global", "elem_bytes": 4, "shape": [c(4)] * len(strides),
+                            "strides": [c(x) for x in strides], "segments": None, "role": "input",
+                            "metadata": True})  # fmt: skip
+            metadata[n] = [0] * 4 ** len(strides)
     obj = {"kir_version": 1, "kernel": "k", "source": "k.py", "ir": "ptx", "target": "sm_100",
            "grid": [{"e": "const", "w": 32, "v": 1}] * 3,
            "params": [{"name": n, "type": f"i{w}"} for n, w in facts.params.items()],
            "tensors": tensors, "barriers": facts.barriers,
            "roles": [{k: r[k] for k in ("name", "warps", "threads_per_issue", "body")} for r in facts.roles],
            "case": {"name": "t", "inputs": [{"name": "i", "params": dict.fromkeys(facts.params, 1),
-                                              "metadata": {n: [0] * 4096 for n, t in facts.tensors.items() if t["metadata"]},
+                                              "metadata": metadata,
                                               "intended_writes": dict.fromkeys(facts.written, "unchecked")}]}}  # fmt: skip
     return kir.validate(obj)
 
@@ -144,7 +155,8 @@ _CMPS = {
 def evaluate(facts, params, metadata=None, pid=(0, 0, 0), role=0):  # noqa: C901 (one case per KIR node and statement)
     """Trace of role `role` on one CTA: [("gload"|"gstore"|"gatomic", tensor, [offset]),
     ("work", {field: value}), ("overflow", node op), ("meta_oob", tensor, index),
-    ("assert", msg), (event, bar, idx) for barrier events]."""
+    ("assert", msg), (event, bar, idx[, parity]) for barrier events]. A metadata tensor
+    read with several indices has contents {(i0, i1, ...): value}."""
     env, trace, metadata = dict(params), [], metadata or {}
 
     def ex(e):  # scalar Expr
@@ -158,8 +170,14 @@ def evaluate(facts, params, metadata=None, pid=(0, 0, 0), role=0):  # noqa: C901
         if k == "select":
             return ex(e["a"]) if ex(e["c"]) else ex(e["b"])
         if k == "load":
-            (i,) = [ex(x) for x in e["index"]]
+            idx = [ex(x) for x in e["index"]]
             data = metadata[e["tensor"]]
+            if len(idx) > 1:
+                if tuple(idx) not in data:
+                    trace.append(("meta_oob", e["tensor"], tuple(idx)))
+                    raise _Stop()
+                return _wrap(data[tuple(idx)], w)
+            (i,) = idx
             if not 0 <= i < len(data):
                 trace.append(("meta_oob", e["tensor"], i))
                 raise _Stop()
@@ -237,8 +255,10 @@ def evaluate(facts, params, metadata=None, pid=(0, 0, 0), role=0):  # noqa: C901
             elif s["ev"] == "work":
                 trace.append(("work", {f: ex(v) for f, v in s["fields"].items()}))
             else:
+                par = (ex(s["parity"]),) if "parity" in s else ()
                 trace.append(
                     (s["ev"], s.get("bar"), ex(s["idx"]) if s.get("idx") else None)
+                    + par
                 )
 
     try:

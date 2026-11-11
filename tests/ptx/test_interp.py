@@ -9,8 +9,9 @@ expr.py), through translate() on hand-written kernels.
     python3 -I tests/ptx/test_interp.py      (or the buck target :test_interp)
 
 Covers: the PTX integer expansions against brute force (mul.hi, bfe, bfi, prmt, lop3,
-shf, popc, clz, brev, cvt, div_exact); per-thread events (Triton: one event over the
-threads; CuTe: a thread loop), a uniform predicate as a KIR `if`, a lane-varying one as
+shf, popc, clz, brev, cvt, div_exact), the test of one bit of a packed predicate mask;
+per-thread events (Triton: one event over the threads, a replicated load over one thread
+per class; CuTe: a thread loop), a uniform predicate as a KIR `if`, a lane-varying one as
 a mask; elect.sync and holes H1-H3 (an elect-guarded event issued once per warp, the
 elected lane under another lane condition refused, an operand depending on the lane
 refused, an elect symbol carried in a per-thread variable refused, a full-mask shfl on
@@ -24,6 +25,7 @@ refused; a loop exit under a lane condition nested in a uniform If refused; a ma
 table loading on no masked-off lane; select arms' wraps, loads and divisions dead (R1).
 """
 
+import json
 import random
 import sys
 import unittest
@@ -162,6 +164,129 @@ class Expansions(unittest.TestCase):
         self.assertIsNone(E.div_exact(E.bin("add", x, E.const(1, 64)), 2))
 
 
+class TableLowering(unittest.TestCase):
+    def test_selects_over_distinct_entries(self):
+        # entries[key] for every key in range: one select per entry besides the most
+        # frequent, on `key urem p == r` for every p-th key from r, else key == i or'd.
+        key = E.bin("urem", E.var("t", 32), c32(32))
+        v, w, z = E.var("v", 32), E.var("w", 32), c32(0)
+        for entries in ([v, z, z, z] * 8, [z] * 31 + [v], [v if i in (1, 5, 6) else z for i in range(32)],
+                        [c32(3 * i) for i in range(32)], [v, w] * 16):  # fmt: skip
+            got = E._table_select(key, tuple(entries))
+            for k in range(32):
+                self.assertIs(E.subst(got, {"t": c32(k)}), entries[k])
+        lowered = E.to_json(E.table(key, tuple([v, z, z, z] * 8)))
+        self.assertEqual(json.dumps(lowered).count('"select"'), 1)
+
+
+class PackedPredicates(unittest.TestCase):
+    def test_one_bit_of_a_packed_mask(self):
+        # LLVM packs predicates into an i16 mask (selp of -1/1, shl, and 0xffff, disjoint
+        # adds) and tests one bit per predicated load: the test folds to that predicate.
+        c = [E.cmp("ult", E.var(f"x{i}", 32), E.var("n", 32)) for i in range(3)]
+
+        def sel(p, v):
+            return E.select(p, c32(v), c32(0))
+
+        m = E.bin("and", E.bin("shl", sel(c[0], 0xFFFF), c32(3)), c32(0xFFFF))
+        m = E.bin("add", m, E.bin("shl", sel(c[1], 1), c32(2)))
+        m = E.bin("add", m, sel(c[2], 1))  # bits 3..15: c0, bit 2: c1, bit 0: c2
+
+        def bit(k):
+            return E.cmp("ne", E.bin("and", E.bin("lshr", m, c32(k)), c32(1)), c32(0))
+
+        self.assertIs(bit(15), c[0])
+        self.assertIs(bit(2), c[1])
+        self.assertIs(bit(0), c[2])
+        self.assertIs(bit(1), E.const(0, 1))
+        self.assertIs(E.cmp("eq", E.bin("lshr", m, c32(15)), c32(0)), E.not1(c[0]))
+        self.assertEqual(E.cmp("ne", m, c32(0))[0], "cmp")  # several bits: no fold
+
+    def test_or_below_trailing_zeros(self):
+        # (128 z + 32) | 64 = 128 z + 96: 32 and 64 lie below z's 7 trailing zeros
+        z = E.bin("shl", E.var("z", 32), c32(7))
+        x = E.bin("add", z, c32(32))
+        self.assertIs(E.bin("or", x, c32(64)), E.bin("add", z, c32(96)))
+        self.assertEqual(E.bin("or", x, c32(32))[2], "or")  # overlapping bits
+        self.assertEqual(E.bin("or", x, c32(128))[2], "or")  # not below the zeros
+
+
+class LoopInvariants(unittest.TestCase):
+    def test_bound_before_the_loop(self):
+        # n * 12 cannot change in the loop: its let precedes the `while` (Lean evaluates
+        # the body every trip); the load x[0] may fail, so it stays where the body uses it.
+        f = run(
+            PRE
+            + """
+    setp.eq.s32 %p9, %r1, 0;
+    mul.lo.s32 %r3, %r2, 12;
+    ld.global.b32 %r5, [%rd1];
+    mov.b32 %r21, 0;
+LOOP:
+    add.s32 %r4, %r3, %r21;
+    add.s32 %r6, %r4, %r5;
+    mul.wide.s32 %rd2, %r6, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    @%p9 st.global.b32 [%rd3], %r21;
+    add.s32 %r21, %r21, 1;
+    setp.lt.s32 %p13, %r21, %r2;
+    @%p13 bra LOOP;
+    ret;
+"""
+        )
+        self.assertEqual(f.refusals, [])
+        body = f.roles[0]["body"]
+        (loop,) = [s for s in body if s["op"] == "while"]
+        inside = [s["expr"] for s in statements(loop["body"]) if s["op"] == "let"]
+        before = [s["expr"] for s in body if s["op"] == "let"]
+
+        def twelve(es):
+            return any(e.get("o") == "mul" and e["b"].get("v") == 12 for e in es)
+
+        self.assertTrue(twelve(before))
+        self.assertFalse(twelve(inside))
+        self.assertTrue(any(e["e"] == "load" for e in inside))
+        self.assertEqual(kir_errors(f), [])
+
+    def test_not_bound_before_the_loop_from_a_branch(self):
+        # The same n * 12 used only under `if n > 5` in the body stays in that branch:
+        # Lean evaluates it (and its wrap check) only when the branch is taken (R1).
+        f = run(
+            PRE
+            + """
+    setp.eq.s32 %p9, %r1, 0;
+    setp.gt.s32 %p2, %r2, 5;
+    mul.lo.s32 %r3, %r2, 12;
+    mov.b32 %r21, 0;
+LOOP:
+    @!%p2 bra SKIP;
+    add.s32 %r4, %r3, %r21;
+    mul.wide.s32 %rd2, %r4, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    @%p9 st.global.b32 [%rd3], %r21;
+SKIP:
+    add.s32 %r21, %r21, 1;
+    setp.lt.s32 %p13, %r21, %r2;
+    @%p13 bra LOOP;
+    ret;
+"""
+        )
+        self.assertEqual(f.refusals, [])
+        body = f.roles[0]["body"]
+        (loop,) = [s for s in body if s["op"] == "while"]
+        (arm,) = [a for s in loop["body"] if s["op"] == "if" for a in (s["then"], s["else"])
+                  if any(x["op"] == "event" for x in a)]  # fmt: skip
+        twelve = lambda ss: any(  # noqa: E731
+            s["op"] == "let"
+            and s["expr"].get("o") == "mul"
+            and s["expr"]["b"].get("v") == 12
+            for s in ss
+        )
+        self.assertFalse(twelve(body))
+        self.assertTrue(twelve(arm))
+        self.assertEqual(kir_errors(f), [])
+
+
 class Threads(unittest.TestCase):
     def test_masked_store_per_family(self):
         body = (
@@ -185,6 +310,36 @@ class Threads(unittest.TestCase):
         self.assertEqual(loops[0]["ub"]["v"], 128)
         self.assertEqual(loops[0]["body"][-1]["op"], "if")
         self.assertEqual(kir_errors(tlx) + kir_errors(cute), [])
+
+    def test_replicated_load_once_per_thread_class(self):
+        # Each warpgroup half reads all of x[n + 0..1] (thread t: x[n + t/64 % 2], under
+        # n > 0): the Triton event is over one thread per class, threads 0 and 64; the
+        # elements, all P0-1 sees, are those of the 128 loads. x[t] keeps 128 threads.
+        f = run(
+            PRE
+            + """
+    shr.u32 %r3, %r1, 6;
+    and.b32 %r4, %r3, 1;
+    add.s32 %r5, %r4, %r2;
+    mul.wide.s32 %rd2, %r5, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    setp.gt.s32 %p1, %r2, 0;
+    @%p1 ld.global.b32 %r6, [%rd3];
+    mul.wide.u32 %rd4, %r1, 4;
+    add.s64 %rd5, %rd1, %rd4;
+    ld.global.b32 %r7, [%rd5];
+    add.s32 %r8, %r6, %r7;
+    st.global.b32 [%rd5+1024], %r8;
+    ret;
+"""
+        )
+        self.assertEqual(f.refusals, [])
+        rep, own = events(f, "gload")
+        self.assertEqual(rep["offsets"]["shape"], [2])
+        self.assertEqual(own["offsets"]["shape"], [128])
+        loads = [o for e, _t, o in evaluate(f, {"n": 3}) if e == "gload"]
+        self.assertEqual([sorted(o) for o in loads], [[3, 4], list(range(128))])
+        self.assertEqual(kir_errors(f), [])
 
     def test_uniform_predicate_is_an_if(self):
         f = run(
@@ -293,6 +448,29 @@ SKIP:
         )
         (a,) = [s for s in statements(f.roles[0]["body"]) if s["op"] == "assert"]
         self.assertIn("all lanes of a warp or none", a["msg"])
+
+    def test_h3_runtime_check_per_thread_under_cute(self):
+        # Decision D8: the CuTe policy asserts per thread that its lane agrees with lane
+        # 0 of its warp (one assert in a thread loop, not one conjunct per warp); n
+        # splitting a warp fails it, whole warps (or none) pass.
+        f = run(
+            PRE
+            + """
+    setp.lt.s32 %p1, %r1, %r2;
+    @!%p1 bra SKIP;
+    vote.sync.ballot.b32 %r5, %p1, -1;
+SKIP:
+    ret;
+""",
+            family="cute",
+        )
+        self.assertEqual(f.refusals, [])
+        (loop,) = [s for s in f.roles[0]["body"] if s["op"] == "for"]
+        self.assertEqual(loop["body"][-1]["op"], "assert")
+        self.assertEqual(kir_errors(f), [])
+        for n, fails in ((64, False), (40, True), (0, False), (127, True)):
+            got = [t for t in evaluate(f, {"n": n}) if t[0] == "assert"]
+            self.assertEqual(bool(got), fails, n)
 
     def test_shfl_vote_popc(self):
         f = run(

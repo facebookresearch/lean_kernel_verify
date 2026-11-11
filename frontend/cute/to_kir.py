@@ -38,19 +38,24 @@ DSL other than the ones the op table was checked against (ops.DSL_NATIVE).
 Migration switch (design §8, removed when the PTX frontend becomes the only one):
 LKV_FRONTEND=ptx translates each variant's PTX instead of steps 1-4 (translate_ptx: the
 PTX core's Facts, frontend/ptx/translate.py, assembled by PtxVariant with Variant's
-tensors, inputs, checks and report; KIR `ir` "ptx"; the P1 pass is not in M1 of the PTX
-frontend); unset or "legacy" is the translation above, unchanged. Under DSL 4.4.2 only
-the PTX's line numbers are trusted (PTX_LOCS), so a translated variant's report.json
-entry has "loc_quality": "line_only" (lkv.py marks the report's lines best effort).
+tensors, inputs, checks and report: parameters named by the LaunchRecords' jit_params,
+TMA descriptors as KIR desc tensors, LLVM's unrolled blocks rerolled into `for`s; KIR
+`ir` "ptx"; the P1 pass comes with M3 of the PTX frontend); unset or "legacy" is the
+translation above, unchanged. Under DSL 4.4.2 only the PTX's line numbers are trusted
+(PTX_LOCS), so a translated variant's report.json entry has "loc_quality": "line_only"
+(lkv.py marks the report's lines best effort).
 
 Standalone (no CuTe DSL needed): python3 -I to_kir.py CASE.json [--out DIR]
 """
 
 import argparse
 import importlib.util
+import itertools
 import json
 import math
 import os
+import re
+import struct
 import sys
 import types
 from pathlib import Path
@@ -555,9 +560,10 @@ class Variant:
         }
 
 
-# Location policy of the PTX frontend per DSL (design §5.2.3): 4.4.2's .loc file numbers are
+# PTX frontend policy per DSL. Locations (design §5.2.3): 4.4.2's .loc file numbers are
 # unreliable, only lines are trusted (decision D1); 4.6.1 has a true file table, and the
-# instructions of an inline asm block take the block's start loc.
+# instructions of an inline asm block take the block's start loc. The TMA issuing rules
+# are gated on the compiler of the variant's cubin instead (_ptxas).
 PTX_LOCS = {
     "4.4.2": {"loc_mode": "line_only", "asm_locs": False},
     "4.6.1": {"loc_mode": "file_line", "asm_locs": True},
@@ -573,19 +579,23 @@ class PtxVariant(Variant):
     reads (param<i>, param<i>_<off>) with each launch's LaunchRecord values; each input
     has its launch's grid."""
 
-    def __init__(self, case: dict, dump: dict, rec: dict, first_args: list):
-        self.case, self.rec = case, rec
+    def __init__(
+        self, case: dict, dump: dict, rec: dict, launched: list, first_args: list
+    ):
+        self.case, self.rec, self.launched = case, rec, launched
         self.dsl_version = dump["dsl"]["version"]
         self.cls = rec["callable"].rsplit(".", 1)[-1]
         self.notes = case.get("kernels", {}).get(self.cls, {})
         self.params = {}
+        self.descs: dict = {}  # Facts.descs
+        self.dims: list = []  # per launch: {tensor: (shape, strides)}
         # host_args and k.tensors in Variant's form, so that its assembly and
         # _check_provenance read them as they read the legacy translation's (of k only
         # tensors, descs and cluster: nothing is translated with it)
         self.host_args = []
         k = types.SimpleNamespace(tensors={}, descs={}, cluster=(1, 1, 1))
         self.k = cast(Kernel, k)
-        for name, a in _named_args(rec, first_args):
+        for name, a in _named_args(launched, first_args):
             if a["kind"] != "tensor":  # scalars come from the LaunchRecords
                 self.host_args.append((name, "data", None))
                 continue
@@ -598,7 +608,8 @@ class PtxVariant(Variant):
                     for f in ("shape", "stride")}  # fmt: skip
             self.k.tensors[name] = {"elem_bytes": TORCH_BITS[a["dtype"]] // 8, "pack": 1,
                                     "shape": dims["shape"], "strides": dims["stride"],
-                                    "uses": set(), "metadata": False}  # fmt: skip
+                                    "uses": set(), "metadata": False,
+                                    "first": {"shape": a["shape"], "strides": a["stride"]}}  # fmt: skip
             self.host_args.append((name, "tensor", None))
 
     def _tensor_params(self, name, info, a, params) -> None:
@@ -606,31 +617,141 @@ class PtxVariant(Variant):
             params[f"{name}_shape{i}"], params[f"{name}_stride{i}"] = n, s
 
     def assemble(self, facts, table: list, launches: list, records: list) -> dict:
-        """The KIR: Facts' roles and barriers, the tensors they touch, every launch an
-        input with its record's scalar values and grid."""
+        """The KIR: Facts' roles (LLVM's unrolled blocks rerolled) and barriers, the
+        tensors and descriptors they touch, every launch an input with its record's scalar
+        values, its descriptors' synthetic params (Facts.values) and its grid."""
         for name, t in facts.tensors.items():
             self.k.tensors[name].update(uses=set(t["uses"]), metadata=t["metadata"])
         self.params.update(facts.params)
         self.k.cluster = facts.cluster
+        self.descs = facts.descs
+        self.dims = [{n: (a["shape"], a["stride"]) for n, a in _named_args(self.launched, args)
+                      if a["kind"] == "tensor"} for _n, args in launches]  # fmt: skip
         self.mark_segment_offsets()
         self.check_metadata_writes(launches)
         inputs = self.inputs(launches)
-        for inp, record in zip(inputs, records):
+        values = facts.values or [{}] * len(records)
+        for inp, record, vals in zip(inputs, records, values):
             inp["params"].update(_record_values(table, record, facts.params))
+            inp["params"].update(vals)
             inp["grid"] = record["grid"]
-        roles = [{k: r[k] for k in ("name", "warps", "threads_per_issue", "body")}
-                 for r in facts.roles]  # fmt: skip
+        host = {n for n, d in self.descs.items() if d["kind"] != "bulk"}
+        roles = [{**{k: r[k] for k in ("name", "warps", "threads_per_issue")},
+                  "body": reroll(_innermost_first(r["body"], host))} for r in facts.roles]  # fmt: skip
         grid = [E.to_json(E.const(g, 32)) for g in records[0]["grid"]]
+        self.values = values
         return self.document("ptx", facts.target, grid, facts.barriers, roles, inputs)
 
+    def tensors(self) -> list:
+        return super().tensors() + [self._desc(n, d) for n, d in self.descs.items()]
 
-def _named_args(rec: dict, args: list) -> list:
-    """(leaf name, argument) of a launch's arguments in _flatten order: the launch passes
-    the jit function's parameters in order (host_patches records them positionally), each
-    a value per leaf of its compile-time parameter; constexpr parameters and a stream
-    take no host argument."""
+    def _desc(self, name: str, d: dict) -> dict:
+        """The KIR desc of a Facts descriptor, as Variant.tensors makes the legacy ones: a
+        bulk one spans its base (shape its extent, stride 1); a host one has its dims
+        innermost first (_innermost_first) and inherits its base's segments on the dim
+        that walks the segmented tensor dim in every launch (tma.segment_dims), none if no
+        dim does; the role is the base's note."""
+        note = self.notes.get("tensors", {}).get(d["base"], {})
+        box = d["box"][::-1]
+        if d["kind"] == "bulk":
+            shape = [E.to_json(self._extent(self.k.tensors[d["base"]]))]
+            strides, segments = [E.to_json(E.const(1, 64))], None
+        else:
+            shape, strides = d["shape"][::-1], d["strides"][::-1]
+            segments = self._desc_segments(d, note.get("segments"))
+        return {"name": name, "kind": "desc", "elem_bytes": d["elem_bytes"], "shape": shape,
+                "strides": strides, "box": box, "segments": segments,
+                "role": note.get("role", "input"), "metadata": False}  # fmt: skip
+
+    def _desc_segments(self, d: dict, seg):
+        if not seg or d["base"] is None:
+            return None
+        per = [([_json_value(x, v) for x in d["shape"]], [_json_value(x, v) for x in d["strides"]])
+               for v in self.values]  # fmt: skip
+        dims = _ptx("tma").segment_dims(per, [ds[d["base"]] for ds in self.dims])
+        js = [len(dims) - 1 - j for j, t in enumerate(dims) if t == seg["dim"]]
+        return {**seg, "dim": js[0]} if len(js) == 1 else None
+
+
+def _innermost_first(stmts: list, descs: set) -> list:
+    """The role body with the coordinates of every tma_load of the host descriptors
+    `descs` innermost first: the CuTe family's KIR desc dims, as the legacy CuTe frontend
+    (the CuTe layout's mode order) has them, so its parity footprints (rows: dim 0) are the
+    same; the core gives them outermost first (design §5.6, the TTGIR order)."""
     out = []
-    for p, a in zip(rec["params"], args):
+    for s in stmts:
+        s = {
+            **s,
+            **{
+                k: _innermost_first(s[k], descs)
+                for k in ("then", "else", "body")
+                if k in s
+            },
+        }
+        if s["op"] == "event" and s["ev"] == "tma_load" and s["desc"] in descs:
+            s["coords"] = s["coords"][::-1]
+        out.append(s)
+    return out
+
+
+def _json_value(e: dict, values: dict):
+    """The value of a KIR Expr that is a constant or a param of `values`, else None."""
+    return e["v"] if e["e"] == "const" else values.get(e.get("name"))
+
+
+def _jit_named(table: list, records: list, tensors: dict) -> list:
+    """param_table's names refined by the LaunchRecords' jit_params (host_patches.py
+    P11), when every record has the same list: a parameter passing a jit tensor leaf
+    through names its pointer (a .ptr parameter, or a struct's field at offset 0) by that
+    leaf whatever its address (one tensor under two jit names, a zero-length tensor); a
+    computed one (a descriptor, a view) keeps only the address candidates it is computed
+    from, named if exactly one remains in every record. Without jit_params (an older dump,
+    or naming failed) the address naming stays."""
+    jits = [r.get("jit_params") for r in records]
+    if jits[0] is None or any(j != jits[0] for j in jits):
+        return table
+    for k, (p, j) in enumerate(zip(table, jits[0])):
+        if "leaf" in j:
+            ptr = p if p["kind"] == "ptr" else p["fields"].get(0)
+            if (
+                j["leaf"] in tensors
+                and ptr is not None
+                and ptr.get("kind", "ptr") == "ptr"
+            ):
+                ptr["name"] = j["leaf"]
+            continue
+        src = set(j.get("from", ()))
+        for off, f in p["fields"].items():
+            got = {frozenset(c["tensor"] for c in rf.get("tensor") or ()
+                             if c["match"] == "exact" and c["tensor"] in src)
+                   for r in records for rf in r["params"][k]["fields"] if rf["off"] == off}  # fmt: skip
+            if (
+                f["kind"] == "ptr"
+                and len(got) == 1
+                and len(names := next(iter(got))) == 1
+            ):
+                f["name"] = next(iter(names))
+        if p["kind"] == "tensormap":
+            got = set()
+            for r in records:
+                cands = (r["params"][k].get("tensormap") or {}).get("base") or []
+                got.add(frozenset(c["tensor"] for c in cands
+                                  if c["match"] == cands[0]["match"] and c["tensor"] in src))  # fmt: skip
+            if len(got) == 1 and len(names := next(iter(got))) == 1:
+                p["base"], p["aliases"] = next(iter(names)), []
+    return table
+
+
+def _named_args(params: list, args: list) -> list:
+    """(leaf name, argument) of a launch's arguments in _flatten order: the launch passes
+    the jit function's parameters `params` (_launch_params) in order, each a value per
+    leaf of its compile-time parameter; constexpr parameters and an explicit stream take
+    no host argument."""
+    if len(params) != len(args):
+        raise Unsupported("cuda.launch_ex", "host", f"{len(args)} launch arguments for the parameters "
+                                                    f"{[p['name'] for p in params]}", kind="error")  # fmt: skip
+    out = []
+    for p, a in zip(params, args):
         values = _flatten([a])
         if p["constexpr"] or not values:
             continue
@@ -642,6 +763,102 @@ def _named_args(rec: dict, args: list) -> list:
         raise Unsupported("cuda.launch_ex", "host", f"{len(_flatten(args))} launch values for the "
                                                     f"arguments {[n for n, _ in out]}")  # fmt: skip
     return out
+
+
+def _launch_params(rec: dict, launches: list, records: list) -> list:
+    """The jit function's parameters (host_patches records the compile call's, a TVM-FFI
+    environment stream included) that the launches pass, in order: a launch passes no
+    value for the environment stream, wherever it sits among the parameters. The skipped
+    ones must agree with the LaunchRecords' jit_params: each kernel parameter that passes
+    a jit leaf through holds that leaf's launch value in every launch (a tensor's data
+    pointer, a scalar's bits; _passes_through). The last parameters if they agree (every
+    kernel of the M2 cases has its stream last; without jit_params nothing can be
+    checked), else the one choice of single-leaf parameters that does; none, or several,
+    is an error: shifted names bind annotations and metadata to the wrong tensors."""
+    params = rec["params"]
+    nargs = len(launches[0][1])
+    skippable = [
+        k for k, p in enumerate(params) if not p["constexpr"] and len(p["leaves"]) == 1
+    ]
+
+    def fits(skip: tuple) -> bool:
+        kept = [p for k, p in enumerate(params) if k not in skip]
+        return set(skip) <= set(skippable) and all(
+            len(args) == len(kept) and _passes_through(_named_args(kept, args), r)
+            for (_n, args), r in zip(launches, records)
+        )
+
+    trailing = tuple(range(nargs, len(params)))
+    good = [trailing] if fits(trailing) else [
+        c for c in itertools.combinations(skippable, max(0, len(params) - nargs)) if fits(c)]  # fmt: skip
+    if len(good) != 1:
+        why = "several choices" if good else "no choice"
+        raise Unsupported("cuda.launch_ex", "host", f"{nargs} launch arguments for {len(params)} parameters: {why} "
+                          "of the skipped ones agrees with the LaunchRecords' jit_params", kind="error")  # fmt: skip
+    return [p for k, p in enumerate(params) if k not in good[0]]
+
+
+def _passes_through(named: list, record: dict) -> bool:
+    """The launch values `named` (_named_args) agree with the record's jit_params: every
+    kernel parameter passing a jit leaf through has a launch value; where the record has
+    its bytes (a pointer, a struct's pointer field 0, a scalar), that leaf's value: a
+    non-empty tensor's data pointer, an integer's or float's bits."""
+    values = dict(named)
+    for rp, j in zip(record["params"], record.get("jit_params") or ()):
+        if "leaf" not in j or "part" in j:
+            continue
+        a = values.get(j["leaf"])
+        if a is None:
+            return False
+        if a["kind"] == "tensor":
+            ptr = rp if rp["kind"] == "ptr" else next(
+                (f for f in rp.get("fields") or () if f["off"] == 0 and f["kind"] == "ptr"), None)  # fmt: skip
+            got = (
+                None if ptr is None else ptr.get("value")
+            )  # None: the record has no bytes
+            empty = any(n == 0 for n in a["shape"])
+            if (
+                got is not None
+                and got != a["storage"][0] + a["byte_offset"]
+                and not empty
+            ):
+                return False
+        elif a["kind"] == "scalar" and rp["kind"] == "scalar" and "value" in rp:
+            if a["type"] == "float":
+                try:
+                    bits = int.from_bytes(
+                        struct.pack({4: "<f", 8: "<d"}[rp["size"]], a["value"]),
+                        "little",
+                    )
+                except (KeyError, OverflowError):
+                    return False
+            else:
+                bits = int(a["value"])
+            if (bits - rp["value"]) % (1 << 8 * rp["size"]):
+                return False
+    return True
+
+
+def _check_candidates(named: list, record: dict) -> None:
+    """The LaunchRecord's address candidates (pointer fields, descriptor bases), which
+    host_patches resolves against the launch's tensors under its own reading of the
+    arguments, must not give a name _named_args binds to another tensor (another
+    storage): that happens when host_patches named the arguments after a skipped stream
+    shifted, and the address naming would then bind computed parameters to the wrong
+    tensors. Other names (a tuple's positional leaves where the compile call passed a
+    namedtuple) name no argument, and no annotation reads them."""
+    tensors = {n: a for n, a in named if a["kind"] == "tensor"}
+    for p in record["params"]:
+        cands = [c for f in p.get("fields") or () for c in f.get("tensor") or ()]
+        cands += (p.get("tensormap") or {}).get("base") or []
+        for c in cands:
+            a = tensors.get(c["tensor"])
+            if a is not None and c["storage"] != [
+                a["storage"][0],
+                a["storage"][0] + a["storage"][1],
+            ]:
+                raise Unsupported("cuda.launch_ex", "host", f"the LaunchRecord resolves an address to "
+                                  f"{c['tensor']}, a name the launch's arguments give another tensor", kind="error")  # fmt: skip
 
 
 def _record_values(table: list, record: dict, widths: dict) -> dict:
@@ -687,8 +904,8 @@ def translate_ptx(case: dict, dump: dict, recs: list, launches: list, las: list)
         raise Unsupported("case", "work", str(e), kind="error") from e
     notes = v.notes.get("tensors", {})
     per = sorted({t["segments"]["per"] for t in notes.values() if t.get("segments")})
-    pol = T.policy("cute", src_root=dump["source"]["src"], params=table, **locs,
-                   tensors={n: {"elem_bytes": t["elem_bytes"]} for n, t in v.k.tensors.items()},
+    pol = T.policy("cute", src_root=dump["source"]["src"], params=table, **locs, ptxas=_ptxas(recs[0]),
+                   tensors={n: {"elem_bytes": t["elem_bytes"], **t["first"]} for n, t in v.k.tensors.items()},
                    max_iters=int(case.get("max_iters", 4096)),
                    work={"fields": list(work), "mode": "each", "per": per, "sites": sites})  # fmt: skip
     facts = T.translate(text, fn.name, records, pol)
@@ -697,6 +914,17 @@ def translate_ptx(case: dict, dump: dict, recs: list, launches: list, las: list)
         refusal = facts.refusals[0]
         raise Unsupported("PTX", where, refusal["msg"], kind=refusal["kind"])
     return v, v.assemble(facts, table, launches, records)
+
+
+def _ptxas(rec: dict) -> str | None:
+    """The version of the compiler that built a compile's cubin (its .note.nv.tkinfo: the
+    DSL's embedded PTX compiler), which gates the PTX frontend's TMA issuing rules
+    (frontend/ptx/tma.py ISSUE_PTXAS); None without a readable cubin."""
+    cubin = rec.get("ptx", {}).get("cubin")
+    try:
+        return _ptx("tma").tkinfo_version(Path(cubin).read_bytes()) if cubin else None
+    except OSError:
+        return None
 
 
 def ptx_writer(case: dict, dump: dict, recs: list, launches: list, las: list):
@@ -717,11 +945,11 @@ def ptx_writer(case: dict, dump: dict, recs: list, launches: list, las: list):
 
 
 def _p1_ptx(rec: dict) -> dict:
-    """The P1 entry of a variant translate_ptx translated: no P1 pass in M1, so a kernel
-    without tcgen05 has nothing for P1-1 to check (what the legacy pass finds), any other
-    is not checked."""
+    """The P1 entry of a variant translate_ptx translated: no P1 pass before M3, so a
+    kernel without tcgen05 has nothing for P1-1 to check (what the legacy pass finds), any
+    other is not checked."""
     if "tcgen05." in Path(rec["ptx"]["file"]).read_text():
-        return {"status": "refused", "error": "P1-1 is not in M1 of the PTX frontend"}
+        return {"status": "refused", "error": "P1-1 comes with M3 of the PTX frontend"}
     return {"status": "not_applicable",
             "error": "the kernel allocates and accesses no tensor memory"}  # fmt: skip
 
@@ -746,9 +974,13 @@ def _ptx_variant(case: dict, dump: dict, recs: list, launches: list, las: list):
     except (parse.PtxSyntaxError, KeyError) as e:
         raise Unsupported("PTX", Path(rec["ptx"]["file"]).name, f"{type(e).__name__}: {e}",
                           kind="error") from e  # fmt: skip
-    v = PtxVariant(case, dump, rec, launches[0][1])
+    launched = _launch_params(rec, launches, records)
+    for (_n, args), r in zip(launches, records):
+        _check_candidates(_named_args(launched, args), r)
+    v = PtxVariant(case, dump, rec, launched, launches[0][1])
     leaves = [x for p in rec["params"] if not p["constexpr"] for x in p["leaves"]]
-    return v, text, fn, records, T.param_table(records, "cute", fn, leaves)
+    table = _jit_named(T.param_table(records, "cute", fn, leaves), records, v.k.tensors)
+    return v, text, fn, records, table
 
 
 def _byte_span(a: dict):
@@ -913,6 +1145,204 @@ def _constant_part(e) -> int:
         f = e[4][2] if e[2] == "mul" else 1 << e[4][2]
         return _constant_part(e[3]) * f
     return 0
+
+
+# ------------------------------------------------------------------ rerolling
+#
+# LLVM fully unrolls the DSL's constexpr loops (cutlass.range_constexpr), so a CuTe
+# kernel's PTX repeats a block of statements once per iteration, its constants stepping
+# with the iteration (the row 16 k of a copy, ...), where the legacy translation kept the
+# MLIR's loop as a KIR `for`. reroll turns such repeats back into a `for` (decision D8:
+# per-kernel Lean bytes within 1.5x of the legacy translation's); the events, their order
+# and every value stay the same.
+
+_REROLL_MAX = 512  # the longest block tried, in statements
+_REROLL_TRIES = 8  # block lengths tried at a position: the next statements of its shape
+# In the compact JSON of a KIR fragment: an integer constant, and a name read ("name") or
+# defined by a let or a for ("var"); a JSON string value cannot hold either (its quotes
+# are escaped).
+_CONST = re.compile(r'\{"e":"const","w":(\d+),"v":(-?\d+)\}')
+_NAME = re.compile(r'"(name|var)":"([^"]*)"')
+
+
+def reroll(body: list) -> list:
+    """A role body with each run of K >= 2 consecutive blocks of p statements, equal but
+    for the names each block defines and for integer constants c_k = c_0 + k d (k: the
+    block's index), as `for u in [0, K): block_0` with c_0 + u d for each stepping
+    constant: inner statement lists first, then greedily from the start, at each position
+    the run that saves the most. A run stays unrolled if a statement after it reads a name
+    it defines, unless every block defines that same name and it is visible before the run
+    (the loop then leaves it as the last block did)."""
+    return _Reroll(body).stmts(body, frozenset())
+
+
+class _Reroll:
+    def __init__(self, body: list):
+        self.names = _defined(body, set())
+        self.count = 0
+        while f"u{self.count}" in self.names:
+            self.count += 1
+
+    def stmts(self, stmts: list, visible) -> list:
+        vis, done = set(visible), []
+        for s in stmts:
+            inner = vis | {s["var"]} if s["op"] == "for" else vis
+            done.append({**s, **{k: self.stmts(s[k], inner)
+                                 for k in ("then", "else", "body") if k in s}})  # fmt: skip
+            if s["op"] == "let":
+                vis.add(s["var"])
+        texts = [json.dumps(s, separators=(",", ":")) for s in done]
+        keys = [_NAME.sub(r'"\1":""', _CONST.sub("C", t)) for t in texts]
+        last = {}  # name -> index of the last statement reading it
+        for j, s in enumerate(done):
+            last.update(dict.fromkeys(_read(s, set()), j))
+        out, i, vis = [], 0, set(visible)
+        while i < len(done):
+            run = self.best(texts, keys, i, vis, last)
+            if run is None:
+                if done[i]["op"] == "let":
+                    vis.add(done[i]["var"])
+                out.append(done[i])
+                i += 1
+            else:
+                self.fresh()
+                out.append(run[1])
+                i += run[0]
+        return out
+
+    def best(self, texts: list, keys: list, i: int, vis: set, last: dict):
+        """(statements covered, `for`) of the run at i saving the most, or None."""
+        best, tries = None, 0
+        for p in range(1, min(_REROLL_MAX, (len(texts) - i) // 2) + 1):
+            if keys[i + p] != keys[i]:
+                continue
+            tries += 1
+            if tries > _REROLL_TRIES:
+                break
+            got = self.run(texts, keys, i, p, vis, last)
+            if got is not None and (best is None or got[0] > best[0]):
+                best = got
+        return None if best is None else best[1:]
+
+    def run(self, texts: list, keys: list, i: int, p: int, vis: set, last: dict):
+        """(bytes saved, statements covered, `for`) of the longest run of blocks of p
+        statements at i, or None."""
+        if keys[i + p : i + 2 * p] != keys[i : i + p]:
+            return None
+        text = "".join(texts[i : i + p])
+        form, defs, base = _canon(text, vis)
+        steps, blocks = None, [defs]
+        while i + (len(blocks) + 1) * p <= len(texts):
+            k, j = len(blocks), i + len(blocks) * p
+            if keys[j : j + p] != keys[i : i + p]:
+                break
+            f, d, vals = _canon("".join(texts[j : j + p]), vis)
+            if f != form:
+                break
+            if steps is None:
+                steps = [v - b for (_w, v), (_w2, b) in zip(vals, base)]
+                if any(st and w == 1 for st, (w, _b) in zip(steps, base)):
+                    break  # an i1 constant has no progression longer than 2
+            elif any(
+                v != b + k * st for (_w, v), (_w2, b), st in zip(vals, base, steps)
+            ):
+                break
+            blocks.append(d)
+        if steps is None or len(blocks) < 2:
+            return None
+        end = i + len(blocks) * p
+        for at, name in enumerate(defs):
+            names = {d[at] for d in blocks}
+            if any(last.get(n, -1) >= end for n in names) and (
+                len(names) > 1 or name not in vis
+            ):
+                return None
+        u = f"u{self.count}"  # stmts() takes the name if it uses this run (fresh)
+        body = _stepped_body(texts[i : i + p], u, steps)
+        loop = {"op": "for", "var": u, "lb": _c32(0), "ub": _c32(len(blocks)), "step": _c32(1),
+                "body": body, "loc": body[0].get("loc", "unknown")}  # fmt: skip
+        saved = len(blocks) * len(text) - len(json.dumps(loop, separators=(",", ":")))
+        return (saved, len(blocks) * p, loop) if saved > 0 else None
+
+    def fresh(self) -> None:
+        """Take the loop variable name u<count>, move count to the next free name."""
+        self.names.add(f"u{self.count}")
+        while f"u{self.count}" in self.names:
+            self.count += 1
+
+
+def _canon(text: str, visible: set):
+    """(form, defined names, [(width, value)] of the constants) of a block's JSON: the
+    names it defines numbered by first definition, constants abstracted. A name visible
+    before the block keeps its name (a variable the block reassigns: it may read the
+    value from before the block, so blocks match only if they reassign the same one)."""
+    defs = [m.group(2) for m in _NAME.finditer(text) if m.group(1) == "var"]
+    index: dict = {}
+    for n in defs:
+        if n not in visible:
+            index.setdefault(n, len(index))
+    text = _NAME.sub(lambda m: f'"{m.group(1)}":"#{index[m.group(2)]}"'
+                     if m.group(2) in index else m.group(0), text)  # fmt: skip
+    consts = [(int(w), int(v)) for w, v in _CONST.findall(text)]
+    return _CONST.sub(lambda m: "C" + m.group(1), text), defs, consts
+
+
+def _stepped_body(texts: list, u: str, steps: list) -> list:
+    """The statements `texts` (JSON) with their constants (in text order) c replaced by
+    c + u * d for their step d (kept when d is 0)."""
+    it = iter(steps)
+    joined = "[" + ",".join(texts) + "]"
+    return json.loads(_CONST.sub(lambda m: _step_text(m, u, next(it)), joined))
+
+
+def _step_text(m, u: str, d: int) -> str:
+    if not d:
+        return m.group(0)
+    w = int(m.group(1))
+    uw = {"e": "var", "w": 32, "name": u}
+    if w == 64:
+        uw = {"e": "ext", "w": 64, "signed": True, "a": uw}
+    step = {
+        "e": "bin",
+        "w": w,
+        "o": "mul",
+        "a": uw,
+        "b": {"e": "const", "w": w, "v": d},
+    }
+    return json.dumps({"e": "bin", "w": w, "o": "add", "a": json.loads(m.group(0)), "b": step},
+                      separators=(",", ":"))  # fmt: skip
+
+
+def _defined(x, out: set) -> set:
+    """Every name a KIR fragment reads or defines."""
+    if isinstance(x, dict):
+        if x.get("e") == "var":
+            out.add(x["name"])
+        if x.get("op") in ("let", "for"):
+            out.add(x["var"])
+        for v in x.values():
+            _defined(v, out)
+    elif isinstance(x, list):
+        for v in x:
+            _defined(v, out)
+    return out
+
+
+def _read(x, out: set) -> set:
+    """The names a KIR fragment reads."""
+    if isinstance(x, dict):
+        if x.get("e") == "var":
+            out.add(x["name"])
+        for v in x.values():
+            _read(v, out)
+    elif isinstance(x, list):
+        for v in x:
+            _read(v, out)
+    return out
+
+
+def _c32(v: int) -> dict:
+    return {"e": "const", "w": 32, "v": v}
 
 
 # ------------------------------------------------------------------ addr marking

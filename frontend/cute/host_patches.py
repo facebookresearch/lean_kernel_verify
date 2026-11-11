@@ -56,6 +56,17 @@ patches"); nothing else on the host path is changed:
      torch tensor a TVM-FFI function is called with, is made from a DLPack capsule marked
      kDLCUDA (P4 for TVM-FFI), so the generated wrapper takes them as device tensors (its
      device checks pass and it finds its environment stream).
+  P11 While cute.compile traces the jit function, BaseDSL.generate_execution_arguments is
+     observed, not changed: each block argument of the jit function is named by the
+     compile parameter and leaf of the argument the DSL made from it (_host_arguments).
+     After the trace, a copy of the initial MLIR goes through cute-remove-static-args, the
+     first pass of the DSL's pipeline: the operands each kernel launch keeps are the
+     kernel's parameters, each traced back to the jit arguments (_kernel_params). Every
+     LaunchRecord of the kernel gets that as "jit_params" (_name_params): a parameter that
+     passes a jit argument through is named by position, not by resolving its address
+     (which cannot tell one tensor passed under two jit names apart, nor see a zero-length
+     tensor, whose data pointer is 0), and a derived one (a TMA descriptor, a view) is
+     known to come from some jit arguments only.
 """
 
 import ctypes
@@ -75,6 +86,8 @@ from typing import Any
 import cutlass
 import torch
 from cutlass import Numeric
+from cutlass._mlir import ir as _mlir_ir, passmanager as _passmanager
+from cutlass.base_dsl.dsl import extract_mlir_values
 
 from ..ptx import launch as ptx_launch
 
@@ -101,6 +114,9 @@ PROCESS_PREFIXES = ("TVMFFI",)
 # Every compile's _HostRuntime, for the life of the process: its callbacks must outlive
 # the JIT engine, which may call them until it is collected.
 _RUNTIMES: list = []
+# The MLIR bindings (native, without stubs; stage.py).
+ir: Any = _mlir_ir
+passmanager: Any = _passmanager
 
 
 @dataclass
@@ -126,6 +142,7 @@ class _Captured(Exception):
         self.capture = PtxCapture()
         self.compiled = None  # the compiled function (the DSL's JIT executor)
         self.runtime: _HostRuntime | None = None
+        self.kernel_params: dict | str = {}  # _kernel_params (P11)
 
 
 @dataclass
@@ -702,21 +719,222 @@ def complete(record: dict, ptx: str, tensors: dict) -> dict:
     return record
 
 
-def _tensor_table(fn, torch_args) -> dict:
-    """The launch's named torch tensors (compile-parameter leaves) in the form
+def _tensor_table(params: list, torch_args) -> dict:
+    """The launch's named torch tensors (_launch_leaves) in the form
     frontend/ptx/launch.py resolve takes."""
     out = {}
-    for p, a in zip(_params(fn, torch_args), torch_args):
-        for name, t in _leaves(p["name"], a):
-            if isinstance(t, torch.Tensor):
-                s = t.untyped_storage()
-                out[name] = {
-                    "data_ptr": t.data_ptr(),
-                    "storage": [s.data_ptr(), s.data_ptr() + s.nbytes()],
-                    "elem_bytes": t.element_size(),
-                    "shape": list(t.shape),
-                    "strides": list(t.stride()),
-                }
+    for name, t in _launch_leaves(params, torch_args):
+        if isinstance(t, torch.Tensor):
+            s = t.untyped_storage()
+            out[name] = {
+                "data_ptr": t.data_ptr(),
+                "storage": [s.data_ptr(), s.data_ptr() + s.nbytes()],
+                "elem_bytes": t.element_size(),
+                "shape": list(t.shape),
+                "strides": list(t.stride()),
+            }
+    return out
+
+
+def _raw(value):
+    """The MLIR value of a DSL value: the DSL's value casters wrap the values of some types
+    (a memref's in a cute Tensor, which emits a cute.get_iter where it is made)."""
+    if hasattr(value, "_CAPIPtr"):
+        return value
+    (raw,) = extract_mlir_values(value)
+    return raw
+
+
+def _address(obj) -> int:
+    """The address of an MLIR value or operation, by which they are compared: the DSL's
+    value classes overload `==` (it builds IR)."""
+    capsule = obj._CAPIPtr
+    return _capsule_ptr(capsule, _capsule_name(capsule))
+
+
+def _host_arguments(fop, spec, ir_args: list, ir_kwargs: dict) -> dict | str:
+    """{"function": the jit function's name, "args": {block argument number: {"arg",
+    "leaf": k[, "part"]}}, "leaves": {arg: number of leaves}} of the jit function `fop`:
+    each block argument named by the parameter and the index of the leaf (_leaves) of the
+    argument the DSL made from it (`ir_args`, `ir_kwargs`, in the order of `spec`, a
+    FullArgSpec (DSL 4.4.2) or a Signature; "part" k if the leaf has several values).
+    Indices, not names: the DSL may make a tuple argument the NamedTuple its annotation
+    names, and leaves are named after the compile arguments (Compile.params). Reads the
+    DSL's argument objects, never the block's arguments (the value casters would emit IR
+    into the function). A string (why) if some block argument is no leaf's."""
+    names = list(spec.parameters) if isinstance(spec, inspect.Signature) else spec.args
+    block = fop.regions[0].blocks[0]
+    out, counts = {}, {}
+    for name, arg in [*zip(names, ir_args), *ir_kwargs.items()]:
+        if name == "self":
+            continue
+        leaves = _leaves(name, arg)
+        counts[name] = len(leaves)
+        for i, (_, value) in enumerate(leaves):
+            values = [ir.BlockArgument(v) for v in extract_mlir_values(value)]
+            for k, v in enumerate(values):
+                if v.owner != block:
+                    return f"{name} is not an argument of the jit function"
+                out[v.arg_number] = {"arg": name, "leaf": i} | (
+                    {"part": k} if len(values) > 1 else {}
+                )
+    if len(out) != len(block.arguments):
+        return f"{len(block.arguments) - len(out)} jit function arguments are no leaf's"
+    return {"function": fop.sym_name.value, "args": out, "leaves": counts}
+
+
+def _named(host: dict, params: list) -> dict | str:
+    """_host_arguments' block arguments with their leaf names: the compile's (`params`,
+    Compile.params), leaf by leaf; a string (why) if a parameter's leaves differ in
+    number."""
+    leaves = {p["name"]: p["leaves"] for p in params}
+    for name, n in host["leaves"].items():
+        if len(leaves.get(name, ())) != n:
+            return f"{name}: {len(leaves.get(name, ()))} leaves compiled, {n} traced"
+    return {
+        k: a | {"leaf": leaves[a["arg"]][a["leaf"]]} for k, a in host["args"].items()
+    }
+
+
+def _inner(op) -> list:
+    """The ops in an op's regions (one level)."""
+    return [n.operation for r in op.regions for b in r.blocks for n in b.operations]
+
+
+def _uses(op, seen: set) -> list | None:
+    """The values an op uses, those of the ops in its regions included; each op once
+    (`seen`, addresses). None if one of them loads: a value read from host memory may
+    come from any value stored there (the DSL's host functions have no loads: layout
+    algebra, arithmetic, scf, launches)."""
+    out, todo = [], [getattr(op, "operation", op)]  # an OpView or an Operation
+    while todo:
+        o = todo.pop()
+        if _address(o) in seen:
+            continue
+        seen.add(_address(o))
+        if o.name.rsplit(".", 1)[-1].startswith("load"):
+            return None
+        out += [_raw(v) for v in o.operands]
+        todo += _inner(o)
+    return out
+
+
+def _origin(value, entry, args: dict) -> dict:
+    """Where a kernel operand of the jit function (entry block `entry`, its arguments
+    `args`, _named) comes from: {"arg", "leaf"[, "part"]} if it is an argument
+    (passed through), else {"from": [leaves]}, the leaves of the arguments reachable
+    backwards through operands, where an op with regions (scf.if, scf.for) uses every
+    value used inside it and a region argument counts as its op; every leaf if the value
+    may come through memory (_uses). So no source is missed: a value computed in a region
+    can only gain sources."""
+
+    def argument(v):
+        owner = v.owner
+        if isinstance(owner, ir.Block) and owner == entry:
+            return args[ir.BlockArgument(v).arg_number]
+        return None
+
+    if (a := argument(value)) is not None:
+        return dict(a)
+    leaves, seen, seen_ops, todo = set(), set(), set(), [value]
+    while todo:
+        v = todo.pop()
+        if _address(v) in seen:
+            continue
+        seen.add(_address(v))
+        if (a := argument(v)) is not None:
+            leaves.add(a["leaf"])
+            continue
+        owner = v.owner
+        used = _uses(owner.owner if isinstance(owner, ir.Block) else owner, seen_ops)
+        if used is None:
+            return {"from": sorted({a["leaf"] for a in args.values()})}
+        todo += used
+    return {"from": sorted(leaves)}
+
+
+def _kernel_params(mlir: str, host: dict | str, params: list) -> dict | str:
+    """{PTX entry: per kernel parameter, in order, where the launch takes it from
+    (_origin)} for every kernel the jit function (`host`, _host_arguments, its leaves
+    named after `params`) launches, read from its initial MLIR text after
+    cute-remove-static-args, the first pass of the DSL's pipeline (stage.py), which drops
+    the operands of a static type (a static layout, a copy atom without dynamic state)
+    from kernels and launches: the operands left are the kernel's PTX parameters. Parsed
+    in a context of its own, like _compile_copy, so the IR the value casters emit goes
+    into the copy. A string (why) if the arguments are not all named or this fails."""
+    if isinstance(host, str):
+        return host
+    args = _named(host, params)
+    if isinstance(args, str):
+        return args
+    out: dict = {}
+    try:
+        with ir.Context(), ir.Location.unknown():
+            module = ir.Module.parse(mlir)
+            passmanager.PassManager.parse(
+                "builtin.module(cute-remove-static-args)"
+            ).run(module.operation)
+            (fn,) = [o for o in _inner(module.operation) if o.name == "func.func"
+                     and o.attributes["sym_name"].value == host["function"]]  # fmt: skip
+            entry, launches, todo = fn.regions[0].blocks[0], [], [fn]
+            while todo:
+                op = todo.pop()
+                todo += _inner(op)
+                launches += [op] if op.name == "cuda.launch_ex" else []
+            with ir.InsertionPoint.at_block_begin(entry):
+                for op in launches:
+                    callee = str(op.attributes["callee"])  # @kernels::@<PTX entry>
+                    kernel = callee.rsplit("::@", 1)[-1].strip('"')
+                    operands = [_raw(v) for v in op.operands][1:]  # after the config
+                    out[kernel] = ("launched twice" if kernel in out else
+                                   [_origin(v, entry, args) for v in operands])  # fmt: skip
+    except Exception as e:  # noqa: BLE001 - recorded, see _name_params
+        return f"naming the kernel parameters: {type(e).__name__}: {e}"
+    return out
+
+
+def _name_params(record: dict, traced: dict | str, pointers: dict) -> dict:
+    """A completed LaunchRecord with "jit_params" (P11): per parameter the jit argument
+    leaf it passes through or the leaves it is computed from (`traced`, PTX entry ->
+    _kernel_params), if that is exact: the kernel was traced, its launch operands map
+    onto its parameters, and every parameter passing a tensor through starts with that
+    tensor's data pointer (`pointers`, _data_pointers; 0 for a zero-length tensor).
+    Otherwise "jit_params" is None and "jit_params_error" says why."""
+    got = (traced if isinstance(traced, str) else
+           traced.get(record["entry"], f"kernel {record['entry']} was not traced"))  # fmt: skip
+    params = record["params"]
+    if isinstance(got, list) and len(got) != len(params):
+        got = f"{len(got)} kernel parameters traced, {len(params)} in the PTX"
+    for p, j in zip(params, got if isinstance(got, list) else []):
+        want = pointers.get(j.get("leaf")) if "part" not in j else None
+        pointer = int.from_bytes(bytes.fromhex(p["bytes"])[:8], "little")
+        if want is not None and pointer != want:
+            got = f"parameter {p['i']} does not start with the data pointer of {j['leaf']}"
+            break
+    if isinstance(got, list):
+        record["jit_params"] = got
+    else:
+        record["jit_params"], record["jit_params_error"] = None, got
+    return record
+
+
+def _data_pointers(params: list, torch_args) -> dict:
+    """{leaf: data pointer} of a launch's torch tensors (P11, _launch_leaves)."""
+    return {name: t.data_ptr() for name, t in _launch_leaves(params, torch_args)
+            if isinstance(t, torch.Tensor)}  # fmt: skip
+
+
+def _launch_leaves(params: list, torch_args) -> list:
+    """(leaf name, value) of a launch's arguments: each argument's leaves named after those
+    of its compile parameter, leaf by leaf (`params`, Compile.params but those the launch
+    passes no argument for: a TVM-FFI function takes no environment stream, wherever it
+    sits, so the arguments after one go to the parameters after it); an argument whose
+    leaves differ in number from its parameter's is left out."""
+    out = []
+    for p, a in zip(params, torch_args):
+        leaves = _leaves(p["name"], a)
+        if len(leaves) == len(p["leaves"]):
+            out += [(name, t) for name, (_, t) in zip(p["leaves"], leaves)]
     return out
 
 
@@ -855,6 +1073,27 @@ def _patch_host_runtime(patch, capturing: list) -> None:
     )
 
 
+def _patch_trace(patch, trace: dict) -> None:
+    """P11: while a jit function is traced, trace["host"] = its arguments
+    (_host_arguments). Observed only: a failure is recorded as the reason."""
+    from cutlass.base_dsl.dsl import BaseDSL
+
+    real_arguments = BaseDSL.generate_execution_arguments
+
+    def arguments(self, args, kwargs, fop, spec):
+        ir_args, ir_kwargs = real_arguments(self, args, kwargs, fop, spec)
+        if "host" not in trace and fop.operation.name == "func.func":
+            try:
+                trace["host"] = _host_arguments(fop, spec, ir_args, ir_kwargs)
+            except Exception as e:  # noqa: BLE001 - recorded, see _name_params
+                trace["host"] = (
+                    f"naming the jit function's arguments: {type(e).__name__}: {e}"
+                )
+        return ir_args, ir_kwargs
+
+    patch(BaseDSL, "generate_execution_arguments", arguments)
+
+
 def _capture_compile(dsl, real, args: tuple, kwargs: dict, stem: str, num_sms: int,
                      lineinfo_check: bool, capturing: list) -> _Captured:  # fmt: skip
     """P5 for one BaseDSL.compile_and_cache call (`real`, with `args` after self): the
@@ -923,9 +1162,9 @@ def _capture_compile(dsl, real, args: tuple, kwargs: dict, stem: str, num_sms: i
 
 
 def _run_host_code(captured: _Captured, call_args: tuple, call_kwargs: dict,
-                   tensors: dict) -> tuple:  # fmt: skip
+                   tensors: dict, pointers: dict) -> tuple:  # fmt: skip
     """P6: call a captured compile's function as the host did; (its LaunchRecords,
-    completed against `tensors`; why it failed or None)."""
+    completed against `tensors` and named (P11, `pointers`); why it failed or None)."""
     compiled, runtime, cap = captured.compiled, captured.runtime, captured.capture
     if compiled is None or runtime is None:
         return [], f"not compiled: {cap.error}"
@@ -941,7 +1180,12 @@ def _run_host_code(captured: _Captured, call_args: tuple, call_kwargs: dict,
     # the patches are gone: it must have none.
     if getattr(compiled, "jit_module", None) is not None:
         compiled.jit_module.cuda_library.clear()
-    records = [complete(r, cap.ptx or "", tensors) for r in runtime.launches]
+    records = [
+        _name_params(
+            complete(r, cap.ptx or "", tensors), captured.kernel_params, pointers
+        )
+        for r in runtime.launches
+    ]
     return records, "; ".join(runtime.errors) or None
 
 
@@ -963,6 +1207,8 @@ def installed(num_sms: int, lineinfo_check: bool = False):
     _patch_devices(patch, num_sms)
     capturing: list = []  # the _HostRuntime of the compile being captured
     _patch_host_runtime(patch, capturing)
+    trace: dict = {}  # of the compile being traced (P11)
+    _patch_trace(patch, trace)
     scratch = tempfile.mkdtemp(prefix="lkv_cute_ptx_")
     real_compile_and_cache = BaseDSL.compile_and_cache
 
@@ -976,6 +1222,7 @@ def installed(num_sms: int, lineinfo_check: bool = False):
     real_compile = cute.compile
 
     def compile_and_record(fn, *args, **kwargs):
+        trace.clear()
         try:
             real_compile(fn, *args, **kwargs)
         except Exception as e:  # noqa: BLE001 - the DSL wraps _Captured in its own errors
@@ -988,10 +1235,11 @@ def installed(num_sms: int, lineinfo_check: bool = False):
             raise RuntimeError(
                 "cute.compile returned without reaching compile_and_cache"
             )
+        positional = _positional(fn, args, kwargs, compile_call=True)
         c = Compile(
             len(rec.compiles),
             _qualname(fn),
-            _params(fn, _positional(fn, args, kwargs, compile_call=True)),
+            _params(fn, positional),
             _flags(fn),
             cause.mlir,
             cause.pipeline,
@@ -999,6 +1247,11 @@ def installed(num_sms: int, lineinfo_check: bool = False):
         )
         rec.compiles.append(c)
         captured = cause
+        captured.kernel_params = _kernel_params(
+            c.mlir, trace.get("host", "not traced"), c.params
+        )
+        launched = [p for p, a in zip(c.params, positional)
+                    if not getattr(a, "use_tvm_ffi_env_stream", False)]  # fmt: skip
 
         def launch(*call_args, **call_kwargs):
             positional = tuple(_positional(fn, call_args, call_kwargs))
@@ -1012,8 +1265,9 @@ def installed(num_sms: int, lineinfo_check: bool = False):
                     d["sources"] = src
                 la = Launch(c.index, args, hinted)
                 la.records, la.capture_error = _run_host_code(
-                    captured, call_args, call_kwargs, _tensor_table(fn, torch_args)
-                )
+                    captured, call_args, call_kwargs, _tensor_table(launched, torch_args),
+                    _data_pointers(launched, torch_args),
+                )  # fmt: skip
             rec.launches.append(la)
 
         return launch

@@ -185,8 +185,9 @@ it names in `elision_flags` the flags that select a mask-elided fast path.
 2. The op table: one Lean-facing meaning per IR op, written from the PTX ISA and
    the TLX/CuTe docs (`references/ir_ops.md`, `references/ir_ops_cute.md`),
    identical for every kernel. Its issuing-thread rows for CuTe TMA stores follow
-   the SASS that ptxas 13.0 emits, and those for TMA loads and reduces the
-   `elect.sync` the DSL emits (`ir_ops_cute.md`, "Issuing threads").
+   the waterfall loop ptxas emits (measured on hardware for the compilers the DSLs
+   embed), and those for TMA loads and reduces the `elect.sync` the DSL emits
+   (`ir_ops_cute.md`, "Issuing threads").
 3. `native_decide` (Lean compiler) for whole-trace verdicts.
 4. The phase ledger (`lean/KV/Spec/Ledger.lean`) for P0-2 and P0-4: its
    classification of waits (happens-before over the role traces, each role taken

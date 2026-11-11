@@ -14,7 +14,12 @@ frontend/cute/to_kir.py run produce KIR that frontend/kir.py accepts, with `ir` 
 legacy names (roles, barriers, tensors, params, inputs), every launch's params and grid,
 and the families' locations. Also the PTX write set the CuTe stale-data checks use for a
 refused variant (translate.writes; a call or a loaded pointer leaves it unknown), and
-the switch's values.
+the switch's values. CuTe assembly (frontend/cute/to_kir.py): reroll (decision D8: LLVM's
+unrolled blocks back into a `for`, the same trace; runs it must keep), the jit_params
+naming of pointers and descriptor bases, and the KIR desc tensors of Facts.descs (a
+segmented base's segments on the walking dim; a bulk descriptor's extent). TTGIR assembly
+(frontend/ttgir/to_kir.py build_ptx): host descriptor blocks (equal in every launch), the
+KIR desc tensors of Facts.descs (annotations, role) and the CLC tables.
 """
 
 import json
@@ -24,7 +29,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 if __package__ in (None, ""):
@@ -38,7 +43,7 @@ from ...frontend import kir  # noqa: E402
 from ...frontend.cute import to_kir as cute_to_kir  # noqa: E402
 from ...frontend.ptx import parse, translate as T  # noqa: E402
 from ...frontend.ttgir import to_kir as ttgir_to_kir  # noqa: E402
-from .fixtures.kernels import kernel, run  # noqa: E402
+from .fixtures.kernels import evaluate, kernel, run  # noqa: E402
 
 # The source tree (buck runs link trees: resolve() leads back to it, as tests/cute does).
 SKILL = Path(__file__).resolve().parents[2]
@@ -163,6 +168,245 @@ class CuteProbe(unittest.TestCase):
         )
 
 
+def c(v, w=32):
+    return {"e": "const", "w": w, "v": v}
+
+
+def var(n, w=32):
+    return {"e": "var", "w": w, "name": n}
+
+
+def add(a, b, w=32):
+    return {"e": "bin", "w": w, "o": "add", "a": a, "b": b}
+
+
+def let(n, e):
+    return {"op": "let", "var": n, "expr": e, "loc": "k.py:1"}
+
+
+def store(off):
+    """A gstore of x at element offset `off` (an i32 Expr)."""
+    e = {"e": "ext", "w": 64, "signed": True, "a": off}
+    return {"op": "event", "ev": "gstore", "tensor": "x", "mask": None, "loc": "k.py:2",
+            "offsets": {"t": "splat", "shape": [1], "w": 64, "a": e}}  # fmt: skip
+
+
+def thread_loop(t, body):
+    return {"op": "for", "var": t, "lb": c(0), "ub": c(4), "step": c(1), "body": body,
+            "loc": "k.py:2"}  # fmt: skip
+
+
+def trace(body, params=None):
+    facts = SimpleNamespace(roles=[{"body": body}])
+    return evaluate(facts, params or {"n": 3})
+
+
+class Reroll(unittest.TestCase):
+    """cute/to_kir.py reroll (decision D8): LLVM's unrolled blocks back into a `for`."""
+
+    def unrolled(self, offsets):
+        body = [let("v0", var("n"))]
+        for k, off in enumerate(offsets):
+            body += [let(f"a{k}", add(var("v0"), c(off))),
+                     thread_loop(f"t{k}", [store(add(var(f"t{k}"), var(f"a{k}")))])]  # fmt: skip
+        return body
+
+    def test_rolls_the_same_trace(self):
+        body = self.unrolled([0, 16, 32, 48])
+        got = cute_to_kir.reroll(body)
+        self.assertEqual([s["op"] for s in got], ["let", "for"])
+        self.assertEqual((got[1]["ub"]["v"], len(got[1]["body"])), (4, 2))
+        self.assertEqual(trace(got), trace(body))
+        self.assertEqual(len([e for e in trace(body) if e[0] == "gstore"]), 16)
+
+    def test_kept(self):
+        # Constants out of progression roll only the run that is one (0, 16; then 64).
+        body = self.unrolled([0, 16, 64])
+        got = cute_to_kir.reroll(body)
+        self.assertEqual([s["op"] for s in got], ["let", "for", "let", "for"])
+        self.assertEqual(trace(got), trace(body))
+        # A name the run defines read after it (here a1 by the last store).
+        body = self.unrolled([0, 16]) + [store(var("a1"))]
+        self.assertEqual(cute_to_kir.reroll(body), body)
+        # Blocks reassigning different outer variables (each reads its own first).
+        body = [let("c1", c(0)), let("c2", c(0))]
+        for k in (1, 2):
+            body += [let(f"w{k}", add(var(f"c{k}"), c(1))), let(f"c{k}", var(f"w{k}"))]
+        body += [store(add(var("c1"), var("c2")))]
+        self.assertEqual(cute_to_kir.reroll(body), body)
+
+    def test_reassigned_variable(self):
+        # Every block reassigns the same visible variable: rolled, it ends as the last
+        # block left it.
+        body = [let("s", c(0))]
+        for k in range(3):
+            body += [let("s", add(var("s"), c(4 * k + 1))), store(var("s"))]
+        body += [store(var("s"))]
+        got = cute_to_kir.reroll(body)
+        self.assertEqual([s["op"] for s in got], ["let", "for", "event"])
+        self.assertEqual(trace(got), trace(body))
+
+
+class JitNames(unittest.TestCase):
+    """cute/to_kir.py _jit_named: the LaunchRecords' jit_params (host_patches.py P11)."""
+
+    def table(self):
+        return [
+            {"ptx": "p0", "kind": "aggregate", "name": "param0", "size": 16,
+             "fields": {0: {"size": 8, "kind": "ptr", "name": "mA2"},
+                        8: {"size": 4, "kind": "scalar", "name": "param0_8"}}},
+            {"ptx": "p1", "kind": "tensormap", "name": "param1", "size": 128, "fields": {},
+             "base": "mB2", "aliases": ["mB", "mB2"]},
+            {"ptx": "p2", "kind": "aggregate", "name": "param2", "size": 16,
+             "fields": {0: {"size": 8, "kind": "ptr", "name": None}}},
+            {"ptx": "p3", "kind": "ptr", "name": "param3", "size": 8, "fields": {}},
+        ]  # fmt: skip
+
+    def records(self, jit):
+        two = [
+            {"tensor": n, "match": "exact", "storage": [1, 9]} for n in ("mA", "mA2")
+        ]
+        view = [
+            {"tensor": n, "match": "exact", "storage": [1, 9]} for n in ("mB", "mB2")
+        ]
+        return [{"params": [
+            {"fields": [{"off": 0, "tensor": two}, {"off": 8}]},
+            {"tensormap": {"base": view}, "fields": []},
+            {"fields": [{"off": 0, "tensor": view}]},
+            {"fields": []},
+        ], "jit_params": jit}]  # fmt: skip
+
+    def test_names(self):
+        jit = [{"arg": "mA", "leaf": "mA"}, {"from": ["mB"]}, {"from": ["mB2", "mQ"]},
+               {"arg": "e", "leaf": "e"}]  # fmt: skip
+        tensors = dict.fromkeys(["mA", "mA2", "mB", "mB2", "e"])
+        got = cute_to_kir._jit_named(self.table(), self.records(jit), tensors)
+        # passed through: by its leaf, whatever its address (an alias; e: zero-length,
+        # no address candidate); computed: the one candidate it is computed from
+        self.assertEqual(got[0]["fields"][0]["name"], "mA")
+        self.assertEqual((got[1]["base"], got[1]["aliases"]), ("mB", []))
+        self.assertEqual(got[2]["fields"][0]["name"], "mB2")
+        self.assertEqual(got[3]["name"], "e")
+        self.assertEqual(got[0]["fields"][8]["name"], "param0_8")
+        # No jit_params (an older dump, or the trace failed): the address naming stays.
+        for recs in (
+            self.records(None),
+            self.records(jit) + self.records(jit[:2] + jit[3:]),
+        ):
+            self.assertEqual(
+                cute_to_kir._jit_named(self.table(), recs, tensors), self.table()
+            )
+
+    def test_stream_not_last(self):
+        """A TVM-FFI launch passes nothing for its environment stream, wherever the jit
+        function has it (nvfp4_2cta_bwd: `..., stream, mCuSeqlensDKV, mGlobalScales`):
+        the arguments after it bind to the parameters after it, as the jit_params agree,
+        and a LaunchRecord candidate naming them shifted is an error."""
+
+        def tensor(ptr, dtype="int32"):
+            return {"kind": "tensor", "dtype": dtype, "shape": [3], "stride": [1],
+                    "storage": [ptr, 12], "byte_offset": 0}  # fmt: skip
+
+        names = ["n", "stream", "mCuSeqlensDKV", "mGlobalScales"]
+        rec = {
+            "params": [{"name": n, "constexpr": False, "leaves": [n]} for n in names]
+        }
+        args = [
+            {"kind": "scalar", "type": "int", "value": 7},
+            tensor(4096),
+            tensor(8192, "float32"),
+        ]
+        cands = [
+            [{"tensor": "mCuSeqlensDKV", "storage": [4096, 4108], "match": "exact"}],
+            [{"tensor": "mGlobalScales", "storage": [8192, 8204], "match": "exact"}],
+        ]
+        record = {"params": [{"kind": "scalar", "size": 4, "value": 7}] + [
+            {"kind": "aggregate", "fields": [{"off": 0, "kind": "ptr", "value": v, "tensor": c}]}
+            for v, c in zip((4096, 8192), cands)],
+            "jit_params": [{"arg": n, "leaf": n} for n in ("n", "mCuSeqlensDKV", "mGlobalScales")]}  # fmt: skip
+        launched = cute_to_kir._launch_params(rec, [("a", args)], [record])
+        self.assertEqual(
+            [p["name"] for p in launched], ["n", "mCuSeqlensDKV", "mGlobalScales"]
+        )
+        named = dict(cute_to_kir._named_args(launched, args))
+        self.assertEqual(named["mCuSeqlensDKV"]["storage"][0], 4096)
+        self.assertEqual(named["mGlobalScales"]["dtype"], "float32")
+        cute_to_kir._check_candidates(list(named.items()), record)
+        # host_patches naming the arguments shifted (the scales as mCuSeqlensDKV)
+        record["params"][2]["fields"][0]["tensor"] = [
+            {**cands[0][0], "storage": [8192, 8204]}
+        ]
+        with self.assertRaisesRegex(cute_to_kir.Unsupported, "another tensor"):
+            cute_to_kir._check_candidates(list(named.items()), record)
+        # no choice of the skipped parameter agrees with the records (n is 7, not 8)
+        record["params"][0]["value"] = 8
+        with self.assertRaisesRegex(cute_to_kir.Unsupported, "no choice"):
+            cute_to_kir._launch_params(rec, [("a", args)], [record])
+
+
+class Descriptors(unittest.TestCase):
+    """PtxVariant's KIR desc tensors from Facts.descs (tma.py), as Variant.tensors."""
+
+    def test_desc_tensors(self):
+        case = {
+            "name": "c",
+            "kernels": {
+                "K": {
+                    "tensors": {
+                        "mQ": {
+                            "segments": {"dim": 0, "offsets": "cu", "per": "batch"},
+                            "role": "input",
+                        }
+                    }
+                }
+            },
+        }
+        rec = {
+            "callable": "m.K",
+            "flags": [],
+            "params": [{"name": "mQ", "constexpr": False, "leaves": ["mQ"]}],
+        }
+        arg = {
+            "kind": "tensor",
+            "dtype": "bfloat16",
+            "shape": [256, 2, 64],
+            "stride": [128, 64, 1],
+        }
+        v = cute_to_kir.PtxVariant(
+            case, {"dsl": {"version": "4.4.2"}}, rec, rec["params"], [arg]
+        )
+        dims = [
+            var(f"tma0_mQ.{f}.{j}", 64) for f in ("shape", "stride") for j in range(3)
+        ]
+        v.descs = {
+            "tma0_mQ": {"kind": "host", "base": "mQ", "elem_bytes": 2, "box": [1, 128, 64],
+                        "shape": dims[:3], "strides": dims[3:], "uses": ["tma_load"]},
+            "bulk_mQ_64": {"kind": "bulk", "base": "mQ", "elem_bytes": 2, "box": [64],
+                           "shape": None, "strides": None, "uses": ["tma_load"]},
+        }  # fmt: skip
+        # the descriptor walks (heads, rows, cols): rows are the segmented tensor dim 0
+        v.values = [dict(zip([d["name"] for d in dims], [2, 256, 64, 64, 128, 1]))]
+        v.dims = [{"mQ": (arg["shape"], arg["stride"])}]
+        host, bulk = [t for t in v.tensors() if t["kind"] == "desc"]
+        # innermost first, as the legacy CuTe frontend: (cols, rows, heads)
+        self.assertEqual((host["name"], host["segments"]["dim"], host["role"], host["box"]),
+                         ("tma0_mQ", 1, "input", [64, 128, 1]))  # fmt: skip
+        self.assertEqual([x["name"] for x in host["shape"]],
+                         [f"tma0_mQ.shape.{j}" for j in (2, 1, 0)])  # fmt: skip
+        self.assertEqual((bulk["segments"], bulk["strides"], len(bulk["shape"])),
+                         (None, [c(1, 64)], 1))  # fmt: skip
+        v.values[0]["tma0_mQ.stride.1"] = 64  # no unique match: no segments
+        self.assertIsNone(v.tensors()[-2]["segments"])
+        v.values[0]["tma0_mQ.stride.1"] = (
+            128  # (heads, rows, cols) -> (rows, cols) desc
+        )
+        body = [{"op": "event", "ev": "tma_load", "desc": d, "coords": [c(0), c(1), c(2)][: len(b)],
+                 "bar": "mbar_0", "idx": c(0), "loc": "k.py:1"}
+                for d, b in (("tma0_mQ", [1, 128, 64]), ("bulk_mQ_64", [64]))]  # fmt: skip
+        got = cute_to_kir._innermost_first(body, {"tma0_mQ"})
+        self.assertEqual([[x["v"] for x in e["coords"]] for e in got], [[2, 1, 0], [0]])
+
+
 # A store through a parameter pointer, a generic store into shared memory and a store
 # through a pointer loaded from memory (any tensor).
 WRITES = kernel(
@@ -252,6 +496,46 @@ class NoValueAnchor(unittest.TestCase):
         (refusal,) = self.facts(["head"]).refusals
         self.assertEqual(refusal["kind"], "error")
         self.assertIn("no instruction holds its value", refusal["msg"])
+
+
+class TtgirAssembly(unittest.TestCase):
+    """frontend/ttgir/to_kir.py build_ptx's parts for TMA descriptors and CLC."""
+
+    def test_desc_blocks(self):
+        def launch(block):
+            return {"args": {"d": {"kind": "desc", "block_shape": block},
+                             "x": {"kind": "tensor"}}}  # fmt: skip
+
+        two = [({"name": "a"}, launch([128, 128])), ({"name": "b"}, launch([128, 128]))]
+        self.assertEqual(ttgir_to_kir._desc_blocks(two), {"d": [128, 128]})
+        two[1] = ({"name": "b"}, launch([128, 64]))
+        with self.assertRaisesRegex(
+            ttgir_to_kir.KirError, "input b: host descriptor d"
+        ):
+            ttgir_to_kir._desc_blocks(two)
+
+    def test_desc_tensors(self):
+        shape = [{"e": "var", "w": 32, "name": "d.shape.0"}]
+        stride = [{"e": "var", "w": 64, "name": "d.stride.0"}]
+        descs = {"d": {"kind": "host", "base": "d", "elem_bytes": 2, "box": [64],
+                       "shape": shape, "strides": stride, "uses": ["tma_store"]}}  # fmt: skip
+        seg = {"dim": 0, "offsets": "off", "per": "batch"}
+        (t,) = ttgir_to_kir._desc_tensors(descs, {"d": {"segments": seg}}, {"d"})
+        self.assertEqual(
+            (t["kind"], t["box"], t["shape"], t["strides"], t["role"], t["segments"]),
+            ("desc", [64], shape, stride, "output", seg),
+        )
+        descs["d"]["kind"] = "bulk"
+        with self.assertRaisesRegex(ttgir_to_kir.KirError, "not in the Triton family"):
+            ttgir_to_kir._desc_tensors(descs, {}, set())
+
+    def test_clc_tables(self):
+        tensors, params = [], []
+        ttgir_to_kir._add_clc(tensors, params)
+        self.assertEqual([(t["name"], t["kind"], t["metadata"]) for t in tensors],
+                         [("__clc_response", "desc", False), ("__clc_schedule", "global", True),
+                          ("__clc_launched", "global", True)])  # fmt: skip
+        self.assertEqual(len(params), 6)  # shape and stride of 2 + 1 dims
 
 
 class Switch(unittest.TestCase):

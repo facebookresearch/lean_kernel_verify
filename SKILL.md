@@ -200,8 +200,9 @@ A verdict depends on exactly these items (`design.md`, "Trust base"):
    that reach an address, a mask or a barrier operand (slice soundness). Issue
    counts follow what ptxas emits: a CuTe TMA store executed by a whole warp is
    one write per distinct (coordinates, shared-memory source) among its lanes
-   (ptxas 13.0 issues it in a waterfall loop); a TMA load or reduce is one per
-   warp (the DSL emits it behind `elect.sync`).
+   (ptxas issues it in a waterfall loop; DSL 4.4.2 compiles with its embedded
+   ptxas 12.9.83); a TMA load or reduce is one per executing lane, which is one
+   per warp because the DSL emits it behind `elect.sync`.
 3. **`native_decide` (T1)**: the Lean compiler and the native `libKV.so`.
 4. **The ledger algorithm** for P0-2 and P0-4, argued sound in Ledger.lean but
    not proved: a PASS there means "the ledger found no violation".

@@ -40,7 +40,10 @@ Writes <out>/<spec>.ttgir and <out>/<spec>.ptx per specialization of the case's 
 kernel's tensordesc_meta, global scratch and profile scratch sizes and the ptxas that
 assembled it, and per launch of the case's kernel a LaunchRecord (`launch`,
 capture.launch_record): grid, block, cluster and dynamic shared memory as launched and
-the device parameters, checked against the PTX's `.entry`. The PTX keeps the source paths
+the device parameters, checked against the PTX's `.entry`, and the full version
+(V-string, e.g. 13.3.33) `ptxas --version` prints (`ptxas`; the spec's ptxas `version`
+is Triton's release, 13.3), which gates the PTX frontend's TMA issuing rules
+(frontend/ptx/tma.py ISSUE_PTXAS). The PTX keeps the source paths
 (TRITON_PRESERVE_PTX_SOURCE_PATHS, a setting of the dump like TRITON_CACHE_DIR).
 """
 
@@ -49,7 +52,9 @@ import atexit
 import hashlib
 import importlib
 import json
+import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -187,6 +192,7 @@ def _run(case: dict, out: Path, wanted: set | None, target: str) -> dict:
     host_env.drop(pinned, libtriton.get_cache_invalidating_env_vars())
     mode = gpu_free.install(case["num_sms"], target)
     module, entry = load_entry(case, mode)
+    ptxas_v = ptxas_version(get_ptxas(int(gpu_free.TARGETS[target].arch)).path)
 
     specs: dict = {}  # key -> first launch of the case's kernel with that specialization
     kernels: dict = {}  # key -> compiled kernel, for every launched specialization
@@ -234,7 +240,10 @@ def _run(case: dict, out: Path, wanted: set | None, target: str) -> dict:
                         "config": launch.config,
                         "args": launch.args,
                         "stale": stale,
-                        "launch": capture.launch_record(launch, kernels[key]),
+                        "launch": {
+                            **capture.launch_record(launch, kernels[key]),
+                            "ptxas": ptxas_v,
+                        },
                     }
                 )
             writes.append(written_storages(launch, write_sets[key]))
@@ -330,6 +339,19 @@ def _run(case: dict, out: Path, wanted: set | None, target: str) -> dict:
         file=sys.stderr,
     )
     return dump
+
+
+def ptxas_version(path: str) -> str | None:
+    """The full version `ptxas --version` prints ("V13.3.33" -> "13.3.33"), None if it
+    cannot be read."""
+    try:
+        out = subprocess.run(
+            [path, "--version"], capture_output=True, text=True, check=True
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.search(r"\bV(\d+(?:\.\d+)+)", out)
+    return m.group(1) if m else None
 
 
 def written_storages(launch, written: set | None) -> dict:

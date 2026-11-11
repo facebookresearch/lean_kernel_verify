@@ -3,14 +3,16 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""The PTX capture of the CuTe dump (host_patches.py P5/P6/P9/P10) on the CPU.
+"""The PTX capture of the CuTe dump (host_patches.py P5/P6/P9/P10/P11) on the CPU.
 
 The e2e probe kernel (tests/e2e/cases/probe_cute.json) and a small TMA kernel compiled
 with and without TVM-FFI run through dump.run: every compile keeps the initial MLIR the
 variant digest is taken from (the PTX capture must not change it) and gets its PTX and
 cubin, and every launch gets the LaunchRecord its compiled host code makes, with the
-parameter bytes it built, the CUtensorMap decoded and addresses resolved to the named
-tensors. Needs the CuTe DSL (no GPU): buck target :test_ptx_capture.
+parameter bytes it built, the CUtensorMap decoded, addresses resolved to the named
+tensors and the parameters named by position from the trace ("jit_params"), also where
+addresses cannot tell (a zero-length tensor; one tensor passed under two jit names).
+Needs the CuTe DSL (no GPU): buck target :test_ptx_capture.
 """
 
 import hashlib
@@ -41,7 +43,9 @@ SKILL = Path(__file__).resolve().parents[2]
 DSL = importlib.metadata.version("nvidia-cutlass-dsl")  # this test binary's
 
 # A TMA descriptor over a column view of a bf16 matrix (its address is 32 bytes into the
-# storage) and a tensor the kernel updates; written to a temporary source directory.
+# storage) and a tensor the kernel updates; mA2 and mB2 are the same two tensors under
+# other jit names (the descriptor is made from mA2). Written to a temporary source
+# directory.
 TMA_KERNELS = """
 import cutlass
 import cutlass.cute as cute
@@ -51,36 +55,43 @@ from cutlass.cute.runtime import from_dlpack
 
 
 @cute.kernel
-def touch(atom: cute.CopyAtom, gA: cute.Tensor, mB: cute.Tensor, n: cutlass.Int32):
+def touch(
+    atom: cute.CopyAtom, gA: cute.Tensor, mB: cute.Tensor, n: cutlass.Int32, mB2: cute.Tensor
+):
     tidx, _, _ = cute.arch.thread_idx()
     cpasync.prefetch_descriptor(atom)
     if tidx < n:
-        mB[tidx] = mB[tidx] + 1.0
+        mB[tidx] = mB2[tidx] + 1.0
 
 
 @cute.jit
-def host(mA: cute.Tensor, mB: cute.Tensor, n: cutlass.Int32):
+def host(
+    mA: cute.Tensor, mB: cute.Tensor, n: cutlass.Int32, mA2: cute.Tensor, mB2: cute.Tensor
+):
     smem = cute.make_layout((64, 32), stride=(32, 1))
     atom, gA = cpasync.make_tiled_tma_atom(
-        cpasync.CopyBulkTensorTileG2SOp(), mA, smem, (64, 32)
+        cpasync.CopyBulkTensorTileG2SOp(), mA2, smem, (64, 32)
     )
-    touch(atom, gA, mB, n).launch(
+    touch(atom, gA, mB, n, mB2).launch(
         grid=(3, 1, 1), block=(128, 1, 1), cluster=(1, 1, 1), smem=1024
     )
 
 
 def run(a, b, n, tvm_ffi):
-    ma = from_dlpack(a, assumed_align=16, enable_tvm_ffi=tvm_ffi)
-    mb = from_dlpack(b, assumed_align=16, enable_tvm_ffi=tvm_ffi)
+    ma, mb, ma2, mb2 = (
+        from_dlpack(t, assumed_align=16, enable_tvm_ffi=tvm_ffi) for t in (a, b, a, b)
+    )
     options = {"options": "--enable-tvm-ffi"} if tvm_ffi else {}
     compiled = cute.compile(
         host,
         ma.mark_layout_dynamic(leading_dim=1),
         mb.mark_layout_dynamic(leading_dim=0),
         n,
+        ma2.mark_layout_dynamic(leading_dim=1),
+        mb2.mark_layout_dynamic(leading_dim=0),
         **options,
     )
-    compiled(a, b, n)  # torch tensors, as TVM-FFI callers pass them
+    compiled(a, b, n, a, b)  # torch tensors, as TVM-FFI callers pass them
 
 
 def args(inp):
@@ -167,6 +178,11 @@ class PtxCaptureTest(unittest.TestCase):
                     [{"tensor": "m", "storage": [arg["storage"][0], arg["storage"][0] + 4 * n],
                       "elem_off": 0, "match": "exact"}],
                 )  # fmt: skip
+            else:  # an empty tensor's data pointer is 0: no address resolves to it
+                self.assertNotIn("tensor", ptr)
+            # By position the parameter is m, the empty tensor too.
+            self.assertEqual(r["jit_params"], [{"arg": "m", "leaf": "m"}])
+            self.assertNotIn("jit_params_error", r)
 
     def test_tma_descriptor_with_and_without_tvm_ffi(self):
         src = Path(tempfile.mkdtemp(prefix="lkv_ptx_capture_src_"))
@@ -194,10 +210,10 @@ class PtxCaptureTest(unittest.TestCase):
                 ([3, 1, 1], [128, 1, 1], [1, 1, 1], 1024),
             )
             self.assert_static_smem(r, recorded["compiles"][launch["compile"]])
-            tmap, coords, b, n = r["params"]
+            tmap, coords, b, n, b2 = r["params"]
             self.assertEqual(
                 [p["kind"] for p in r["params"]],
-                ["tensormap", "aggregate", "aggregate", "scalar"],
+                ["tensormap", "aggregate", "aggregate", "scalar", "aggregate"],
             )
             t = tmap["tensormap"]
             self.assertEqual(
@@ -210,19 +226,51 @@ class PtxCaptureTest(unittest.TestCase):
             mA, mB = launch["args"][0], launch["args"][1]
             self.assertEqual(t["address"], mA["storage"][0] + mA["byte_offset"])
             self.assertEqual(mA["byte_offset"], 32)
+            # Addresses cannot tell mA from mA2, nor mB from mB2 ...
             self.assertEqual(
                 [(x["tensor"], x["elem_off"], x["match"]) for x in t["base"]],
-                [("mA", 0, "exact")],
+                [("mA", 0, "exact"), ("mA2", 0, "exact")],
             )
-            self.assertEqual(
-                [
-                    (f["off"], [x["tensor"] for x in f.get("tensor", [])])
-                    for f in b["fields"]
-                ],
-                [(0, ["mB"])],
-            )
-            self.assertEqual(b["fields"][0]["value"], mB["storage"][0])
+            for p in (b, b2):
+                self.assertEqual(
+                    [
+                        (f["off"], [x["tensor"] for x in f.get("tensor", [])])
+                        for f in p["fields"]
+                    ],
+                    [(0, ["mB", "mB2"])],
+                )
+                self.assertEqual(p["fields"][0]["value"], mB["storage"][0])
             self.assertEqual((n["type"], n["value"]), ("u32", 7))
+            # ... the trace does: mB, n and mB2 are passed through, the descriptor and
+            # the coordinate tensor are made from mA2.
+            self.assertEqual(
+                r["jit_params"],
+                [{"from": ["mA2"]}, {"from": ["mA2"]}, {"arg": "mB", "leaf": "mB"},
+                 {"arg": "n", "leaf": "n"}, {"arg": "mB2", "leaf": "mB2"}],
+            )  # fmt: skip
+
+    def test_unexact_parameter_names_are_refused(self):
+        # (Runs after the dumps above: test methods run in name order.)
+        from ...frontend.cute import host_patches  # noqa: PLC0415
+
+        m = {"arg": "m", "leaf": "m"}
+
+        def named(traced: dict, pointer: int) -> dict:
+            record = {
+                "entry": "k",
+                "params": [{"i": 0, "bytes": pointer.to_bytes(8, "little").hex()}],
+            }
+            return host_patches._name_params(record, traced, {"m": 16})
+
+        self.assertEqual(named({"k": [m]}, 16)["jit_params"], [m])
+        for traced, pointer, why in (
+            ({}, 16, "kernel k was not traced"),
+            ({"k": "the reason"}, 16, "the reason"),
+            ({"k": []}, 16, "0 kernel parameters traced, 1 in the PTX"),
+            ({"k": [m]}, 32, "parameter 0 does not start with the data pointer of m"),
+        ):
+            r = named(traced, pointer)
+            self.assertEqual((r["jit_params"], r["jit_params_error"]), (None, why))
 
     def test_unmodeled_runtime_functions_stop_the_engine(self):
         # (Runs after the dumps above: test methods run in name order.)

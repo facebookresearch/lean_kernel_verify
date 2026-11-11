@@ -10,8 +10,9 @@ plus the exact expansions of PTX integer instructions into KIR nodes (the end of
 file: mul.hi/mul.wide, bfe, bfi, prmt, lop3, popc, clz, brev, shf, cvt widths), known
 trailing zeros (tz), exact division by a constant (div_exact), the nodes a `let` must
 not hoist out of a `select` arm (unsafe), and a few folds that keep thread offsets
-affine (`(t/32)*32 + t%32 = t`, masks and ors that cannot change a value). Every fold is
-an identity of BitVec arithmetic: none changes a value.
+affine (`(t/32)*32 + t%32 = t`, masks and ors that cannot change a value) and predicates
+small (`x != 0` for an x with one possible one bit is that bit: LLVM's packed predicate
+masks). Every fold is an identity of BitVec arithmetic: none changes a value.
 
 Expressions are interned tuples: structurally equal expressions are the same object, so
 equality and hashing are O(1) and memo tables are cheap.
@@ -246,6 +247,12 @@ def _fold_ptx(op: str, w: int, a, b):
             iy = interval(y)
             if iy and iy[0] >= 0 and iy[1] < (1 << min(tz(x), w - 1)):
                 return bin("add", x, y)  # disjoint bits: or is add
+            if is_const(y) and x[0] == "bin" and x[2] == "add" and is_const(x[4]):
+                # x = z + k, k below z's trailing zeros: x's low bits are k's
+                top = 1 << min(tz(x[3]), w - 1)
+                k, c = _unsigned(x[4][2], w), _unsigned(y[2], w)
+                if k < top and c < top and not k & c:
+                    return bin("add", x, y)
     if op == "add":
         for x, y in ((a, b), (b, a)):
             # (t udiv c) * c + t urem c = t, for a positive constant c
@@ -273,6 +280,8 @@ def tz(e, facts: dict | None = None) -> int:
         return min(tz(e[2], facts), w)
     if k == "select":
         return min(tz(e[3], facts), tz(e[4], facts))
+    if k == "table":  # one of its entries
+        return min(tz(x, facts) for x in e[3])
     if k != "bin":
         return 0
     op, x, y = e[2], e[3], e[4]
@@ -454,7 +463,85 @@ def cmp(op: str, a, b):
     if w == 1 and op in ("eq", "ne") and is_const(b):
         # i1 == c and i1 != c are the operand itself or its negation.
         return a if (op == "eq") == (b[2] == 1) else not1(a)
+    if op in ("eq", "ne") and is_const(b, 0):
+        nz = _nonzero_bit(a)
+        if nz is not None:
+            return nz if op == "ne" else not1(nz)
     return _mk("cmp", op, a, b)
+
+
+# Known-one bits: LLVM packs predicates into an i16 mask (selp of -1/1, shl, and, disjoint
+# adds) and tests one bit of it per predicated load; the test is that predicate.
+_ONES: dict = {}
+_BITS: dict = {}
+
+
+def _ones(e) -> int:
+    """The bits of e that may be 1 (an unsigned mask of its width)."""
+    r = _ONES.get(e)
+    if r is None:
+        w, k = width(e), e[0]
+        full = (1 << w) - 1
+        r = full
+        if k == "const":
+            r = _unsigned(e[2], w)
+        elif k == "select":
+            r = _ones(e[3]) | _ones(e[4])
+        elif k == "ext" and not e[2]:
+            r = _ones(e[3])
+        elif k == "trunc":
+            r = _ones(e[2]) & full
+        elif k == "bin":
+            op, x, y = e[2], e[3], e[4]
+            ox, oy = _ones(x), _ones(y)
+            if op == "and":
+                r = ox & oy
+            elif op in ("or", "xor") or op == "add" and not ox & oy:
+                r = ox | oy  # disjoint bits: add is or
+            elif op in ("shl", "lshr") and is_const(y):
+                s = _unsigned(y[2], w)
+                r = (ox << s) & full if op == "shl" else ox >> s
+        _ONES[e] = r
+    return r
+
+
+def _bit(e, k: int):
+    """Bit k of e as an i1 expression through bit operations (_ones' nodes), or None."""
+    r = _BITS.get((e, k), _BITS)
+    if r is not _BITS:
+        return r
+    r, kind = None, e[0]
+    if not (_ones(e) >> k) & 1:
+        r = const(0, 1)
+    elif kind == "const":
+        r = const(1, 1)
+    elif kind == "cmp":
+        r = e
+    elif kind == "select":
+        x, y = _bit(e[3], k), _bit(e[4], k)
+        r = None if x is None or y is None else select(e[2], x, y)
+    elif kind == "ext" and not e[2]:
+        r = _bit(e[3], k)
+    elif kind == "trunc":
+        r = _bit(e[2], k)
+    elif kind == "bin" and e[2] in ("shl", "lshr") and is_const(e[4]):
+        s = _unsigned(e[4][2], e[1])
+        r = _bit(e[3], k - s if e[2] == "shl" else k + s)
+    elif kind == "bin" and e[2] in ("and", "or", "xor", "add"):
+        x, y = _bit(e[3], k), _bit(e[4], k)  # add: disjoint bits (_ones), an or
+        if x is not None and y is not None:
+            r = bin({"add": "or"}.get(e[2], e[2]), x, y)
+    _BITS[(e, k)] = r
+    return r
+
+
+def _nonzero_bit(e):
+    """e != 0 as an i1 expression when at most one bit of e may be 1 and _bit derives it,
+    else None."""
+    o = _ones(e)
+    if o & (o - 1):
+        return None
+    return const(0, 1) if o == 0 else _bit(e, o.bit_length() - 1)
 
 
 def select(c, a, b):
@@ -791,17 +878,38 @@ def to_json(e, names: dict | None = None, defining: str | None = None) -> dict:
         elif k == "load":
             r = {"e": "load", "w": x[1], "tensor": x[2], "index": [go(x[3][0])]}
         elif k == "table":
-            key, entries = x[2], x[3]
-            r = go(entries[-1])
-            for i in range(len(entries) - 2, -1, -1):
-                c = go(cmp("eq", key, const(i, width(key))))
-                r = {"e": "select", "w": x[1], "c": c, "a": go(entries[i]), "b": r}
+            r = go(_table_select(x[2], x[3]))
         else:
             raise ExprError(f"unknown expression kind {k}")
         memo[x] = r
         return r
 
     return go(e)
+
+
+def _table_select(key, entries: tuple):
+    """entries[key] (key in [0, len(entries)), a lane or thread index) as selects over
+    the distinct entries, the most frequent one the default: each other entry on the keys
+    holding it, `(key urem p) == r` when they are every p-th from r, else `key == i` for
+    each, or'd (a lane table of one value on every fourth lane is one select, not 31)."""
+    n, w = len(entries), width(key)
+    keys: dict = {}
+    for i, x in enumerate(entries):
+        keys.setdefault(x, []).append(i)
+    default = max(keys, key=lambda x: (len(keys[x]), keys[x][-1]))
+    r = default
+    for x, idx in reversed(list(keys.items())):
+        if x is default:
+            continue
+        p = idx[1] - idx[0] if len(idx) > 1 else n
+        if p < n and n % p == 0 and idx == list(range(idx[0], n, p)):
+            c = cmp("eq", bin("urem", key, const(p, w)), const(idx[0], w))
+        else:
+            c = cmp("eq", key, const(idx[0], w))
+            for i in idx[1:]:
+                c = bin("or", c, cmp("eq", key, const(i, w)))
+        r = select(c, x, r)
+    return r
 
 
 # ------------------------------------------------------- PTX integer instructions

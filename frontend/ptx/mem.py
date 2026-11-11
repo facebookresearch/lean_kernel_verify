@@ -18,8 +18,13 @@ address of a kernel tensor (its data pointer plus the record's element offset), 
 `%s:<symbol>` the shared-window address of a `.shared` variable. A pointer parameter (or
 a pointer field of a struct parameter, named by the adapter) loads as its tensor's base;
 `peel` splits an address into (base, byte offset) exactly, through adds, subtracts, a
-select between two offsets of one base and, for shared addresses, a truncation to 32
-bits. An address that is no such sum is refused, never guessed (design §5.5).
+select between two offsets of one base, a per-thread table of offsets of one base and,
+for shared addresses, a truncation to 32 bits. A global access through a select between
+two bases takes the arm its condition picks in the role; a condition uniform in each warp
+but not in the role splits the role (CuTe; _pick_bases). An address that is no such sum
+is refused, never guessed (design §5.5). tma.py adds
+`%d:<param>`, a descriptor parameter's address, and `%x:<param>`, Triton's scratch
+pointer: only TMA instructions may use them (any other global access is refused).
 
 Global accesses (ld/st.global, generic ld/st whose address peels to a tensor, atom/red,
 cp.async) are events of the issuing threads on the tensor (interp.Translator.mem_event):
@@ -44,8 +49,13 @@ every thread of the role (else the role is split by warps, or refused). Each eve
 for its array (Translator.barrier_event, BarrierUse). The arrays are runs of 8-byte slots
 initialized with one count, in one guarding region of the role tree, at one .loc chain,
 by one role; under the CuTe policy a run is split further by the slots its dynamic uses
-may take (frontend/cute/to_kir.py _barrier_runs / _split_arrays). A use belongs to the
-array holding the constant part of its offset; its index is (offset - start) / 8, exact
+may take (frontend/cute/to_kir.py _barrier_runs / _split_arrays; the ranges of stage
+slots: sync.use_ranges), except between slots only constant offsets name and the same
+roles use with the same events: the stages of one pipeline whose index LLVM folded in
+unrolled copies, kept together as the DSL code's dynamic index keeps them for the CuTe
+frontend (one array: P0-2 makes a role that waits on one stage a static waiter of every
+stage). A use belongs to the array holding the constant of its offset's
+top-level sum (sync.top_const); its index is (offset - start) / 8, exact
 by structure or known trailing zeros (a loop-carried offset slot keeps its constant part
 outside, design §5.3 item 5), else it is refused: an if-chain over candidate arrays would
 make unreachable waits static waiters for P0-2. Names: `mbar_<start>` (CuTe), or the
@@ -58,18 +68,12 @@ import math
 import re
 from pathlib import Path
 
-from . import expr as E, ops
+from . import expr as E, ops, sync, tma
 from .interp import Data, Translator, Unsupported
 
-# Mnemonics of global loads and stores (a generic one by its address); op-table event
-# rows outside the M1 kernel set are refused as gaps (_NOT_IN_M1).
+# Mnemonics of global loads and stores (a generic one by its address).
 _GLOBAL_LD = ("ld.global", "ld")
 _GLOBAL_ST = ("st.global", "st")
-_NOT_IN_M1 = (
-    "cp.async.bulk", "cp.reduce", "tcgen05", "clusterlaunchcontrol", "tensormap",
-    "barrier.cluster", "mbarrier.complete_tx", "mbarrier.arrive.shared::cluster",
-    "mbarrier.arrive.expect_tx.shared::cluster",
-)  # fmt: skip
 
 
 class Memory:
@@ -85,11 +89,16 @@ class Memory:
             policy.get("shared_symbols", ())
         )
         self.loads: dict = {}  # id(ld.global) -> (tensor, element index), for anchors
+        self.tma = tma.Tma(
+            self, policy.get("records") or []
+        )  # tma.py: TMA, bulk copies
 
     # ------------------------------------------------------------- addresses
     def symbol(self, tr: Translator, name: str, w: int):
         if name in self.shared:
             return E.var(f"%s:{name}", w)
+        if self.params.get(name, {}).get("kind") == "tensormap":  # tma.py: a descriptor
+            return self.tma.symbol(name, w)
         return Data(f"the address of {name} (no shared-memory or tensor provenance)")
 
     def address(self, tr: Translator, op):
@@ -105,8 +114,11 @@ class Memory:
         return E.bin("add", v, E.const(op[2], E.width(v))) if op[2] else v
 
     def split_offset(self, a):
-        """(c, rest): a == c + rest, c the constant part of a's linear form."""
-        c, _terms = _linear(a)
+        """(c, rest): a == c + rest, c the constant of a's top-level sum (sync.py: the
+        mbarrier array of `C + (index << 3)`, as LLVM writes array accesses; a constant
+        inside the scaled index, as the -1 of the srem idiom of `(n - 1) % 2`, is the
+        index's, not the array's)."""
+        c = sync.top_const(a)
         return c, E.bin("sub", a, E.const(c, E.width(a)))
 
     def first_instr(self, block: str):
@@ -144,12 +156,46 @@ class Memory:
             return E.bin("add", p[0], E.const(c, E.width(p[0])))
         return p[0]
 
+    @staticmethod
+    def thread_part(off):
+        """The sum of the thread-varying terms of off's linear form (_linear), or None:
+        kept outside a loop-carried slot, it leaves the slot uniform where a trip adds
+        uniform terms only (LSR's per-thread pointers: base + 4 * row, + 512 per
+        trip)."""
+        _c, terms = _linear(off)
+        tv = [(k, t) for k, t in terms if E.thread_varying(t)]
+        return _sum(0, tv, E.width(off)) if tv else None
+
+    @staticmethod
+    def minus(e, part):
+        """e - part with the linear terms they share cancelled (exact in wrapping
+        arithmetic, as _linear)."""
+        ce, te = _linear(e)
+        cp, tp = _linear(part)
+        coef: dict = {}
+        for k, t in te + [(-k, t) for k, t in tp]:
+            coef[t] = coef.get(t, 0) + k
+        return _sum(ce - cp, [(k, t) for t, k in coef.items()], E.width(e))
+
     # ---------------------------------------------------------------- dispatch
     def execute(self, tr: Translator, i, mn: str) -> None:  # noqa: C901 (one case per op family)
         if mn == "ld.param":
             return self._ld_param(tr, i)
-        if mn in ("cvta.param",) or mn.startswith("mapa"):
-            tr.fail(i, f"{mn} (gap: not in M1)")
+        if mn.startswith(sync.PREFIXES):  # sync.py: tcgen05, CLC, cluster scope
+            return sync.execute(tr, i, mn)
+        if mn == "cvta.param":  # tma.py: generic addressing of a descriptor parameter
+            return self.tma.cvta_param(tr, i)
+        if mn.startswith(
+            "mapa"
+        ):  # tma.py: only a bulk copy's destination (data) so far
+            tr.env[i.operands[0][1]] = Data(
+                f"shared::cluster address (mapa) at {tr.loc(i)}"
+            )
+            return
+        if mn.startswith(
+            tma.PREFIXES
+        ):  # tma.py: TMA, bulk copies, in-kernel tensormaps
+            return self.tma.execute(tr, i, mn)
         if mn in _GLOBAL_LD or mn.startswith("ld.global"):
             return self._load(tr, i, mn)
         if mn in _GLOBAL_ST or mn.startswith("st.global"):
@@ -160,14 +206,12 @@ class Memory:
             return self._cp_async(tr, i)
         if mn.startswith("mbarrier."):
             return self._mbarrier(tr, i, mn)
-        if mn.startswith(("bar.", "barrier.")) and not mn.startswith("barrier.cluster"):
+        if mn.startswith(("bar.", "barrier.")):  # barrier.cluster: sync.py, above
             if mn in ("bar.sync", "bar.arrive") or mn.endswith(".aligned"):
                 tr.aligned(mn)
-            return  # thread barriers order nothing in the P0 model (P1 is not in M1)
+            return  # no P0 event, as both legacy frontends (named_bar is P1, M3)
         if mn == "call":
             return self._call(tr, i)
-        if mn.startswith(_NOT_IN_M1):
-            tr.fail(i, f"{mn} (gap: not in M1)")
         tr.fail(i, f"no memory rule for {mn}", "error")
 
     def _call(self, tr: Translator, i) -> None:
@@ -215,7 +259,10 @@ class Memory:
                     i, f"ld.param of {p['ptx']}+{off}: no recorded field there", "error"
                 )
         else:
-            tr.fail(i, f"ld.param of the {kind} parameter {p['ptx']} (gap: not in M1)")
+            tr.fail(
+                i,
+                f"ld.param of the {kind} parameter {p['ptx']} (gap: not translated by the PTX frontend yet)",
+            )
         if entry["size"] != size:
             tr.fail(
                 i,
@@ -223,6 +270,8 @@ class Memory:
                 "error",
             )
         if entry["kind"] == "ptr":
+            if p.get("scratch"):  # tma.py: the kernel's scratch (in-kernel descriptors)
+                return E.var(f"%x:{entry['name']}", 64)
             if entry["name"] not in self.tensors:
                 return Data(
                     f"pointer parameter {entry['name']} (no tensor of the launch)"
@@ -242,10 +291,14 @@ class Memory:
         a = tr.as_int(a, "a global address")
         p = peel(a)
         if p is None:
+            p = peel(_pick_bases(tr, a))
+        if p is None:
             tr.fail(i, "a global access whose address has no tensor provenance")
         base, off = p
         if base[2].startswith("%s:"):
             return None
+        if not base[2].startswith("%g:"):  # tma.py's descriptor parameters and scratch
+            tr.fail(i, f"a global access through {base[2][1:]} (only TMA instructions)")
         name = base[2][3:]
         t = self.tensors[name]
         eb = t["elem_bytes"]
@@ -254,7 +307,7 @@ class Memory:
                 i,
                 f"{nbytes}-byte access of {eb}-byte elements of {name} (sub-element access)",
             )
-        q = E.div_exact(off, eb)
+        q = E.div_exact(off, eb, tr.slot_facts)  # loop-carried pointers: their facts
         if q is None:
             tr.fail(
                 i,
@@ -390,8 +443,6 @@ class Memory:
             n = tr.as_int(tr.operand(i, 1, 32), "the transaction bytes")
             tr.barrier_event("expect_tx", sym, off, "thread", bytes=n)
             return
-        if mn.startswith(_NOT_IN_M1):
-            tr.fail(i, f"{mn} (gap: not in M1)")
         tr.fail(i, f"no rule for {mn}", "error")
 
     def wait(self, tr: Translator, instr) -> None:
@@ -435,7 +486,8 @@ class Memory:
         inits = _inits(uses)
         arrays = _runs(inits)
         if self.policy.get("barrier_split"):
-            arrays = _split(arrays, uses)
+            sync.use_ranges(translators)  # sync.py: offsets over stage slots
+            arrays = _split(arrays, uses, _profiles(translators))
         names = self._names(arrays, inits)
         for u in uses:
             _resolve(u, arrays, names)
@@ -474,7 +526,9 @@ class Memory:
 
 
 def _is_base(x) -> bool:
-    return x[0] == "var" and x[2][:3] in ("%g:", "%s:")
+    """A tensor (%g:), shared symbol (%s:), descriptor parameter (%d:, tma.py) or scratch
+    (%x:, tma.py) address."""
+    return x[0] == "var" and x[2][:3] in ("%g:", "%s:", "%d:", "%x:")
 
 
 def peel(e):
@@ -490,21 +544,50 @@ def peel(e):
         if pb is not None and e[2] == "add" and not E.reserved(a):
             return pb[0], E.bin("add", a, pb[1])
         return None
-    if k == "select":
-        pa, pb = peel(e[3]), peel(e[4])
-        if (
-            pa is not None
-            and pb is not None
-            and pa[0] is pb[0]
-            and not E.reserved(e[2])
-        ):
-            return pa[0], E.select(e[2], pa[1], pb[1])
-        return None
+    if k in ("select", "table"):
+        return _peel_arms(e)
     if k == "trunc" and E.width(e) == 32:
         p = peel(e[2])
         if p is not None and p[0][2].startswith("%s:"):
             return E.var(p[0][2], 32), E.trunc(p[1], 32)
+    if k == "ext" and not e[2] and E.width(e) == 64 and E.width(e[3]) == 32:
+        # A zero-extended 32-bit shared or parameter-space address (cvt.u64.u32; tma.py's
+        # staging buffers and descriptors): its window is below 2^32, base + offset does
+        # not wrap there.
+        p = peel(e[3])
+        if p is not None and p[0][2][:3] in ("%s:", "%d:"):
+            return E.var(p[0][2], 64), E.resize(p[1], 64, False)
     return None
+
+
+def _peel_arms(e):
+    """A select between two addresses, or a per-thread table of addresses (e.g. of a
+    lane table), of one base: that base plus the select (table) of their offsets."""
+    arms = e[3:5] if e[0] == "select" else e[3]
+    ps = [peel(x) for x in arms]
+    if E.reserved(e[2]) or any(p is None or p[0] is not ps[0][0] for p in ps):
+        return None
+    offs = [p[1] for p in ps if p is not None]
+    if e[0] == "select":
+        return ps[0][0], E.select(e[2], *offs)
+    return ps[0][0], E.table(e[2], tuple(offs))
+
+
+def _pick_bases(tr: Translator, e):
+    """e with each select between two addresses whose condition has one value in the
+    whole role replaced by the arm it picks. One whose condition is uniform within each
+    warp but differs between warps splits the role (CuTe: SplitWarps, as a branch on it
+    would; LLVM merged `if tidx < 128: zero dK else: zero dV` into a selp of the base);
+    else it stays (peel refuses it)."""
+    if e[0] == "select" and (E.reserved(e[3]) or E.reserved(e[4])):
+        c = tr.uniform(e[2])
+        if c is None:
+            tr.split_per_warp(e[2])
+        elif E.is_const(c):
+            return _pick_bases(tr, e[3] if c[2] else e[4])
+    kids = E.children(e)
+    new = [_pick_bases(tr, x) if E.reserved(x) else x for x in kids]
+    return e if all(x is y for x, y in zip(new, kids)) else E.rebuild(e, new)
 
 
 def _base_parts(base):
@@ -530,6 +613,16 @@ def _linear(e):
         c, ts = _linear(e[3])
         return c * f, [(k * f, t) for k, t in ts]
     return 0, [(1, e)]
+
+
+def _sum(c: int, terms: list, w: int):
+    """c + sum k_i * t_i at width w (the inverse of _linear); zero terms dropped."""
+    out = E.const(c, w)
+    for k, t in terms:
+        k %= 1 << w
+        if k:
+            out = E.bin("add", out, t if k == 1 else E.bin("mul", t, E.const(k, w)))
+    return out
 
 
 def _elem_type(opcode: str) -> str:
@@ -602,11 +695,27 @@ def _runs(inits: dict) -> list:
     return arrays
 
 
-def _split(arrays: list, uses: list) -> list:
+def _profiles(translators: list) -> dict:
+    """{(symbol, offset): {(role's first warp, warps, event kind)}} of the slots named by a
+    constant offset, from their events other than bar_init."""
+    out: dict = {}
+    for tr in translators:
+        for u in tr.barriers:
+            if u.rest is None and u.init is None:
+                out.setdefault((u.sym, u.const), set()).add(
+                    (tr.w0, tr.nw, u.event["ev"])
+                )
+    return out
+
+
+def _split(arrays: list, uses: list, profiles: dict) -> list:
     """Split each run into the arrays its uses index (frontend/cute/to_kir.py
     _split_arrays): a use with a dynamic index keeps together the slots its offset may
-    take; a run with a use whose range is unknown, or leaves the run, stays whole."""
+    take; a run with a use whose range is unknown, or leaves the run, stays whole. Slots
+    no dynamic use may take stay together where their `profiles` (_profiles) are equal:
+    one pipeline's stages, LLVM unrolled (module doc)."""
     cuts = [set(range(1, n)) for _s, _a, n, _c, _k in arrays]
+    dynamic = set()  # (symbol, slot offset) a dynamic use may take
     for u in uses:
         if u.rest is None:
             continue
@@ -619,9 +728,19 @@ def _split(arrays: list, uses: list) -> list:
         if rng is None or rng[0] < start or rng[1] >= start + 8 * num:
             cuts[i] = set()
         else:
-            cuts[i] -= set(range((rng[0] - start) // 8 + 1, (rng[1] - start) // 8 + 1))
+            first, last = (rng[0] - start) // 8, (rng[1] - start) // 8
+            cuts[i] -= set(range(first + 1, last + 1))
+            dynamic |= {(u.sym, start + 8 * j) for j in range(first, last + 1)}
     out = []
     for (s, start, num, count, key), cs in zip(arrays, cuts):
+        for j in sorted(cs):
+            a, b = (s, start + 8 * (j - 1)), (s, start + 8 * j)
+            if (
+                not {a, b} & dynamic
+                and profiles.get(a)
+                and profiles.get(a) == profiles.get(b)
+            ):
+                cs.discard(j)
         bounds = [0, *sorted(cs), num]
         out += [
             [s, start + 8 * a, b - a, count, key] for a, b in zip(bounds, bounds[1:])

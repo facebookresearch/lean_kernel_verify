@@ -50,8 +50,24 @@ Policy (a dict; `policy()` fills the family defaults):
                     with TExpr offsets over the threads, like the TTGIR frontend's one
                     event per tensor operation; False (CuTe): per-thread events in a
                     thread loop, like the CuTe frontend's (interp.Translator.mem_event)
+    tma             "desc" (TTGIR): TMA events on host descriptors, no base footprint;
+                    "footprint" (CuTe): a tma_load plus its gload footprint on the base,
+                    stores and reduces as gstore/gatomic footprints (tma.py)
+    desc_names      "param" (TTGIR: the jit name, the kernel's <d>.shape.i params) or
+                    "tma" (CuTe: tma<k>_<base>, synthetic <d>.shape.i params; tma.py)
+    ptxas           the V-string of the compiler that built the kernel's cubin (CuTe:
+                    its .note.nv.tkinfo, tma.tkinfo_version); unset, the LaunchRecords'
+                    "ptxas" (TTGIR: `ptxas --version` at dump time). A TMA or bulk copy
+                    several lanes of a warp may execute is translated only if it is in
+                    tma.ISSUE_PTXAS and the PTX .target in tma.ISSUE_TARGETS, else
+                    refused (tma.py, "Issuing threads")
+    blocks          {descriptor: block} (TTGIR: a host descriptor's !tt.tensordesc block,
+                    KIR order): its KIR box; Triton cuts a block into hardware boxes
+                    (the record's), one message each, which tma.py merges into one event
     params          param_table() of the LaunchRecords, or the adapter's own
     tensors         {tensor: {"elem_bytes"}} of the tensors the pointer params name
+                    (CuTe: optionally the first launch's "shape" and "strides", which
+                    pick the base of a descriptor over an aliased tensor, tma.py)
     work            {"fields": [name, ...], "mode": "gate" (TTGIR) | "each" (CuTe),
                     "per": [fields naming tensor segments], "sites": anchor sites}: a
                     site is anchors.Site or a dict {field, kind: "load" | "assign" |
@@ -70,8 +86,20 @@ Facts (refusals non-empty: the variant is refused, everything else empty):
     tensors    {name: {"uses": [gload|gstore|gatomic], "metadata", "elem_bytes"}}:
                the tensors the bodies access or `load`
     params     {name: width}: KIR scalar params the bodies read (ld.param)
-    written    [tensor]: tensors with a gstore or gatomic
+    written    [tensor]: tensors with a gstore or gatomic, descriptors with a
+               tma_store or tma_reduce
+    descs      {name: {kind: "host" | "bulk", base, elem_bytes, box, shape, strides,
+               uses}}: the KIR `desc` tensors the bodies name (tma.py), shape/strides KIR
+               JSON over `params` (None for a bulk descriptor: the assembly gives it its
+               base's extent and stride 1, as the CuTe frontend); role, segments
+               (tma.segment_dims for an inherited one) and metadata are the assembly's
+    values     [{param: value}] per LaunchRecord: the synthetic params of `descs`
+               (CuTe <d>.shape.i, <d>.stride.i, <d>.off; TTGIR's are the kernel's own),
+               which the assembly adds to each input
     work_events  number of work events emitted
+    clc        the bodies use CLC (sync.py): the assembly declares __clc_response,
+               __clc_schedule and __clc_launched and makes the per-schedule inputs, as
+               frontend/ttgir/to_kir.py build does for its Translator's uses_clc
     refusals   [{"kind": "gap" | "error", "msg"}]; an exception of the core is an "error"
                refusal (at the instruction being translated, if any), never raised
 
@@ -94,15 +122,26 @@ if __package__ in (None, ""):  # python3 -I path/to/translate.py
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     __package__ = "ptx"  # noqa: A001
 
-from . import cfg as C, interp, mem as M, ops, parse, regions as R  # noqa: E402
+from . import (  # noqa: E402
+    cfg as C,
+    interp,
+    mem as M,
+    ops,
+    parse,
+    regions as R,
+    sync,
+    tma,
+)
 
 DEFAULTS = {
     "ttgir": {"family": "ttgir", "roles": "partition", "loc_prefix": "fbcode/",
               "loc_mode": "file_line", "asm_locs": False, "barrier_names": "ast",
-              "barrier_split": False, "max_iters": 1 << 16, "tpi": "one", "vectorize": True},
+              "barrier_split": False, "max_iters": 1 << 16, "tpi": "one", "vectorize": True,
+              "tma": "desc", "desc_names": "param", "ptxas": None},
     "cute": {"family": "cute", "roles": "warps", "loc_prefix": "", "loc_mode": "line_only",
              "asm_locs": False, "barrier_names": "offset", "barrier_split": True,
-             "max_iters": 4096, "tpi": "gcd", "vectorize": False},
+             "max_iters": 4096, "tpi": "gcd", "vectorize": False,
+             "tma": "footprint", "desc_names": "tma", "ptxas": None},
 }  # fmt: skip
 
 
@@ -124,6 +163,9 @@ class Facts:
     params: dict = field(default_factory=dict)
     written: list = field(default_factory=list)
     work_events: int = 0
+    clc: bool = False
+    descs: dict = field(default_factory=dict)
+    values: list = field(default_factory=list)
     refusals: list = field(default_factory=list)
 
 
@@ -139,10 +181,14 @@ def translate(ptx_text: str, entry: str, launch_records: list, pol: dict) -> Fac
         facts.refusals.append({"kind": "error", "msg": f"{type(e).__name__}: {e}"})
     if facts.refusals:
         facts.roles, facts.barriers, facts.tensors, facts.params = [], [], {}, {}
+        facts.descs, facts.values = {}, []
     return facts
 
 
 def _translate(facts, ptx_text, entry, records, pol) -> None:
+    if pol.get("ptxas") is None:  # TTGIR: dump.py records it in every LaunchRecord
+        got = {r.get("ptxas") for r in records}
+        pol = {**pol, "ptxas": got.pop() if len(got) == 1 else None}
     module = parse.parse(ptx_text)
     fn = module.function(entry)
     facts.target = module.target.removesuffix("a")
@@ -155,7 +201,10 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
     locs, srclocs = _locs(fn, pol)
     shared = {v.name for v in module.vars if v.space == "shared"}
     mem = M.Memory(
-        cfg, pol["params"], pol["tensors"], {**pol, "shared_symbols": shared}
+        cfg,
+        pol["params"],
+        pol["tensors"],
+        {**pol, "shared_symbols": shared, "records": records, "target": facts.target},
     )
     work = pol.get("work") or {}
     k = interp.Kernel(fn, mem, locs, facts.block, facts.cluster, pol["max_iters"],
@@ -174,6 +223,7 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
             )
         translators += _role(k, tree, role.name, warps[0], len(warps), pol)
     facts.barriers = mem.barriers(translators)
+    facts.clc = sync.finish(translators)
     for tr in translators:
         name = (
             tr.name
@@ -195,8 +245,14 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
         if t["uses"] or name in loaded:
             facts.tensors[name] = {"uses": sorted(t["uses"]), "metadata": name in loaded,
                                    "elem_bytes": t["elem_bytes"]}  # fmt: skip
+    facts.descs, facts.values = mem.tma.facts()
     facts.written = sorted(
-        n for n, t in facts.tensors.items() if {"gstore", "gatomic"} & set(t["uses"])
+        [n for n, t in facts.tensors.items() if {"gstore", "gatomic"} & set(t["uses"])]
+        + [
+            n
+            for n, d in facts.descs.items()
+            if {"tma_store", "tma_reduce"} & set(d["uses"])
+        ]
     )
     facts.params = dict(sorted(mem.used_params.items()))
 
@@ -221,8 +277,17 @@ def _role(k, tree, name, w0, nw, pol) -> list:
         if k.work_mode == "each" and k.work_fields:  # fields are -1 until an anchor
             tr.stmts[:0] = [{"op": "let", "var": f"work_{f}", "expr": {"e": "const", "w": 64, "v": -1}}
                             for f in k.work_fields]  # fmt: skip
+        if out and _idle(out[-1]) and _idle(tr) and out[-1].w0 + out[-1].nw == a:
+            out[-1].nw += n  # warps that only park, split by LLVM's branches: one role
+            continue
         out.append(tr)
     return out
+
+
+def _idle(tr) -> bool:
+    """The part emits nothing: constant lets only (warps that only park, e.g. the
+    setmaxnreg of `if warp in (14, 15)`, which LLVM may test in two branches)."""
+    return all(s["op"] == "let" and s["expr"]["e"] == "const" for s in tr.stmts)
 
 
 def _launch_dims(fn, records) -> tuple:
@@ -417,7 +482,7 @@ def mark_addr(kir: dict) -> None:
             lets.setdefault(s["var"], []).append(s["expr"])
         if s["op"] == "event" and s["ev"] in _MEM_EVENTS:
             seeds.append(s["offsets"])  # the TExpr arithmetic and the Exprs it splats
-        if s["op"] == "event" and s["ev"] == "tma_load":
+        if s["op"] == "event" and s["ev"] in ("tma_load", "tma_store", "tma_reduce"):
             seeds += s["coords"]
         roots = [v for k, v in s.items() if isinstance(v, dict) and "e" in v] + s.get(
             "coords", []
@@ -470,12 +535,15 @@ def param_table(
     its kind, KIR name (a scalar param, or the tensor a pointer names) and struct
     fields. TTGIR names are the records' (jit argument names); CuTe top-level scalars are
     param<i>, fields keep the records' param<i>_<off>, and a pointer field names the
-    tensor it resolves to exactly in the records that resolve it (a zero-length tensor
-    resolves nowhere). Pointers that alias one host tensor passed under several jit names
+    tensor it resolves to exactly in every record where it is not null (a zero-length
+    tensor's; _pointer_name). Pointers that alias one host tensor passed under several jit names
     (`leaves`, the jit argument order; same storage in every record) are named in that
     order, the k-th such field the k-th name, as pass-through arguments are; any other
-    ambiguity leaves the field unnamed (a load of it is Data)."""
-    out, taken = [], {}
+    ambiguity leaves the field unnamed (a load of it is Data). A tensormap parameter has
+    a "base": TTGIR its own name (what a store through it writes), CuTe the tensor its
+    address resolves to, and the "aliases" of a base passed under several jit names
+    (tma.desc_base); Triton's scratch pointer is "scratch"."""
+    out, taken, taken_desc = [], {}, {}
     for k, p in enumerate(records[0]["params"]):
         ptx = fn.params[k].name if fn is not None else p.get("ptx", p["name"])
         kind = {"aggregate": "aggregate", "bytes": "aggregate"}.get(
@@ -488,27 +556,37 @@ def param_table(
             if f["kind"] == "ptr":
                 fname = _pointer_name(records, k, f["off"], leaves or [], taken)
             fields[f["off"]] = {"size": f["size"], "kind": f["kind"], "name": fname}
-        out.append(
-            {
-                "ptx": ptx,
-                "kind": kind,
-                "name": name,
-                "size": p["size"],
-                "fields": fields,
-            }
-        )
+        entry = {
+            "ptx": ptx,
+            "kind": kind,
+            "name": name,
+            "size": p["size"],
+            "fields": fields,
+        }
+        if kind == "tensormap":
+            entry["base"], entry["aliases"] = (name, []) if family == "ttgir" else (
+                tma.desc_base(records, k, leaves or [], taken_desc))  # fmt: skip
+        if p.get("scratch"):
+            entry["scratch"] = True
+        out.append(entry)
     return out
 
 
 def _pointer_name(records, k, off, leaves, taken):
+    """The tensor a struct's pointer field names (param_table): the same exact address
+    candidates in every record whose pointer is not null (a zero-length tensor's null
+    pointer resolves nowhere). A record where it points inside a tensor, or nowhere
+    named, leaves the field unnamed: named after the other records' tensor, its accesses
+    there would be checked at the wrong offsets."""
     sets = set()
     for r in records:
         rf = next(x for x in r["params"][k]["fields"] if x["off"] == off)
+        if rf.get("value") == 0:
+            continue
         exact = [c for c in rf.get("tensor") or () if c["match"] == "exact"]
-        if exact:
-            if len({tuple(c["storage"]) for c in exact}) != 1:
-                return None  # distinct storages at one address: not an alias
-            sets.add(frozenset(c["tensor"] for c in exact))
+        if not exact or len({tuple(c["storage"]) for c in exact}) != 1:
+            return None  # no tensor starts there, or distinct storages: not an alias
+        sets.add(frozenset(c["tensor"] for c in exact))
     if len(sets) != 1:
         return None
     (names,) = sets
@@ -523,18 +601,21 @@ def _pointer_name(records, k, off, leaves, taken):
 # ------------------------------------------------------------------- write set
 #
 # The op table's global-memory writes (ops.py) with an address operand: generic and
-# global stores, atomics, bulk copies and reductions to global memory. TMA stores and
-# in-kernel tensormaps write through descriptors, whose base this pass does not follow.
+# global stores, atomics, bulk copies and reductions to global memory. A TMA store or
+# reduce writes its descriptor's base (tma.py): a descriptor parameter's param_table
+# "base"; an in-kernel descriptor (its address derives from the scratch pointer) any
+# tensor a tensormap.replace.global_address may name. tensormap.cp_fenceproxy writes the
+# scratch, which is no host tensor.
 _WRITES = ("st.global", "atom.global.", "red.global.", "cp.async.bulk.global.shared",
            "cp.reduce.async.bulk.global.shared")  # fmt: skip
 _UNKNOWN = "?"  # a base no named pointer accounts for
 _SHARED = "%shared"
+_DESC = "%desc:"  # the address of a descriptor parameter (+ its PTX name)
 
 
-def _descriptor_write(mn: str) -> bool:
-    return mn.startswith("tensormap.cp_fenceproxy") or (
-        mn.startswith(("cp.async.bulk.tensor", "cp.reduce.async.bulk.tensor"))
-        and ".global.shared" in mn
+def _tma_write(mn: str) -> bool:
+    return mn.startswith(("cp.async.bulk.tensor", "cp.reduce.async.bulk.tensor")) and (
+        ".global.shared" in mn
     )
 
 
@@ -542,8 +623,8 @@ def writes(ptx_text: str, entry: str, params: list) -> list | None:
     """The tensors a kernel may write, for the stale-data checks of a variant the
     translation refused (design §5.1: the write set from the PTX, else every pointer
     argument): the named pointers (param_table's `params`) the address of each global
-    write derives from (_Bases). None when some write's address has an unknown or no
-    base or goes through a descriptor, or an instruction has no op-table row or is
+    write derives from (_Bases; through a descriptor: its base). None when some write's
+    address has an unknown or no base, or an instruction has no op-table row or is
     refused by it (a call of a device function may store anywhere; of the refused rows
     only try_wait/test_wait, which read shared memory, are known to write nothing): then
     any argument may be written."""
@@ -558,11 +639,21 @@ def writes(ptx_text: str, entry: str, params: list) -> list | None:
     except ops.UnknownInstruction:
         return None
     shared = {v.name for v in module.vars + fn.vars if v.space == "shared"}
-    bases = _Bases(fn, {p["ptx"]: p for p in params}, shared)
+    table = {p["ptx"]: p for p in params}
+    bases = _Bases(fn, table, shared)
+    scratch = {p["name"] for p in params if p.get("scratch")}
+    replaced = set().union(*(bases.of(i.operands[1]) for i, mn in bases.instrs
+                             if mn.startswith("tensormap.replace.global_address")))  # fmt: skip
     out: set = set()
     for i, mn in bases.instrs:
-        if _descriptor_write(mn):
-            return None
+        if mn.startswith("tensormap.cp_fenceproxy") or _tma_write(mn):
+            got = _through_descriptor(
+                bases.of(i.operands[0]), mn, table, scratch, replaced
+            )
+            if got is None:
+                return None
+            out |= got
+            continue
         if not (mn == "st" or mn.startswith(_WRITES)):
             continue
         got = bases.of(next(op for op in i.operands if op[0] == "mem"))
@@ -571,7 +662,24 @@ def writes(ptx_text: str, entry: str, params: list) -> list | None:
         if not got - {_SHARED} or _UNKNOWN in got:
             return None
         out |= got - {_SHARED}
-    return sorted(out)
+    return sorted(out - scratch)
+
+
+def _through_descriptor(got: set, mn: str, table: dict, scratch: set, replaced: set):
+    """What a cp_fenceproxy (to the scratch: nothing) or a TMA store or reduce (through a
+    descriptor parameter: its base; through the scratch: any replaced global address)
+    whose address has the bases `got` writes; None if unknown."""
+    if not got:
+        return None
+    if mn.startswith("tensormap.cp_fenceproxy"):
+        return set() if got <= scratch else None
+    out = set()
+    for b in got:
+        base = table[b[len(_DESC) :]].get("base") if b.startswith(_DESC) else None
+        if base is None and not (b in scratch and replaced):
+            return None
+        out |= {base} if base is not None else replaced
+    return None if {_UNKNOWN, _SHARED} & out else out
 
 
 class _Bases:
@@ -598,6 +706,8 @@ class _Bases:
         if kind == "reg":
             return self.regs.get(op[1], set())
         if kind == "sym":
+            if self.table.get(op[1], {}).get("kind") == "tensormap":
+                return {_DESC + op[1]}
             return {_SHARED} if op[1] in self.shared else {_UNKNOWN}
         if kind in ("mem", "not"):
             return self.of(op[1])
@@ -707,6 +817,13 @@ def _variants(dump: dict, where: Path):
                "cute", tensors, shapes, leaves)  # fmt: skip
 
 
+def _cubin(dump: dict, label: str) -> str | None:
+    """The cubin path of a CuTe variant (label: <class>__<digest>)."""
+    digest = label.rsplit("__", 1)[-1]
+    c = next(c for c in dump["compiles"] if c["digest"] == digest)
+    return c.get("ptx", {}).get("cubin")
+
+
 def _anchor_sites(work: dict, family: str, fn, root: str, case: dict) -> list:
     """Sites of the case's work anchors (frontend/ptx/anchors.py)."""
     if not work:
@@ -744,7 +861,20 @@ def _minimal_kir(
                         "strides": [{"e": "const", "w": 64, "v": v} for v in dims[1]],
                         "segments": None, "role": "output" if name in facts.written else "input",
                         "metadata": t["metadata"]})  # fmt: skip
-    values = {}
+    for name, d in facts.descs.items():  # a bulk descriptor spans its base's storage
+        s = shapes.get(d["base"], {"shape": [1], "strides": [1]})
+        span = [
+            {
+                "e": "const",
+                "w": 64,
+                "v": 1 + sum((n - 1) * st for n, st in zip(s["shape"], s["strides"])),
+            }
+        ]
+        tensors.append({"name": name, "kind": "desc", "elem_bytes": d["elem_bytes"], "box": d["box"],
+                        "shape": d["shape"] or span, "strides": d["strides"] or [{"e": "const", "w": 64, "v": 1}],
+                        "segments": None, "role": "output" if name in facts.written else "input",
+                        "metadata": False})  # fmt: skip
+    values = dict(facts.values[0]) if facts.values else {}
     for p, rp in zip(params, record["params"]):
         if p["kind"] == "scalar":
             values[p["name"]] = rp.get("value") or 0
@@ -834,8 +964,10 @@ def main() -> None:
         work = case.get("work", {}) if family == "ttgir" else (
             case.get("kernels", {}).get(label.split("__")[0], {}).get("work", {}))  # fmt: skip
         sites = _anchor_sites(work, family, fn, root, case)
+        cubin = family == "cute" and _cubin(dump, label)
         pol = policy(family, src_root=root, params=params,
-                     tensors={n: {"elem_bytes": b} for n, b in tensors.items()},
+                     ptxas=tma.tkinfo_version(Path(cubin).read_bytes()) if cubin else None,
+                     tensors={n: {"elem_bytes": b, **shapes.get(n, {})} for n, b in tensors.items()},
                      max_iters=(1 << 16) if family == "ttgir" else int(case.get("max_iters", 4096)),
                      work={"fields": list(work), "mode": "gate" if family == "ttgir" else "each",
                            "per": _per_fields(case), "sites": sites})  # fmt: skip

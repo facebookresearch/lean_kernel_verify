@@ -12,7 +12,8 @@
   * per launch, the LaunchRecord of every kernel launch its compiled host code makes
     (host_patches.py P6/P9: grid, block, cluster, dynamic shared memory, attributes and
     every kernel parameter, CUtensorMaps decoded, addresses resolved to the named
-    tensors; frontend/ptx/launch.py).
+    tensors; frontend/ptx/launch.py), with each parameter's origin in the traced host
+    code (P11).
 
 The environment is pinned first (ttgir.host_env, shared with the TTGIR frontend):
 variables the exported sources and the case's builder read, and compiler switches
@@ -36,8 +37,24 @@ Output: <out>/dump.json, <out>/ir/ and <out>/ptx/
 ptx/<NN>_<digest>.ptx and .cubin are compile NN's (the digest is the variant's, of the
 initial MLIR: two variants can compile to the same PTX). A launch record is {"kernel",
 "entry", "ptx": {"file", "sha256"}, "target", "grid", "block", "cluster",
-"smem_dynamic", "attrs", "kernel_attrs", "params"} (host_patches.complete). With
-`lineinfo_check` (DSL 4.4.2) every compile is also compiled without line info
+"smem_dynamic", "attrs", "kernel_attrs", "params", "jit_params", ["jit_params_error"]}
+(host_patches.complete, host_patches._name_params). "jit_params" has one entry per
+"params" entry, its origin in the traced host code:
+  {"arg", "leaf"[, "part"]}  the parameter passes leaf `leaf` of the compile parameter
+                             `arg` (the compile's "params" leaves; "part" k: the leaf's
+                             k-th value) through unchanged. A tensor's is its data
+                             pointer, whatever else points there or if it is empty, so
+                             the parameter is that tensor even where its address resolves
+                             to several leaves (one tensor under several jit names) or to
+                             none (a zero-length tensor: data pointer 0);
+  {"from": [leaves]}         a value the host computed (a TMA descriptor, a view, a
+                             divisor): the leaves it is computed from, all of them (a
+                             superset), so only those of the tensors its address resolves
+                             to ("tensor" of a field, "base" of a "tensormap") can be it.
+"jit_params" is null, with "jit_params_error" saying why, if the parameters cannot be
+named exactly (host_patches P11).
+
+With `lineinfo_check` (DSL 4.4.2) every compile is also compiled without line info
 (ptx/<NN>_<digest>.noline.ptx) and "lineinfo_check" says whether the instructions are the
 same ({"identical", "lines", "differing_lines"} | {"error"}). A capture that fails is
 recorded ("ptx_error", "capture_error") and printed; it changes nothing else.

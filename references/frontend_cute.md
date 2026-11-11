@@ -468,9 +468,18 @@ above: the same variant names and `kir/report.json`; the KIR has `ir` `"ptx"`
 (`kir.md`), every tensor shape and stride leaf is an i64 param, the scalar params are
 the kernel-parameter bytes the PTX reads, and `logs/frontend.log` shows `[to_kir]
 LKV_FRONTEND=ptx: translating the PTX`. The preview covers global loads and stores,
-metadata loads, mbarriers and their waits, and `work`; TMA, tcgen05, cluster and CLC
-instructions are refused as gaps (`not in M1`), and there is no P1 pass (P1 is
-`not_applicable` without tcgen05 in the PTX, else `refused`). DSL 4.4.2's PTX names
+metadata loads, mbarriers and their waits, named barriers, TMA and bulk copies,
+tcgen05 (a P0 no-op; `tcgen05.commit` arrives on its mbarrier) and `work`;
+cluster-scope instructions (2-CTA kernels), CuTe CLC and anything else it does not
+translate are refused as gaps, and there is no P1 pass
+(P1 is `not_applicable` without tcgen05 in the PTX, else `refused`). A TMA or bulk copy
+is issued under the PTX's own predicates and `elect.sync`; one that several lanes of a
+warp may execute is translated by the issuing rules measured on hardware (loads and
+reduces once per lane, stores once per distinct descriptor, coordinates and shared
+source, or global address and shared source: `frontend/ptx/tma.py`, "Issuing threads")
+only if the cubin's compiler (its `.note.nv.tkinfo`) is one they were measured for
+(`tma.ISSUE_PTXAS`: both DSLs' embedded compilers are) and the kernel targets sm_100
+(`tma.ISSUE_TARGETS`), else refused. DSL 4.4.2's PTX names
 wrong source files, so only its line numbers are used, read in the kernel's own source
 file (a `.loc` on a blank or comment position is skipped; a `where` anchor matches by
 line): these locations are best effort, which the variant's `kir/report.json` entry
@@ -512,9 +521,8 @@ any other value is an error.
   carries is not (a copy sent to the wrong CTA keeps the byte counts).
 * The op table is checked against two DSL releases (`ops.DSL_NATIVE`: 4.4.2, and 4.6.1
   in the PTX its pipeline makes of the test kernels and of an attention backward), and
-  its TMA store rows' waterfall against the SASS of ptxas 13.0 under 4.4.2 only; another
-  release needs the issuing-thread checks redone before it is added to `ops.DSL_NATIVE`.
-  A TMA store's cache-policy operand is taken to be lane-uniform (a lane-dependent one
-  would add waterfall rounds).
+  its TMA issuing rows on sm_100a hardware for the PTX compilers both embed (12.9.83,
+  13.3.27; `ir_ops_cute.md`, "Issuing threads"); another release needs the
+  issuing-thread checks redone before it is added to `ops.DSL_NATIVE`.
 * KIR size grows with warp-cooperative code: the non-broadcast varlen scheduler is
   evaluated per lane (32 per-lane values per step) in every role that runs it.

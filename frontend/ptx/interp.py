@@ -16,7 +16,9 @@ splits (CuTe: roles warps<a>_<b>), and the caller translates each part again; ot
 Registers are mutable slots, not SSA values: `env` maps each register to
   * an integer expression (expr.py) at the register's width: thread-varying ones over
     LANE/WARP/elect symbols, addresses over the reserved bases of mem.py;
-  * Data(origin): a value the model drops (floats, shared-memory contents, data loads).
+  * Data(origin): a value the model drops (floats, shared-memory contents, data loads,
+    an address transformed by more than adds and selects, e.g. a tcgen05 smem
+    descriptor: its value depends on where the buffer is).
     Data reaching a root (an event operand, a branch condition, an address, a predicate,
     a barrier field, a work anchor) is the slice soundness error, named by its origin.
 Nothing is emitted for a value until a root needs it (so dead integer code costs
@@ -36,9 +38,11 @@ their operand replaced where it is false. A predicated instruction is a one-inst
 mask region. A Loop is a KIR `for` if it is an exact signed-i32 counted loop with
 constant bounds (_counted), else a `while` on an exit flag with the policy's max_iters:
 the registers it writes that are live at its header or exit are carried in slots (kinds
-widened, and the trailing zeros of an address offset slot narrowed, to a fixed point;
+widened, and the trailing zeros of a slot narrowed, to a fixed point;
 assigned in parallel at every back edge and exit edge), and an exit edge clears the
-flag. A Wait is one `wait` event per role.
+flag. A register the body writes before reading it, read only after the loop, starts its
+slot at any value (Data after the loop if the body makes it data). A Wait is one `wait`
+event per role.
 
 Events execute once per issuing thread (frontend/cute/interp.py's rules): a single event
 when one thread issues it, else a `for` over the role's threads with the thread's mask
@@ -64,6 +68,8 @@ from . import expr as E, ops, parse, regions as R
 
 if TYPE_CHECKING:  # mem.py imports this module
     from .mem import Memory
+
+_LANES = tuple(range(32))
 
 
 class Unsupported(Exception):
@@ -147,14 +153,23 @@ class Translator:
         self.names: dict = {}  # expression -> visible let variable
         self.scopes: list = [[]]  # expressions bound in each open scope
         self.loops: list = []  # open loops: [carried, slots, go, kinds, caps, latch If]
+        # per open loop: (the statement list before it, the names defined before it, the
+        # index of the scope enclosing it, its body's statement list): where _let puts a
+        # loop-invariant binding
+        self.hoist: list = []
         self.regions: list = []  # open If branches: (id(node), side) (barrier keys)
         self.work_scopes: list = [{}]  # work fields defined in each open region
         self.work_events = 0
         self.slot_facts: dict = {}  # slot variable -> known trailing zeros
         self.cur = None  # the instruction being translated
         self._inst: dict = {}
+        self._tvals: dict = {}  # (%t term, threads) -> its value per thread (_read_once)
         self._uniform_checked: dict = {}  # (id(statement list), mask, uniform) -> list
         self.pending = None  # events not emitted yet (mem_event, thread_event; flush)
+        self.uses_clc = False  # sync.py: the role issues or queries CLC
+        self.waited: set = set()  # (symbol, offset) of every mbarrier waited on so far
+        self.clc_cancels: list = []  # sync.py: (response address, mbarrier) per try_cancel
+        self.clc_reads: list = []  # sync.py: ClcResponse.read of every queried response
 
     # ---------------------------------------------------------------- basics
     def loc(self, i=None) -> str:
@@ -209,10 +224,20 @@ class Translator:
                 self._let(x, self.k.origin[x][0] if x in self.k.origin else self.loc())
 
     def _let(self, x, loc: str) -> str:
-        if E.unsafe(x):  # it may stop the run: not ahead of a pending event
+        """Bind x where it is used, or, if the innermost open loop cannot change it (its
+        variables are params or defined before the loop), it cannot stop the run and it is
+        used in the loop body's own statement list, right before that loop (a while body
+        runs at least once): legacy KIR computes such values outside the loop too, and Lean
+        evaluates the body on every trip. Not from an `if` arm, which runs only when taken:
+        before the loop its wraps (addr marks) would be unconditional (R1)."""
+        stmts, scope = self.stmts, self.scopes[-1]
+        if (self.hoist and self.stmts is self.hoist[-1][3]
+                and self._invariant(x, self.hoist[-1][1])):  # fmt: skip
+            stmts, scope = self.hoist[-1][0], self.scopes[self.hoist[-1][2]]
+        elif E.unsafe(x):  # it may stop the run: not ahead of a pending event
             self.flush()
         name = self.fresh("v")
-        self.stmts.append(
+        stmts.append(
             {
                 "op": "let",
                 "var": name,
@@ -220,9 +245,35 @@ class Translator:
                 "loc": loc,
             }
         )
+        if stmts is not self.stmts:
+            self.hoist[-1][1].add(name)
         self.names[x] = name
-        self.scopes[-1].append(x)
+        scope.append(x)
         return name
+
+    def _invariant(self, x, before: set) -> bool:
+        """x may be bound before the innermost loop: the variables it reads and the
+        bindings it uses are params or from before the loop (`before`), and no node
+        outside those bindings can stop the run (a load or a partial division,
+        E.unsafe)."""
+        stack, seen = [x], set()  # x itself is not bound yet
+        while stack:
+            e = stack.pop()
+            if e in seen:
+                continue
+            seen.add(e)
+            if e in self.names:
+                if self.names[e] not in before:
+                    return False
+                continue
+            k = e[0]
+            if k == "var" and e[2] not in before and e[2] not in self.k.mem.used_params:
+                return False
+            if k == "load" or k == "bin" and e[2] in E.PARTIAL_OPS and not (
+                    E.is_const(e[4]) and e[4][2] != 0):  # fmt: skip
+                return False
+            stack.extend(E.children(e))
+        return True
 
     def bind(self, e, hint: str = "v"):
         """Bind a thread-uniform, non-trivial expression now; its variable."""
@@ -284,26 +335,49 @@ class Translator:
         depends on it, and _check_elected keeps that choice invisible to events."""
         r = self._inst.get(e)
         if r is None:
-            fv = E.free_vars(e)
-            if not any(map(E.is_thread_var, fv)):
-                r = [e] * (32 * self.nw)
-            else:
-                elects = {v: None for v in fv if v.startswith("%elect")}
-                r = []
-                for w in range(self.w0, self.w0 + self.nw):
-                    ew = E.subst(e, {"%warp": E.const(w, 32)}) if "%warp" in fv else e
-                    for lane in range(32):
-                        m = {"%lane": E.const(lane, 32)}
-                        m.update({v: E.const(int(lane == 0), 1) for v in elects})
-                        r.append(E.subst(ew, m))
+            r = [x for w in range(self.w0, self.w0 + self.nw)
+                 for x in self._warp_instances(e, w)]  # fmt: skip
             self._inst[e] = r
         return r
+
+    def _warp_instances(self, e, w: int, lanes: tuple = _LANES) -> list:
+        """e for some lanes of warp w, the very nodes instances() holds for them (callers
+        compare instances by identity)."""
+        r = self._inst.get(e)
+        if r is not None:
+            return [r[32 * (w - self.w0) + ln] for ln in lanes]
+        fv = E.free_vars(e)
+        if not any(map(E.is_thread_var, fv)):
+            return [e] * len(lanes)
+        elects = [v for v in fv if v.startswith("%elect")]
+        ew = E.subst(e, {"%warp": E.const(w, 32)}) if "%warp" in fv else e
+        out = []
+        for lane in lanes:
+            m = {"%lane": E.const(lane, 32)}
+            m.update({v: E.const(int(lane == 0), 1) for v in elects})
+            out.append(E.subst(ew, m))
+        return out
+
+    def _varies(self, e, in_warp: bool, across: bool) -> bool:
+        """A cheap refutation before instances(e) (all threads; the 8-warp TLX default
+        role substitutes each of its 256): lanes 0 and 1 of the first warp differ
+        (in_warp), or lane 0 of some warp from the first's (across; TLX values often
+        differ per warpgroup only, `tid & 128`)."""
+        if e in self._inst:
+            return False
+        a, b = self._warp_instances(e, self.w0, (0, 1))
+        if in_warp and a is not b:
+            return True
+        return across and any(self._warp_instances(e, w, (0,))[0] is not a
+                              for w in range(self.w0 + 1, self.w0 + self.nw))  # fmt: skip
 
     def uniform(self, e):
         """The expression if it has one value for every thread of the role, else None."""
         if not E.thread_varying(e):
             return e
         if _has_elect(e):  # its instances assume lane 0 is elected (r5 ? lane : 0)
+            return None
+        if self._varies(e, True, True):
             return None
         inst = self.instances(e)
         return inst[0] if all(x is inst[0] for x in inst) else None
@@ -325,7 +399,7 @@ class Translator:
 
     def per_warp(self, e):
         """[value per warp] if e is uniform within each warp, else None."""
-        if _has_elect(e):  # as in uniform()
+        if _has_elect(e) or self._varies(e, True, False):  # as in uniform()
             return None
         inst = self.instances(e)
         out = []
@@ -338,6 +412,10 @@ class Translator:
 
     def lane_only(self, e) -> bool:
         """e does not depend on WARP (one value per lane, the same in every warp)."""
+        if "%warp" not in E.free_vars(e):
+            return True
+        if self._varies(e, False, True):
+            return False
         inst = self.instances(e)
         return all(inst[i] is inst[i % 32] for i in range(len(inst)))
 
@@ -375,26 +453,33 @@ class Translator:
             m = E.select(self.mask, v, E.const(0, E.width(v)))
         if _has_elect(m) or not self.lane_only(m):
             return v
-        return self.lane_table(self.instances(m)[:32], "l")
+        return self.lane_table(self._warp_instances(m, self.w0), "l")
 
     # ------------------------------------------------------------- slots
-    # A slot stores one register in KIR variables: ("u", name, w, base) for a uniform
-    # value, ("f", names, w, base) for a family indexed by lane (32) or thread. `base` is
-    # the address base and constant part kept outside the variables (mem.slot_base; None
-    # for a plain integer): the slot holds value - base.
+    # A slot stores one register in KIR variables: ("u", name, w, base, part) for a
+    # uniform value, ("f", names, w, base, None) for a family indexed by lane (32) or
+    # thread. `base` is the address base and constant part kept outside the variables
+    # (mem.slot_base; None for a plain integer), `part` a thread-varying term kept outside
+    # a uniform loop-carried slot (_loop_once; else None): the slot holds value - base -
+    # part.
 
-    def new_slot(self, e, kind: str, hint: str, base=None):
+    def new_slot(self, e, kind: str, hint: str, base=None, part=None):
         if kind == "u":
-            return ("u", self.fresh(hint), E.width(e), base)
+            return ("u", self.fresh(hint), E.width(e), base, part)
         name = self.fresh(hint)
         n = 32 if kind == "lane" else 32 * self.nw
         names = tuple(f"{name}_{i}" for i in range(n))
         self.created.extend(names)
-        return ("f", names, E.width(e), base)
+        return ("f", names, E.width(e), base, None)
 
-    def assign(self, slot, e) -> list:
+    def content(self, slot, e):
+        """What `slot` holds for the value e."""
         if slot[3] is not None:
             e = self.k.mem.rebase(self, e, slot[3])
+        return e if slot[4] is None else self.k.mem.minus(e, slot[4])
+
+    def assign(self, slot, e) -> list:
+        e = self.content(slot, e)
         if slot[0] == "u":
             u = self.uniform(e)
             if u is None:
@@ -438,6 +523,8 @@ class Translator:
                 self.thread_key(len(slot[1]) == 32),
                 tuple(E.var(n, slot[2]) for n in slot[1]),
             )
+        if slot[4] is not None:
+            v = E.bin("add", slot[4], v)
         return v if slot[3] is None else E.bin("add", slot[3], v)
 
     def kind_of(self, e) -> str:
@@ -475,9 +562,12 @@ class Translator:
         del self.created[nc:]
 
     # ------------------------------------------------------------ regions
-    def run(self, seq: list) -> None:
-        """Translate a region sequence of regions.py."""
-        self.work_scopes.append({})
+    def run(self, seq: list, inherit: bool = True) -> None:
+        """Translate a region sequence of regions.py. Its work fields start as those the
+        enclosing region defined so far (a branch arm: LLVM sinks a field's computation
+        into the branch that uses it, e.g. TLX's off_h below `if start_m >= seqlen`), or
+        none (inherit False: a loop body, as TTGIR's blocks)."""
+        self.work_scopes.append(dict(self.work_scopes[-1]) if inherit else {})
         for node in seq:
             if isinstance(node, R.Block):
                 for i in node.instrs:
@@ -665,10 +755,13 @@ class Translator:
             carried = [r for r in carried if r != counted[0]]
         kinds = [None] * len(carried)
         caps = [None] * len(carried)  # trailing zeros assumed for offset slots
+        seeds = [None] * len(carried)  # entry values of registers read after it only
         while True:
             snap = self.snapshot()
             try:
-                body, slots, go = self._loop_once(node, carried, kinds, caps, counted)
+                body, slots, go = self._loop_once(
+                    node, carried, kinds, caps, seeds, counted
+                )
                 break
             except _Widen:
                 self.restore(snap)
@@ -740,48 +833,86 @@ class Translator:
             return None
         return iv, lb, ub, step, latch, self.fresh("i")
 
-    def _loop_once(self, node, carried: list, kinds: list, caps: list, counted=None):
+    def _loop_once(self, node, carried, kinds, caps, seeds, counted=None):
         slots, env = [], dict(self.env)
+        before = set(self.created)  # the names the loop cannot change (_let)
         if counted is not None:
             env[counted[0]] = E.var(counted[5], 32)
-        for r, kind, cap in zip(carried, kinds, caps):
+            before.discard(counted[5])
+        live = self.tree.live_in.get(node.header, frozenset())
+        for r, kind, cap, seed in zip(carried, kinds, caps, seeds):
             v = self.env.get(r)
-            if isinstance(v, Data) or v is None:
+            if v is None and r not in live:
+                # Written before it is read in every iteration, read after the loop: its
+                # entry value is never read, any value of its width (and address base,
+                # learned from the body: the seed) will do.
+                w = _reg_width(self.k.fn.regs.get(r, "b32"))
+                v = seed if seed is not None else E.const(0, w)
+            if isinstance(v, Data) or v is None or kind == "data":
                 slots.append(None)
                 env[r] = Data(f"{r} carried by the loop at {self.loc()}")
                 continue
             base = self.k.mem.slot_base(self, v)
-            s = self.new_slot(v, kind or self.kind_of(v), "c", base)
+            vk = kind or self.kind_of(v)
+            part = self._thread_part(v, base) if kind is None and vk != "u" else None
+            s = self.new_slot(v, "u" if part is not None else vk, "c", base, part)
             self.stmts += self.assign(s, v)
-            if s[0] == "u" and base is not None:
-                tz = E.tz(self.k.mem.rebase(self, v, base), self.slot_facts)
-                self.slot_facts[s[1]] = tz if cap is None else min(tz, cap)
+            # An offset or an index (LSR: +8 per trip) alike; a family's entries share
+            # the bound (tz of the thread expression bounds each instance's).
+            off = self.content(s, v)
+            tz = E.tz(off, self.slot_facts)
+            for n in _slot_vars(s):
+                self.slot_facts[n] = tz if cap is None else min(tz, cap)
             slots.append(s)
             env[r] = self.read(s)
         go = None
         if counted is None:
             go = self.new_slot(E.const(1, 32), "u", "go")
             self.stmts += self.assign(go, E.const(1, 32))
+        # a `for` runs at least once too (_counted: lb < ub)
         saved, self.stmts = self.stmts, []
+        self.hoist.append((saved, before, len(self.scopes) - 1, self.stmts))
         self.env = env
         mark = self.push_scope()
         self.loops.append(
-            [carried, slots, go, kinds, caps, counted[4] if counted else None]
+            [
+                carried,
+                slots,
+                go,
+                kinds,
+                caps,
+                counted[4] if counted else None,
+                live,
+                seeds,
+            ]  # fmt: skip
         )
         try:
-            self.run(node.body)
+            self.run(node.body, inherit=False)
         finally:
             self.loops.pop()
+            self.hoist.pop()
             self.pop_scope(mark)
         body, self.stmts = self.stmts, saved
         return body, slots, go
 
+    def _thread_part(self, v, base):
+        """The thread-varying terms of a loop-carried value's offset from its base
+        (mem.thread_part), to keep outside a uniform slot when the rest is uniform: the
+        trip then adds uniform terms only, or end_iteration falls back to a family.
+        None if there are none, or they hold data (a load or table: a family binds its
+        per-thread values once) or an elect symbol (which no slot may carry)."""
+        off = v if base is None else self.k.mem.rebase(self, v, base)
+        part = self.k.mem.thread_part(off)
+        if part is None or _has_elect(part) or _varying_data(part):
+            return None
+        return part if self.uniform(self.k.mem.minus(off, part)) is not None else None
+
     def end_iteration(self, brk: bool) -> None:
         """A back edge (or, brk, an exit edge) of the innermost loop: the carried slots
         take the registers' values, in parallel; an exit also clears the loop's flag. A
-        slot holding an offset from a base keeps the trailing zeros assumed for it (the
-        known-bits fixed point of design §5.3 item 5), else the loop is translated again
-        with fewer. Under a thread-varying mask (a masked If's arm, however deeply nested
+        slot (an offset from a base, or an index LSR steps by 8) keeps the trailing
+        zeros assumed for it (the known-bits fixed point of design §5.3 item 5), else
+        the loop is translated again with fewer. Under a thread-varying mask (a masked If's arm, however deeply nested
         in uniform ones) the edge is taken by some threads only: refused."""
         if not E.is_const(self.mask, 1):
             self.fail(
@@ -789,21 +920,34 @@ class Translator:
                 "a loop exits or continues under a thread-varying condition "
                 "(divergent loop)",
             )
-        carried, slots, go, kinds, caps, _latch = self.loops[-1]
+        carried, slots, go, kinds, caps, _latch, live, seeds = self.loops[-1]
         values = [self.env.get(r) for r in carried]
         widened = False
         for k, (s, v) in enumerate(zip(slots, values)):
             if s is None:
                 continue
-            if isinstance(v, Data) or v is None:
+            bad = isinstance(v, Data) or v is None
+            if carried[k] not in live and s[3] is None and not bad and E.reserved(v):
+                if (
+                    seeds[k] is None
+                ):  # read after the loop only: an address of this base
+                    seeds[k], widened = self.k.mem.slot_base(self, v), True
+                    continue
+                bad = True  # its base changes
+            if carried[k] not in live and bad:
+                kinds[k], widened = "data", True  # read after the loop only: Data there
+                continue
+            if bad:
                 self.fail(self.cur, f"loop-carried register {carried[k]} becomes data")
-            kind = self.join(self.slot_kind(s), self.kind_of(v))
-            if kind != self.slot_kind(s):
-                kinds[k], widened = kind, True
-            if s[0] == "u" and s[3] is not None:
-                have = E.tz(self.k.mem.rebase(self, v, s[3]), self.slot_facts)
-                if have < self.slot_facts.get(s[1], 0):
-                    caps[k], widened = have, True
+            off = self.content(s, v)
+            kind = self.join(
+                self.slot_kind(s), self.kind_of(v if s[4] is None else off)
+            )
+            if kind != self.slot_kind(s):  # a thread part no longer enough: the family
+                kinds[k], widened = (kind if s[4] is None else self.kind_of(v)), True
+            have = E.tz(off, self.slot_facts)
+            if have < self.slot_facts.get(_slot_vars(s)[0], 0):
+                caps[k], widened = have, True
         if widened:
             raise _Widen()
         self.stmts += self._parallel_assign(slots, values)
@@ -823,7 +967,7 @@ class Translator:
                 (E.free_vars(y) & names) - {n} for n, y in zip(sl[1], self.instances(x))
             )
             if reads & written or cross:
-                tmp = self.new_slot(x, self.slot_kind(sl), "tmp", sl[3])
+                tmp = self.new_slot(x, self.slot_kind(sl), "tmp", sl[3], sl[4])
                 temps += self.assign(tmp, x)
                 x = self.read(tmp)
             final += self.assign(sl, x)
@@ -844,6 +988,8 @@ class Translator:
     def active(self, cond):
         """Indices (threads() order) of the threads where cond holds; None if that depends
         on runtime values."""
+        if not E.is_const(self._warp_instances(cond, self.w0, (0,))[0]):
+            return None
         inst = self.instances(cond)
         if not all(E.is_const(x) for x in inst):
             return None
@@ -927,7 +1073,8 @@ class Translator:
         tensor, width, uniform condition and loc, nothing emitted in between but safe
         lets) whose offsets and conditions differ only in constants of one arithmetic
         progression are one event over another axis (an unrolled tl.load is many PTX
-        loads). Without `vectorize` (CuTe: the CuTe frontend's events per issuing
+        loads); a load is over one thread per class of threads reading the same elements
+        (_read_once). Without `vectorize` (CuTe: the CuTe frontend's events per issuing
         thread), or with a value no TExpr can carry (a metadata load or a division that
         may fail on another thread, a table), the event is issued per thread."""
         if not self.k.vectorize:
@@ -963,6 +1110,8 @@ class Translator:
                 E.TRUE,
                 1,
             )  # every issuing thread reads the same elements: once
+        elif threads > 1 and kind == "gload":
+            toff, tvar, threads = self._read_once(toff, tvar, threads)
         self._bind_deps([toff, tvar])  # in program order, as in thread_event
         key = (kind, tensor, n, uni, self.loc(), threads, self.w0)
         p = self.pending
@@ -974,6 +1123,45 @@ class Translator:
             return
         self.flush()
         self.pending = {"key": key, "offs": [toff], "conds": [tvar]}
+
+    def _read_once(self, toff, tvar, n: int):
+        """(toff, tvar, threads) of a load over n threads (%t) reduced to one thread per
+        class of threads that read the same elements under the same condition: those whose
+        %t terms (the largest subexpressions over %t alone, all of %t's uses) agree. A
+        layout that replicates a vector makes every warpgroup load all of it (TLX's
+        8-warp backward: each of 256 threads loads 64 of the 128 rows of M), where the
+        TTGIR frontend has one event per tensor element; Lean evaluates the replicas
+        anyway. The element set, all P0-1 sees, stays; done when the classes' first
+        threads are a + b*c for c in [0, k): %t becomes that, over k threads."""
+        terms: dict = {}
+        _t_terms(toff, terms)
+        _t_terms(tvar, terms)
+        if not terms:
+            return toff, tvar, n
+        cols = []
+        for x in terms:
+            vals = self._tvals.get((x, n))
+            if vals is None:
+                vals = [E.subst(x, {"%t": E.const(t, 32)}) for t in range(n)]
+                vals = self._tvals[(x, n)] = (
+                    tuple(v[2] for v in vals) if all(map(E.is_const, vals)) else ()
+                )
+            if not vals:
+                return toff, tvar, n
+            cols.append(vals)
+        first: dict = {}
+        for t, key in enumerate(zip(*cols)):
+            first.setdefault(key, t)
+        reps = sorted(first.values())
+        k = len(reps)
+        b = reps[1] - reps[0] if k > 1 else 1
+        if k == n or any(r != reps[0] + c * b for c, r in enumerate(reps)):
+            return toff, tvar, n
+        rep = E.bin(
+            "add", E.const(reps[0], 32), E.bin("mul", E.var("%t", 32), E.const(b, 32))
+        )
+        m = {"%t": rep}
+        return E.subst(toff, m), E.subst(tvar, m), k
 
     def _per_thread_access(self, kind: str, tensor: str, off, n: int) -> None:
         loc = self.loc()
@@ -1095,7 +1283,10 @@ class Translator:
     def collective(self, what: str) -> None:
         """A full-mask warp collective: every executing warp must be fully active (H3).
         Under a lane condition that depends on runtime values, a KIR assert per warp
-        checks that its lanes agree on the condition (all active or none)."""
+        checks that its lanes agree on the condition (all active or none, decision D9);
+        without `vectorize` (CuTe: events per thread) every thread asserts that its lane
+        agrees with lane 0 of its warp, in a thread loop: one assert of the condition's
+        size, not one conjunct per warp and distinct lane value (decision D8)."""
         uni, var = self.split_mask()
         if _has_elect(var):
             self.fail(self.cur, f"{what} under elect.sync (one lane of the warp)")
@@ -1107,6 +1298,18 @@ class Translator:
         if self._uniform_checked.get(key) is self.stmts:
             return  # an earlier check in this statement list covers it
         self._uniform_checked[key] = self.stmts  # kept alive: its id is not reused
+        msg = f"{what} with the full member mask: all lanes of a warp or none"
+        if not self.k.vectorize:
+            lane0 = E.subst(var, {"%lane": E.const(0, 32)})
+            same = E.bin("or", E.and1(var, lane0), E.not1(E.bin("or", var, lane0)))
+            loc = self.loc()
+            saved, self.mask = self.mask, uni  # every thread checks, active or not
+            try:
+                self.thread_event([same], lambda v, j: {
+                    "op": "assert", "cond": j(v[0]), "msg": msg, "loc": loc}, tag="assert")  # fmt: skip
+            finally:
+                self.mask = saved
+            return
         inst = self.instances(var)
         ok = E.TRUE
         for w in range(self.nw):
@@ -1115,7 +1318,6 @@ class Translator:
                 ok, E.bin("or", _fold("and", lanes), E.not1(_fold("or", lanes)))
             )
         if not E.is_const(ok, 1):
-            msg = f"{what} with the full member mask: all lanes of a warp or none"
             self._emit_under(uni, {"op": "assert", "cond": self.json(ok), "msg": msg,
                                    "loc": self.loc()})  # fmt: skip
 
@@ -1129,13 +1331,18 @@ class Translator:
                 f"{what} under a condition that differs between the lanes of a warp",
             )
 
-    def barrier_event(self, ev: str, sym: str, addr, mode: str, **fields) -> None:
+    def barrier_event(
+        self, ev: str, sym: str, addr, mode: str, lanes: bool = False, **fields
+    ) -> None:
         """An mbarrier event at byte offset `addr` of shared symbol `sym`; bar/idx are
         resolved once every role is translated (mem.Memory.barriers): the offset's
         constant part picks the array, the rest divided by 8 (exactly, else refused) is
         bound here. Modes: "once" (one event if any thread issues it: bar_init, wait),
         "count" (one arrive counting the issuing threads), "thread" (once per issuing
-        thread)."""
+        thread). `lanes` (mode "thread": a TMA load several lanes of a warp issue, each
+        with its own operands, tma.py): a field that varies across the issuing threads,
+        and is not one value per warp (split_per_warp splits the role on that first), is
+        each thread's own, in a thread loop (_issue); else it must be uniform."""
         a = self.uniform(addr)
         if a is None:
             self.split_per_warp(addr)
@@ -1143,19 +1350,36 @@ class Translator:
                 self.cur, "mbarrier address varies across the threads of the role"
             )
         stmt: dict = {"op": "event", "ev": ev, "bar": None, "idx": None}
+        per = []  # `lanes`: (field, its expressions, a list?) of each thread's own
         for key, v in fields.items():
-            u = self.uniform(v)
-            if u is None:
-                self.split_per_warp(v)
-                self.fail(
-                    self.cur,
-                    f"mbarrier event operand '{key}' varies across the threads of the role",
-                )
-            stmt[key] = self.json(u)
+            if isinstance(v, str):  # a name (a tma_load's desc), as the CuTe frontend's
+                stmt[key] = v
+                continue
+            xs = v if isinstance(v, list) else [v]
+            loose = [x for x in xs if self.uniform(x) is None]
+            if lanes and loose:
+                for x in loose:  # a value per warp splits the role, as without lanes
+                    self.split_per_warp(x)
+                stmt[key] = None  # filled per issuing thread (_issue)
+                per.append((key, xs, isinstance(v, list)))
+                continue
+            us = []
+            for x in xs:  # a list: a tma_load's coords
+                u = self.uniform(x)
+                if u is None:
+                    self.split_per_warp(x)
+                    self.fail(
+                        self.cur,
+                        f"mbarrier event operand '{key}' varies across the threads of the role",
+                    )
+                us.append(self.json(u))
+            stmt[key] = us if isinstance(v, list) else us[0]
         stmt["loc"] = self.loc()
-        issued = self._issue(stmt, mode)
+        issued = self._issue(stmt, mode, per)
         if issued is None:
             return
+        if ev == "wait":
+            self.waited.add((sym, a))
         c, rest = self.k.mem.split_offset(a)
         q = E.div_exact(rest, 8, self.slot_facts)
         if q is None:
@@ -1176,14 +1400,29 @@ class Translator:
             self.k.mem.init_key(self) if init is not None else ()))  # fmt: skip
         self._emit_under(issued[0], issued[1])
 
-    def _issue(self, stmt: dict, mode: str):
+    def _issue(self, stmt: dict, mode: str, per: list):
         """(uniform condition, statement, issuer count in mode "count") for an event
-        issued under the current mask, or None if no thread issues it."""
+        issued under the current mask, or None if no thread issues it. `per`
+        (barrier_event): fields each issuing thread gives its own values, in a thread
+        loop."""
         uni, var = self.split_mask()
-        self._check_elected(var, [])
+        ops = [x for _k, xs, _l in per for x in xs]
+        self._check_elected(var, ops)
         act = self.active(var)
         if act == []:
             return None
+        if per:
+
+            def build(vals, j):
+                it = iter(vals)
+                for key, xs, is_list in per:
+                    got = [j(next(it)) for _ in xs]
+                    stmt[key] = got if is_list else got[0]
+                return stmt
+
+            full = act is not None and len(act) == 32 * self.nw
+            item = (E.TRUE if full else var, ops, build, stmt["loc"])
+            return uni, self._thread_loop([item]), None
         issuers = None
         if act is None:
             if mode == "once":
@@ -1207,14 +1446,17 @@ class Translator:
     def work(self, i, sites: list) -> None:
         """Work-item anchors resolved at instruction i (design §5.9, translate.py):
         "gate" emits one `work` event in a region once every declared field is defined
-        in it, after the last definition (the TTGIR rule); "each" sets `work_<f>` and
+        in it (a branch arm counts the fields defined before it, run()), after the last
+        definition (the TTGIR rule); "each" sets `work_<f>` and
         emits the event at every anchor (the CuTe rule; fields start at -1).
 
         An anchor counts only where it runs: under the mask and, for a load, the load's
-        predicate (an assignment's register already holds the predicated merge). Its
-        thread-varying part must hold on a known set of threads (empty: skipped); "each"
-        sets the field and emits the event inside `if` the thread-uniform part, "gate"
-        refuses one."""
+        predicate (an assignment's register already holds the predicated merge); one no
+        thread runs is skipped. "each" sets the field and emits the event inside `if` the
+        thread-uniform part, whichever lanes run it (the CuTe frontend's rule,
+        frontend/cute/ops_mem.py metadata_value: the work item is the role's; LLVM sinks
+        an anchored load into lane-guarded uses, e.g. a row-predicated store); "gate"
+        refuses a conditional one."""
         for site in sites:
             name = site["field"]
             cond = self.mask
@@ -1226,7 +1468,7 @@ class Translator:
             act = self.active(var)
             if E.is_const(uni, 0) or act == []:
                 continue  # no thread runs it here
-            if act is None or (self.k.work_mode != "each" and not E.is_const(uni, 1)):
+            if self.k.work_mode != "each" and (act is None or not E.is_const(uni, 1)):
                 self.fail(
                     i,
                     f"work field '{name}': the anchor runs under a condition "
@@ -1291,6 +1533,11 @@ class Translator:
     def execute(self, i, cls: str) -> None:
         mn = ops.mnemonic(i.opcode)
         if cls == "drop":
+            if mn == "ld.shared" and i.opcode.endswith(".b128"):  # a CLC response
+                self.k.mem.execute(self, i, mn)  # (sync.py)
+                return
+            if mn == "st.shared":  # a tensormap staging buffer's zeroing (tma.py)
+                self.k.mem.tma.staging_store(self, i)
             for r in R.dests(i):
                 self.env[r] = Data(f"{i.opcode} at {self.loc(i)}")
             return
@@ -1316,6 +1563,12 @@ class Translator:
             w = _reg_width(self.k.fn.regs.get(reg, "b32"))
             if E.width(v) != w:
                 v = E.resize(v, w, False)
+        if not isinstance(v, Data) and E.reserved(v) and _transformed(v):
+            # Bit operations on an address (a tcgen05 smem descriptor): the value depends
+            # on where the buffer is, which the model does not know.
+            op = self.cur.opcode if self.cur else "?"
+            v = Data(f"an address transformed by {op} at {self.loc()}")
+        if not isinstance(v, Data):
             v = self.scalarize(v)
             if v[0] not in ("const", "var", "pid", "nprog"):
                 self.k.origin.setdefault(
@@ -1550,11 +1803,10 @@ class Translator:
         return E.cvt_int(a, dw, sw, sk == "s")
 
     def _setp(self, i, types):
-        parts = i.opcode.split(".")
-        cmpop = parts[1]
-        boolop = (
-            parts[2] if len(parts) > 3 and parts[2] in ("and", "or", "xor") else None
-        )
+        # The type may precede the comparison: `setp.u32.eq` (Triton's CLC asm).
+        mods = [t for t in i.opcode.split(".")[1:] if not _TYPE.fullmatch(t)]
+        cmpop = mods[0] if mods else ""
+        boolop = mods[1] if mods[1:] and mods[1] in ("and", "or", "xor") else None
         kind, w = types[-1]
         a, b = self.operand(i, 1, w), self.operand(i, 2, w)
         c = self.operand(i, 3, 1) if boolop else None
@@ -1562,7 +1814,8 @@ class Translator:
         if any(isinstance(x, Data) for x in (a, b, c)):
             return [Data(f"setp of data at {self.loc(i)}")] * ndst
         op = _CMP.get((cmpop, kind == "s"))
-        if op is None or (len(i.operands) > 3) != (boolop is not None):
+        if (op is None or (len(i.operands) > 3) != (boolop is not None)
+                or len(mods) != 1 + (boolop is not None)):  # fmt: skip
             self.fail(i, f"setp form {i.opcode}", "error")
         p = E.cmp(op, a, b)
         out = [p, E.not1(p)]
@@ -1579,7 +1832,7 @@ class Translator:
         elif mn.startswith("vote.sync"):
             self._vote(i, mn.split(".")[2])
         else:
-            self.fail(i, f"{mn} (gap: not in M1)")
+            self.fail(i, f"{mn} (gap: not translated by the PTX frontend yet)")
 
     def _full_mask(self, i, k: int, what: str) -> None:
         m = self.operand(i, k, 32)
@@ -1674,6 +1927,37 @@ class Translator:
 
 
 # --------------------------------------------------------------------- helpers
+
+
+_TRANSFORMED: dict = {}
+
+
+def _transformed(e) -> bool:
+    """e computes with an address beyond adds, subtracts, truncations, zero extensions and
+    selects (which mem.peel follows, or refuses where it is used): bit operations or a
+    comparison."""
+    r = _TRANSFORMED.get(e)
+    if r is None:
+        if e[0] == "var" or not E.reserved(e):
+            r = False
+        elif (
+            (e[0] == "bin" and e[2] in ("add", "sub"))
+            or e[0] in ("select", "trunc")
+            or (
+                e[0] == "ext"
+                and not e[2]  # cvt.u64.u32 of a shared or param address (tma.py)
+            )
+        ):
+            r = any(map(_transformed, E.children(e)))
+        else:
+            r = True
+        _TRANSFORMED[e] = r
+    return r
+
+
+def _slot_vars(slot) -> tuple:
+    """The KIR variables of a slot: a uniform one's, a family's entries."""
+    return (slot[1],) if slot[0] == "u" else slot[1]
 
 
 def _exits(seq) -> bool:
@@ -1836,6 +2120,16 @@ def _tensor_safe(e, arm: bool = False) -> bool:
             and _tensor_safe(e[4], True)
         )
     return all(_tensor_safe(c, arm) for c in E.children(e))
+
+
+def _t_terms(e, out: dict) -> None:
+    """Add to `out` the largest subexpressions of e whose only variable is %t."""
+    fv = E.free_vars(e)
+    if fv == {"%t"}:
+        out[e] = None
+    elif "%t" in fv:
+        for c in E.children(e):
+            _t_terms(c, out)
 
 
 def _varying_data(e) -> bool:

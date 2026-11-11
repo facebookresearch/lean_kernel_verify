@@ -203,9 +203,20 @@ _ROWS = [
         ],
     ),
     (
+        "refuse",
+        "relaxed arrive and invalidation (ISA: mbarrier.arrive .relaxed, mbarrier.inval): "
+        "not modeled, as both legacy frontends refuse them",
+        [
+            "mbarrier.arrive.relaxed.cta.shared",
+            "mbarrier.arrive.expect_tx.relaxed.cta.shared",
+            "mbarrier.inval.shared",
+        ],
+    ),
+    (
         "event",
         "TMA tensor copy (ISA: cp.async.bulk.tensor, cp.reduce.async.bulk.tensor): "
-        "load/reduce per issuing thread, store deduplicated per warp",
+        "load/reduce per issuing thread, store deduplicated per warp (tma.py, "
+        "measured per ptxas version)",
         [
             f"cp.async.bulk.tensor.{d}d.{dst}.global.mbarrier::complete_tx::bytes{opt}"
             for d in range(1, 6)
@@ -221,7 +232,8 @@ _ROWS = [
     ),
     (
         "event",
-        "bulk copy (ISA: cp.async.bulk, cp.reduce.async.bulk) per issuing thread",
+        "bulk copy (ISA: cp.async.bulk, cp.reduce.async.bulk): g2s/reduce per issuing "
+        "thread, s2g deduplicated per warp (tma.py, measured per ptxas version)",
         [
             "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes",
             "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes"
@@ -299,7 +311,8 @@ _ROWS = [
             f"tcgen05.commit.{c}.mbarrier::arrive::one.shared::cluster{mc}"
             for c in _CTA
             for mc in ("", ".multicast::cluster")
-        ],
+        ]
+        + [f"tcgen05.shift.{c}.down" for c in _CTA],
     ),
     (
         "event",

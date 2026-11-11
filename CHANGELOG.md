@@ -25,3 +25,19 @@ First public release.
   P1 pass); the default, `legacy`, is the translation above. With CuTe DSL 4.4.2 its
   source locations are best effort, as report.json `loc_quality` and report.md say
   (references/frontend_ttgir.md and frontend_cute.md, "PTX translation").
+- PTX translation: a TMA or bulk copy that several lanes of a warp may execute follows
+  the issuing rules measured on Blackwell hardware for each PTX compiler the frontends
+  use (`tests/ptx/test_gpu_tma_issue.py`): loads and reduces once per lane with that
+  lane's operands, TMA stores once per distinct (descriptor, coordinates, shared source)
+  and bulk stores once per distinct (global address, shared source) in each warp, the
+  cache policy not part of the key. It is translated only if the kernel's compiler (CuTe:
+  its cubin's `.note.nv.tkinfo`; TTGIR: the `ptxas` the dump now records in every
+  LaunchRecord) is one of `frontend/ptx/tma.py` `ISSUE_PTXAS` and the kernel targets
+  sm_100 (`ISSUE_TARGETS`: sm_103 once the hardware test passes on GB300), else refused.
+  A store whose copies would depend on the lane `elect.sync` picks is refused, as a load
+  or reduce is.
+- CuTe dump: the LaunchRecord address candidates of a launch whose TVM-FFI environment
+  stream is not the jit function's last parameter are no longer shifted by one
+  parameter.
+- Docs: CuTe DSL 4.4.2 compiles with the PTX compiler it embeds (12.9.83), not CUDA
+  13.0's ptxas; a TMA reduce is once per warp only behind the DSL's `elect.sync`.

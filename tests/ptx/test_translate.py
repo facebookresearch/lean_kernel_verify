@@ -16,7 +16,8 @@ rule); refusal kinds (an unknown instruction is an error, one outside the M1 set
 a control-flow shape a gap, an exception of the core an error at its instruction); work
 anchors under both rules (TTGIR gate: one event after the definition; CuTe each: -1 at
 the role's start, then the anchored load's index), and an anchored load counting only
-where its predicate holds.
+where its predicate holds. param_table names a struct's pointer field only by the tensor
+its address starts in every record that has a non-null pointer.
 """
 
 import sys
@@ -234,11 +235,9 @@ class Contract(unittest.TestCase):
         f = run("    mov.u32 %r1, %tid.x;\n    frobnicate.b32 %r2, %r1;\n    ret;\n")
         self.assertEqual(f.refusals[0]["kind"], "error")
         self.assertIn("no op table row", f.refusals[0]["msg"])
-        f = run(
-            "    mov.u32 %r1, smem;\n    tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%r1], 32;\n    ret;\n"
-        )
+        f = run("    barrier.cluster.arrive.aligned;\n    ret;\n")
         self.assertEqual(f.refusals[0]["kind"], "gap")
-        self.assertIn("not in M1", f.refusals[0]["msg"])
+        self.assertIn("are M3", f.refusals[0]["msg"])
         f = run(
             "    mov.u32 %r1, %tid.x;\n    setp.eq.s32 %p1, %r1, 0;\n    @%p1 bra A;\n    ret;\nA:\n    ret;\n"
         )
@@ -316,8 +315,9 @@ class Contract(unittest.TestCase):
 
     def test_work_anchor_counts_only_where_its_load_runs(self):
         # Two anchored loads under complementary uniform predicates (pid < n): each sets
-        # the field inside its `if`; a lane-dependent runtime predicate is refused, and so
-        # is any condition under the gate rule.
+        # the field inside its `if`. Under lane-dependent runtime predicates both set it
+        # (the CuTe rule: the work item is the role's, whichever lanes read it); the gate
+        # rule refuses that, and any condition.
         body = """
     mov.u32 %r1, %tid.x;
     ld.param.b32 %r2, [k_param_2];
@@ -353,6 +353,12 @@ class Contract(unittest.TestCase):
             got = evaluate(f, {"n": 1}, metadata=meta, pid=(pid, 0, 0))
             self.assertEqual([t[1] for t in got if t[0] == "work"], [{"batch": batch}])
         f = anchored("%r1")
+        self.assertEqual(kir_errors(f), [])
+        got = evaluate(f, {"n": 1}, metadata=meta, pid=(3, 0, 0))
+        self.assertEqual(
+            [t[1] for t in got if t[0] == "work"], [{"batch": 3}, {"batch": 2}]
+        )
+        f = anchored("%r1", mode="gate")
         self.assertIn("runtime values in each lane", f.refusals[0]["msg"])
         f = anchored("%r9", mode="gate")
         self.assertIn("gate rule", f.refusals[0]["msg"])
@@ -385,6 +391,33 @@ class Contract(unittest.TestCase):
             )
             self.assertEqual(offs, want)
             self.assertNotIn("overflow", [t[0] for t in evaluate(f, {"n": 1})])
+
+
+class ParamTable(unittest.TestCase):
+    """param_table's struct pointer fields: named by the tensor their address is in every
+    record (a null pointer, a zero-length tensor's, resolves nowhere and is skipped)."""
+
+    @staticmethod
+    def records(*fields):
+        return [{"params": [{"i": 0, "name": "p0", "kind": "aggregate", "size": 8,
+                             "fields": [{"off": 0, "size": 8, "kind": "ptr", "name": "param0_0", **f}]}]}
+                for f in fields]  # fmt: skip
+
+    def name(self, *fields):
+        return T.param_table(self.records(*fields), "cute")[0]["fields"][0]["name"]
+
+    def test_pointer_field_names_one_tensor_in_every_record(self):
+        x = {"tensor": "X", "storage": [64, 192], "match": "exact", "elem_off": 0}
+        inside = {**x, "match": "inside", "elem_off": 32}
+        y = {"tensor": "Y", "storage": [256, 512], "match": "inside", "elem_off": 4}
+        self.assertEqual(self.name({"value": 64, "tensor": [x]}, {"value": 0}), "X")
+        # another launch points 32 elements into X, or into Y, or at no named tensor:
+        # accesses there are no X accesses at X's offsets
+        for other in ([inside], [y], []):
+            got = self.name(
+                {"value": 64, "tensor": [x]}, {"value": 192, "tensor": other}
+            )
+            self.assertIsNone(got, other)
 
 
 if __name__ == "__main__":

@@ -17,8 +17,9 @@ attention backward's dQ reduce: see "Issuing threads").
 
 The table is valid for those DSL releases only (`ops.DSL_NATIVE`; a row names an op's
 spelling in each where they differ): the issuing threads
-of an op are decided by its lowering below the analyzed stage (for TMA stores by ptxas,
-checked with ptxas 13.0; for TMA loads and reduces by the `elect.sync` the DSL emits).
+of an op are decided by its lowering below the analyzed stage (for TMA stores by the PTX
+compiler the DSL embeds, nvPTXCompiler 12.9.83 in 4.4.2 and 13.3.27 in 4.6.1, not the
+CUDA toolkit's ptxas; for TMA loads and reduces by the `elect.sync` the DSL emits).
 `dump.py` records the DSL the process loaded and `to_kir.py` refuses a dump made with
 another release (`frontend_cute.md`, "DSL version").
 
@@ -84,7 +85,10 @@ a `try_wait.parity` loop; `nvvm.tcgen05.commit` (under the kernel's own `elect.s
 `nvvm.cp.async.shared.global` lower one to one.
 
 Checked in the SASS (`cuobjdump -sass` of CUDA 13.0; the store rows on PTX compiled by
-ptxas 13.0, `-arch=sm_100a`, with operands edited in the PTX). The TMA instructions take
+ptxas 13.0, `-arch=sm_100a`, with operands edited in the PTX), and since measured on
+sm_100a hardware for every compiler the families use (`tests/ptx/test_gpu_tma_issue.py`;
+the cubins the DSL builds record their compiler in `.note.nv.tkinfo`: 12.9.83 for 4.4.2,
+13.3.27 for 4.6.1), which issue all of these the same way. The TMA instructions take
 their operands from uniform registers.
 * Warp-wide store, operands the same on every lane: one `UTMASTG` and no loop, as with
   `elect_one` (`ELECT P0; @!P0 EXIT; UTMASTG`). The same holds when `commit_group` and
@@ -94,16 +98,17 @@ their operands from uniform registers.
   gives a waterfall loop: `R2UR P0, UR, R` takes one remaining lane's value and marks the
   lanes holding it, `UTMASTG`, then `BRA.U.ANY` back while lanes remain. That is one
   `UTMASTG` per distinct operand tuple.
-* TMA reduce: one `UTMAREDG` per warp, with no loop. In the test kernel the DSL's
-  `elect.sync` stays as `ELECT P0; @!P0 EXIT` before it; in that attention kernel's
-  dQ ring (two reduces) ptxas drops it, as the uniform-datapath `UTMAREDG` issues once per execution
-  by the warp. A lane-dependent coordinate is the elected lane's (`R2UR`). Only a reduce
-  without that `elect.sync` (hand-edited PTX) gets an elect loop with one `UTMAREDG` per
-  executing lane (`ELECT P1`, `UTMAREDG`, `BRA.U.ANY`); the DSL does not emit one.
+* TMA reduce: one `UTMAREDG` per warp only because the DSL emits it behind a full-mask
+  `elect.sync`: one lane executes it. In the test kernel that `elect.sync` stays as
+  `ELECT P0; @!P0 EXIT` before it; in that attention kernel's dQ ring (two reduces)
+  ptxas emits no `ELECT`, a single issue all the same. A reduce that several lanes
+  execute (hand-edited PTX) gets an elect loop with one `UTMAREDG` per executing lane
+  (`ELECT P1`, `UTMAREDG`, `BRA.U.ANY`; every add lands once per lane) with every
+  compiler measured, and so does a TMA load (`UTMALDG`). The DSL does not emit one.
 
 The descriptor operand is the atom's host descriptor (one per atom), so the store's key
-is its coordinates and shared-memory source; its cache-policy operand (an atom field) is
-taken to be lane-uniform. The frontend side is `tests/cute`
+is its coordinates and shared-memory source. The cache-policy operand is not part of it:
+lanes with different policies still issue one copy (measured). The frontend side is `tests/cute`
 `test_warp_wide_tma_store_is_issued_once_per_distinct_operands`,
 `test_warp_wide_tma_reduce_is_issued_once_per_warp` and
 `test_tma_reduce_needs_a_full_warp_and_lane_uniform_operands`.

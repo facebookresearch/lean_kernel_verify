@@ -72,13 +72,17 @@ An occurrence without instructions (a dropped constexpr branch, or a value the c
 folded into its uses or computed under another statement's .loc) and a tuple element
 without a result (unused there) have no value: if another work-field occurrence in the same
 statement list has a site, the statement runs, and it gets a "novalue" site at the last of
-those; else a note. That keeps the TTGIR frontend's gating, which counted a field as
-defined wherever its op survived to TTGIR. Both happen in the JFA warp-specialized kernels:
-LLVM drops the default partition's unused `off_h`, and in the non-load-balanced path gives
-`pid = tile_idx % n_tile_num`'s rem the .loc of `off_h = off_seq_h % H` (whose own rem it
-sinks under line 0), so `off_h`'s site holds pid's value. Hence only the fields the spec
-reads deserve trust in their values; all `per` fields of the cases are `batch`, which
-resolves exactly. A field without any site in the function is a case error.
+those; else a note. Both cases happen in the JFA warp-specialized kernels: LLVM drops the
+default partition's unused `off_h`, and in the non-load-balanced path gives `pid =
+tile_idx % n_tile_num`'s rem the .loc of `off_h = off_seq_h % H` (whose own rem it sinks
+under line 0), so `off_h`'s site holds pid's value. Hence only the fields the spec reads
+deserve trust in their values; all `per` fields of the cases are `batch`, which
+resolves exactly. A field without any site in the function is a case error. This follows
+the TTGIR frontend's gating (a field counted as defined wherever its op survived to TTGIR)
+where LLVM dropped the op, not where TTGIR had dropped it already: there the TTGIR
+frontend's role has no work item, this one's has the fields that resolve (the dQ-reduce
+and MMA partitions of the nvfp4 FULL_TILES variants, whose pid and off_h TTGIR removed,
+check their accesses against the batch's segment rather than as "no current work item").
 """
 
 import ast

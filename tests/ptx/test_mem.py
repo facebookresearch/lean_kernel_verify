@@ -8,9 +8,12 @@
     python3 -I tests/ptx/test_mem.py      (or the buck target :test_mem)
 
 Global accesses: provenance from a pointer parameter to element offsets (byte offsets
-divided exactly), a byte offset that is no multiple of the element refused, a vector
+divided exactly), a byte offset that is no multiple of the element refused, loop-carried
+pointers (uniform and per thread) whose slots' trailing zeros prove it, a vector
 access as consecutive elements, a sub-element access refused, a generic load of shared
-memory as data, an address of unknown provenance refused, unrolled loads of one
+memory as data, an address of unknown provenance refused, a select between two tensors
+(the CuTe policy splits the role by its warp-uniform condition), a per-lane table of
+addresses of one base, unrolled loads of one
 instruction family merged into one event; metadata loads (value in an address: load
 node, metadata tensor); cp.async with src-size and with a cache-hint operand (R2); atom/red
 (gatomic, exch: gstore). mbarriers: init/arrive/expect_tx/wait resolved to arrays; runs
@@ -33,6 +36,7 @@ if __package__ in (None, ""):
     sys.modules["lkv_root"] = _root
     __package__ = "lkv_root.tests.ptx"  # noqa: A001
 
+from ...frontend.ptx import expr as E, mem as M  # noqa: E402
 from .fixtures.kernels import events, kir_errors, run, statements  # noqa: E402
 
 PRE = """
@@ -78,6 +82,48 @@ class Global(unittest.TestCase):
         f = run(PRE + "    @%p9 ld.global.u8 %rs1, [%rd1];\n    ret;\n")
         self.assertIn("sub-element access", f.refusals[0]["msg"])
 
+    def test_loop_carried_pointers(self):
+        # LSR: x + 4*tid and x + 4*n step by 512 per trip (TLX's M and D pointers): both
+        # are uniform slots, the first with its thread term 4*tid kept outside; their
+        # trailing zeros prove the element offsets exact. A step of 514 does not; a step
+        # of 4*tid makes the first a per-thread family.
+        body = (
+            PRE
+            + """
+    mul.wide.u32 %rd2, %r1, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    mul.wide.s32 %rd4, %r2, 4;
+    add.s64 %rd5, %rd1, %rd4;
+    mov.b32 %r21, 0;
+LOOP:
+    ld.global.b32 %r5, [%rd3];
+    @%p9 st.global.b32 [%rd5], %r5;
+    add.s64 %rd3, %rd3, STEP;
+    add.s64 %rd5, %rd5, 512;
+    add.s32 %r21, %r21, 1;
+    setp.lt.s32 %p13, %r21, %r2;
+    @%p13 bra LOOP;
+    ret;
+"""
+        )
+
+        def family(f):  # per-thread slot variables c<k>_<thread>
+            return [s["var"] for s in statements(f.roles[0]["body"])
+                    if s["op"] == "let" and s["var"].count("_") == 1]  # fmt: skip
+
+        f = run(body.replace("STEP", "512"))
+        self.assertEqual(f.refusals, [])
+        self.assertEqual(len(events(f, "gload")) + len(events(f, "gstore")), 2)
+        self.assertEqual(family(f), [])
+        self.assertEqual(kir_errors(f), [])
+        f = run(body.replace("STEP", "514"))
+        self.assertIn("not provably a multiple", f.refusals[0]["msg"])
+        f = run(body.replace("STEP", "%rd2"))
+        self.assertEqual(f.refusals, [])
+        self.assertEqual(len(family(f)) % 128, 0)  # entry, temporaries, back edge
+        self.assertTrue(family(f))
+        self.assertEqual(kir_errors(f), [])
+
     def test_vector_and_generic_shared(self):
         f = run(
             PRE
@@ -104,6 +150,41 @@ class Global(unittest.TestCase):
 """
         )
         self.assertIn("no tensor provenance", f.refusals[0]["msg"])
+
+    def test_select_between_tensors(self):
+        # LLVM merges `if tid < 64: store x else: store y` into a selp of the base: the
+        # CuTe policy splits the role by the warp-uniform condition, each part storing
+        # one tensor; a condition that varies within a warp, or no splitting (Triton
+        # partitions), is refused.
+        body = """
+    mov.u32 %r1, %tid.x;
+    ld.param.u64 %rd1, [k_param_0];
+    ld.param.u64 %rd2, [k_param_1];
+    setp.lt.u32 %p1, %r1, LIMIT;
+    selp.b64 %rd3, %rd1, %rd2, %p1;
+    mul.wide.u32 %rd4, %r1, 4;
+    add.s64 %rd5, %rd3, %rd4;
+    st.global.b32 [%rd5+64], %r1;
+    ret;
+"""
+        f = run(body.replace("LIMIT", "64"), "cute", ptrs=("x", "y"), scalars=())
+        self.assertEqual(
+            [(r["name"], [e["tensor"] for e in statements(r["body"]) if e["op"] == "event"])
+             for r in f.roles],
+            [("warps0_1", ["x"]), ("warps2_3", ["y"])],
+        )  # fmt: skip
+        self.assertEqual(kir_errors(f), [])
+        for limit, family in (("16", "cute"), ("64", "ttgir")):
+            f = run(body.replace("LIMIT", limit), family, ptrs=("x", "y"), scalars=())
+            self.assertIn("no tensor provenance", f.refusals[0]["msg"])
+
+    def test_peel_table(self):
+        # A per-lane table of addresses of one base is that base plus a table of offsets.
+        x, y = E.var("%g:x", 64), E.var("%g:y", 64)
+        a, b = E.var("a", 64), E.var("b", 64)
+        t = E.table(E.LANE, (E.bin("add", x, a), E.bin("add", x, b)))
+        self.assertEqual(M.peel(t), (x, E.table(E.LANE, (a, b))))
+        self.assertIsNone(M.peel(E.table(E.LANE, (E.bin("add", x, a), y))))
 
     def test_unrolled_loads_merge(self):
         body = (

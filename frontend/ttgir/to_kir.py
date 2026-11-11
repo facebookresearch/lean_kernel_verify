@@ -1453,37 +1453,7 @@ def build(ttgir: str, dump: dict, key: str, case: dict) -> dict:
         t["metadata"] = name in tr.metadata
         tensors.append(t)
     if tr.uses_clc:
-        tensors.append(
-            {
-                "name": "__clc_response",
-                "kind": "desc",
-                "elem_bytes": 1,
-                "shape": [K.const(16, 32)],
-                "strides": [K.const(1, 64)],
-                "box": [16],
-                "segments": None,
-                "role": "input",
-                "metadata": False,
-            }
-        )
-        for name, rank in (("__clc_schedule", 2), ("__clc_launched", 1)):
-            tensors.append(
-                {
-                    "name": name,
-                    "kind": "global",
-                    "elem_bytes": 4,
-                    "shape": [K.var(f"{name}.shape.{i}", 64) for i in range(rank)],
-                    "strides": [K.var(f"{name}.stride.{i}", 64) for i in range(rank)],
-                    "segments": None,
-                    "role": "input",
-                    "metadata": True,
-                }
-            )
-            params += [
-                {"name": f"{name}.{f}.{i}", "type": "i64"}
-                for i in range(rank)
-                for f in ("shape", "stride")
-            ]
+        _add_clc(tensors, params)
 
     barriers = [
         {"name": b, "count": K.const(c["count"], 32), "num": K.const(c["num"], 32)}
@@ -1493,11 +1463,47 @@ def build(ttgir: str, dump: dict, key: str, case: dict) -> dict:
                      barriers, roles, launches, tr.written, tr.desc_bases, tr.uses_clc)  # fmt: skip
 
 
+def _add_clc(tensors: list, params: list) -> None:
+    """The tensors of a kernel that uses CLC and their shape/stride params: the 16-byte
+    response every try_cancel loads, and the schedule tables _with_clc fills per input."""
+    tensors.append(
+        {
+            "name": "__clc_response",
+            "kind": "desc",
+            "elem_bytes": 1,
+            "shape": [K.const(16, 32)],
+            "strides": [K.const(1, 64)],
+            "box": [16],
+            "segments": None,
+            "role": "input",
+            "metadata": False,
+        }
+    )
+    for name, rank in (("__clc_schedule", 2), ("__clc_launched", 1)):
+        tensors.append(
+            {
+                "name": name,
+                "kind": "global",
+                "elem_bytes": 4,
+                "shape": [K.var(f"{name}.shape.{i}", 64) for i in range(rank)],
+                "strides": [K.var(f"{name}.stride.{i}", 64) for i in range(rank)],
+                "segments": None,
+                "role": "input",
+                "metadata": True,
+            }
+        )
+        params += [
+            {"name": f"{name}.{f}.{i}", "type": "i64"}
+            for i in range(rank)
+            for f in ("shape", "stride")
+        ]
+
+
 def build_ptx(where: Path, dump: dict, key: str, case: dict) -> dict:
     """The KIR of a specialization from its PTX (LKV_FRONTEND=ptx, design §5.11): the PTX
     core's Facts (frontend/ptx/translate.py) assembled as build() assembles the
-    Translator's, with the same names, tensors, params, inputs and checks. Host and
-    in-kernel TMA descriptors and CLC are not in M1: the core refuses them (gap)."""
+    Translator's, with the same names, tensors (host descriptors and the CLC tables
+    included), params, inputs and checks."""
     # Imported here: the legacy translation must not depend on the new core while both run.
     from ..ptx import anchors, parse as ptx_parse, translate as T
 
@@ -1523,7 +1529,7 @@ def build_ptx(where: Path, dump: dict, key: str, case: dict) -> dict:
     )
     pol = T.policy("ttgir", src_root=dump["src_root"], params=T.param_table(records, "ttgir", fn),
                    tensors={n: {"elem_bytes": a["elem_bytes"]} for n, a in snap0.items()
-                            if a["kind"] == "tensor"},
+                            if a["kind"] == "tensor"}, blocks=_desc_blocks(launches),
                    work={"fields": list(work), "mode": "gate", "per": per, "sites": sites})  # fmt: skip
     facts = T.translate(text, fn.name, records, pol)
     if facts.refusals:
@@ -1557,8 +1563,41 @@ def build_ptx(where: Path, dump: dict, key: str, case: dict) -> dict:
                         "segments": ann.get("segments"), "metadata": name in metadata})  # fmt: skip
         params += [{"name": f"{name}.{f}.{i}", "type": "i64"}
                    for i in range(rank) for f in ("shape", "stride")]  # fmt: skip
+    tensors += _desc_tensors(facts.descs, annotations, written)
+    if facts.clc:
+        _add_clc(tensors, params)
     return _document(dump, key, case, "ptx", facts.target, params, tensors, facts.barriers,
-                     roles, launches, written, {}, False)  # fmt: skip
+                     roles, launches, written, {}, facts.clc)  # fmt: skip
+
+
+def _desc_blocks(launches: list) -> dict:
+    """The block of each host descriptor (its !tt.tensordesc type's, as build() checks),
+    its KIR box: the core merges the hardware boxes Triton cuts a block into."""
+    blocks = {n: a["block_shape"] for n, a in launches[0][1]["args"].items()
+              if a["kind"] == "desc"}  # fmt: skip
+    for inp, la in launches:
+        for n, b in blocks.items():
+            if la["args"][n]["block_shape"] != b:
+                raise KirError(f"input {inp['name']}: host descriptor {n} has block "
+                               f"{la['args'][n]['block_shape']}, another launch {b}")  # fmt: skip
+    return blocks
+
+
+def _desc_tensors(descs: dict, annotations: dict, written: set) -> list:
+    """The host descriptors of Facts.descs as build() completes them: named by the jit
+    argument, shape/strides the kernel's own <d>.shape.i/<d>.stride.i params (Facts.params;
+    _input reads their values from the snapshot), box the block. An in-kernel descriptor
+    needs no tensor: the core writes its stores as clipped accesses of the base."""
+    out = []
+    for name, d in descs.items():
+        if d["kind"] != "host":
+            raise KirError(f"{d['kind']} descriptor {name}: not in the Triton family")
+        ann = annotations.get(name, {})
+        out.append({"name": name, "kind": "desc", "elem_bytes": d["elem_bytes"],
+                    "shape": d["shape"], "strides": d["strides"], "box": d["box"],
+                    "role": ann.get("role", "output" if name in written else "input"),
+                    "segments": ann.get("segments"), "metadata": False})  # fmt: skip
+    return out
 
 
 def _launches(dump: dict, key: str) -> list:
