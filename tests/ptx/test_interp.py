@@ -8,8 +8,9 @@ expr.py), through translate() on hand-written kernels.
 
     python3 -I tests/ptx/test_interp.py      (or the buck target :test_interp)
 
-Covers: the PTX integer expansions against brute force (mul.hi, bfe, bfi, prmt, lop3,
-shf, popc, clz, brev, cvt, div_exact), the test of one bit of a packed predicate mask,
+Covers: the PTX integer expansions against brute force (mul.hi, bfe, bfi, prmt and its
+modes, lop3, shf, popc, clz, brev, cvt and cvt.sat, add/sub.sat, mul24, sad, div_exact),
+the test of one bit of a packed predicate mask,
 the constant added to a shifted value LLVM shrank taken back to the closest to 0;
 per-thread events (Triton: one event over the threads, a replicated load over one thread
 per class; CuTe: a thread loop), a uniform predicate as a KIR `if`, a lane-varying one as
@@ -26,6 +27,7 @@ refused; a loop exit under a lane condition nested in a uniform If refused; a ma
 table loading on no masked-off lane; select arms' wraps, loads and divisions dead (R1).
 """
 
+import itertools
 import json
 import random
 import sys
@@ -886,6 +888,631 @@ J:
         trace = evaluate(f, {"n": 3}, metadata={"meta": []})
         self.assertEqual([t for t in trace if t[0] != "gstore"], [])  # no load, wrap
         self.assertEqual(trace[-1][2], [0])
+
+
+def _wraps(e, env: dict) -> tuple[list, int]:
+    """(the add/sub/mul/shl/trunc nodes of e whose signed result wraps (what an addr mark
+    reports) on the variable values env, outside the sign extensions ashr(shl(x, k), k2)
+    translate.mark_addr skips; e's value, evaluated exactly on the way)."""
+    out = []
+
+    def go(x):
+        k, w = x[0], E.width(x)
+        if k == "const":
+            return x[2]
+        if k == "var":
+            return env[x[2]]
+        if k == "ext":
+            v = go(x[3])
+            return v if x[2] else v & ((1 << E.width(x[3])) - 1)
+        if k == "trunc":
+            v = go(x[2])
+            r = E._wrap(v, w)
+            if r != v:
+                out.append(x)
+            return r
+        if k == "select":
+            return go(x[3]) if go(x[2]) else go(x[4])
+        if k == "cmp":
+            a, b = go(x[2]), go(x[3])
+            if x[1][0] == "u":
+                m = (1 << E.width(x[2])) - 1
+                a, b = a & m, b & m
+            op = {"eq": "__eq__", "ne": "__ne__", "lt": "__lt__", "le": "__le__",
+                  "gt": "__gt__", "ge": "__ge__"}[x[1].lstrip("su")]  # fmt: skip
+            return int(getattr(a, op)(b))
+        op, a, b = x[2], x[3], x[4]
+        if op == "ashr" and a[0] == "bin" and a[2] == "shl" and E.is_const(a[4]) \
+                and E.is_const(b) and a[4][2] <= b[2]:  # fmt: skip
+            return E._wrap(go(a[3]) << a[4][2], w) >> b[2]
+        va, vb = go(a), go(b)
+        ua, ub = va & ((1 << w) - 1), vb & ((1 << w) - 1)
+        full = {"add": va + vb, "sub": va - vb, "mul": va * vb,
+                "shl": va << ub if ub < w else 0, "lshr": ua >> ub if ub < w else 0,
+                "ashr": va >> min(ub, w - 1), "and": va & vb, "or": va | vb,
+                "xor": va ^ vb, "smin": min(va, vb), "smax": max(va, vb),
+                "umin": min(ua, ub), "umax": max(ua, ub)}[op]  # fmt: skip
+        r = E._wrap(full, w)
+        if op in ("add", "sub", "mul", "shl") and r != full:
+            out.append(x)
+        return r
+
+    return out, go(e)
+
+
+class MoreExpansions(unittest.TestCase):
+    """mul.hi at 16 and 64 bits, packed 16-bit lanes, bfind, dp2a, add/sub.sat, mul24,
+    sad, cvt.sat and prmt's modes against brute force; the mul.hi and add/sub.sat
+    expansions have no node an address mark would report (design §5.8), the others only
+    where the result does not fit."""
+
+    def setUp(self):
+        self.rng = random.Random(11)
+
+    def test_mul_hi_16_and_64_bits(self):
+        for w in (16, 64):
+            edge = [0, 1, 2, (1 << (w - 1)) - 1, 1 << (w - 1), (1 << w) - 1]
+            vals = edge + [self.rng.getrandbits(w) for _ in range(150)]
+            if w == 64:
+                vals.append(1418980313362273202)  # ceil(2**64 / 13): x // 13
+            a, b = E.var("a", w), E.var("b", w)
+            for signed in (False, True):
+                sym = E.lower_narrow(E.mul_hi(a, b, signed))
+                self.assertTrue(all(E.width(x) in E.KIR_WIDTHS for x in _walk(sym)))
+                for x in vals:
+                    for y in vals[:: 7 if w == 64 else 3]:
+                        sx, sy = (E._wrap(v, w) if signed else v for v in (x, y))
+                        want = ((sx * sy) >> w) & ((1 << w) - 1)
+                        self.assertEqual(
+                            E.mul_hi(E.const(x, w), E.const(y, w), signed)[2]
+                            & ((1 << w) - 1),
+                            want,
+                        )
+                        env = {"a": E._wrap(x, 64), "b": E._wrap(y, 64)}
+                        if w == 16:  # lowered: the i32 zero extensions
+                            env = {"a": x, "b": y}
+                        wraps, v = _wraps(sym, env)
+                        self.assertEqual(wraps, [], (w, signed, x, y))
+                        self.assertEqual(v & ((1 << w) - 1), want)
+
+    def test_packed_lanes_bfind_dp2a(self):
+        for _ in range(400):
+            a, b, c = (self.rng.getrandbits(32) for _ in range(3))
+            lo, hi = (x[2] & 0xFFFF for x in E.lanes16(E.const(a, 32)))
+            self.assertEqual((lo, hi), (a & 0xFFFF, a >> 16))
+            packed = E.pack16(E.const(b >> 16, 16), E.const(c >> 16, 16))
+            self.assertEqual(packed[2] & 0xFFFFFFFF, (c >> 16 << 16) | (b >> 16))
+            for hmode in (False, True):
+                for sa in (False, True):
+                    for sb in (False, True):
+                        h = [E._wrap(a >> 16 * j, 16) if sa else a >> 16 * j & 0xFFFF
+                             for j in range(2)]  # fmt: skip
+                        k = 2 if hmode else 0
+                        by = [E._wrap(b >> 8 * (k + j), 8) if sb else b >> 8 * (k + j) & 255
+                              for j in range(2)]  # fmt: skip
+                        got = E.dp2a(c32(a), c32(b), c32(c), hmode, sa, sb)
+                        want = (c + h[0] * by[0] + h[1] * by[1]) & 0xFFFFFFFF
+                        self.assertEqual(u32(got), want)
+            for w in (32, 64):
+                x = self.rng.getrandbits(w) >> self.rng.randrange(w + 1)
+                for signed in (False, True):
+                    v = E._wrap(x, w) if signed else x
+                    y = ~v if v < 0 else v
+                    for shiftamt in (False, True):
+                        want = 0xFFFFFFFF if y == 0 else (
+                            w - y.bit_length() if shiftamt else y.bit_length() - 1)  # fmt: skip
+                        got = E.bfind(E.const(x, w), signed, shiftamt)
+                        self.assertEqual(u32(got), want)
+
+    def fits(self, sym, env: dict, want: int, w: int = 32) -> None:
+        """sym evaluates to want modulo 2**w, and an address mark reports a node of it
+        exactly when want does not fit a signed i32."""
+        wraps, v = _wraps(sym, env)
+        self.assertEqual(v & ((1 << w) - 1), want & ((1 << w) - 1))
+        self.assertEqual(wraps != [], not -(2**31) <= want < 2**31, (env, want))
+
+    def test_sat_mul24_sad(self):
+        edge = [0, 1, 2, 5, 0x7FFFFF, 0x800000, 0xFFFFFF, 0x1000000, 0x7FFFFFFF,
+                0x80000000, 0xFFFFFFFB, 0xFFFFFFFF]  # fmt: skip
+        vals = edge + [self.rng.getrandbits(32) for _ in range(30)]
+        a, b, c = (E.var(n, 32) for n in "abc")
+        for x in vals:
+            for y in vals:
+                sx, sy = E._wrap(x, 32), E._wrap(y, 32)
+                for sub in (False, True):  # add/sub.sat.s32: never a wrap
+                    want = max(min(sx - sy if sub else sx + sy, 2**31 - 1), -(2**31))
+                    self.fits(E.add_sat(a, b, sub), {"a": sx, "b": sy}, want)
+                    self.assertEqual(E.add_sat(c32(x), c32(y), sub)[2], want)
+                z = vals[(x ^ y) % len(vals)]
+                for signed in (False, True):
+                    # mul24: the 24-bit fields' product; .lo wraps as mul.lo does
+                    fx, fy = (
+                        E._wrap(v, 24) if signed else v & 0xFFFFFF for v in (x, y)
+                    )
+                    for hi, want in ((False, fx * fy), (True, fx * fy >> 16)):
+                        env = {"a": sx, "b": sy}
+                        self.fits(E.mul24(a, b, hi, signed), env, want)
+                        got = E.mul24(c32(x), c32(y), hi, signed)
+                        self.assertEqual(u32(got), want & 0xFFFFFFFF)
+                    # sad: c + |a - b| by the type, computed where only the sum wraps
+                    rx, ry, rz = (E._wrap(v, 32) if signed else v for v in (x, y, z))
+                    want = rz + abs(rx - ry)
+                    env = {"a": sx, "b": sy, "c": E._wrap(z, 32)}
+                    self.fits(E.sad(a, b, c, signed), env, want)
+                    self.assertEqual(u32(E.sad(c32(x), c32(y), c32(z), signed)),
+                                     want & 0xFFFFFFFF)  # fmt: skip
+        for w in (16, 64):  # sad at the other widths: values; no wrap on small operands
+            m = (1 << w) - 1
+            ws = [0, 1, 7, (1 << (w - 1)) - 1, 1 << (w - 1), m]
+            ws += [self.rng.getrandbits(w) for _ in range(12)]
+            av, bv, cv = (E.var(n, w) for n in "abc")
+            for signed in (False, True):
+                sym = E.lower_narrow(E.sad(av, bv, cv, signed))
+                for x in ws:
+                    for y in ws:
+                        for z in ws[:6]:
+                            rx, ry, rz = (
+                                E._wrap(v, w) if signed else v for v in (x, y, z)
+                            )
+                            want = rz + abs(rx - ry)
+                            env = {n: (v if w == 16 else E._wrap(v, 64))
+                                   for n, v in zip("abc", (x, y, z))}  # fmt: skip
+                            wraps, v = _wraps(sym, env)
+                            self.assertEqual(v & m, want & m)
+                            if w == 16 or all(abs(e) < 2**61 for e in env.values()):
+                                self.assertEqual(wraps, [], (w, signed, x, y, z))
+
+    def test_cvt_sat(self):
+        # every pair of integer types: the source value clamped to the destination's
+        # range; only a truncation to u32 of a 64-bit value of 2**31 or more is lossy
+        for sk, sw, dk, dw in itertools.product("su", (8, 16, 32, 64), repeat=2):
+            rw = max(sw, 32)  # the source register
+            ss, ds = sk == "s", dk == "s"
+            lo, hi = (
+                (-(1 << (dw - 1)), (1 << (dw - 1)) - 1) if ds else (0, (1 << dw) - 1)
+            )
+            sym = E.lower_narrow(E.cvt_sat(E.var("a", rw), dw, ds, sw, ss))
+            edge = [0, 1, (1 << (sw - 1)) - 1, 1 << (sw - 1), (1 << sw) - 1]
+            for x in edge + [self.rng.getrandbits(sw) for _ in range(40)]:
+                junk = self.rng.getrandbits(rw - sw) << sw if rw > sw else 0
+                v = E._wrap(x, sw) if ss else x
+                want = max(min(v, hi), lo)
+                got = E.cvt_sat(E.const(x | junk, rw), dw, ds, sw, ss)
+                self.assertEqual(got[2] & ((1 << dw) - 1), want & ((1 << dw) - 1))
+                wraps, r = _wraps(sym, {"a": E._wrap(x | junk, rw)})
+                self.assertEqual(r & ((1 << dw) - 1), want & ((1 << dw) - 1))
+                lossy = sw == 64 and dw == 32 and not ds and want >= 2**31
+                self.assertEqual(wraps != [], lossy, (sk, sw, dk, dw, x))
+
+    def test_prmt_modes(self):
+        # the ISA's selections by name: forward and backward 4 extract (bytes c, c +- 1,
+        # ...), replicate 8 and 16, edge clamp left and right; constant or runtime c
+        pick = {"f4e": lambda c, i: c + i, "b4e": lambda c, i: (c - i) % 8,
+                "rc8": lambda c, i: c, "ecl": max, "ecr": min,
+                "rc16": lambda c, i: 2 * (c & 1) + (i & 1)}  # fmt: skip
+        cv = E.var("c", 32)
+        for _ in range(60):
+            a, b, c = (self.rng.getrandbits(32) for _ in range(3))
+            src = (b << 32 | a).to_bytes(8, "little")
+            for mode, f in pick.items():
+                want = sum(src[f(c & 3, i)] << 8 * i for i in range(4))
+                self.assertEqual(u32(E.prmt_mode(c32(a), c32(b), c32(c), mode)), want)
+                sym = E.prmt_mode(c32(a), c32(b), cv, mode)
+                self.assertEqual(
+                    _wraps(sym, {"c": E._wrap(c, 32)})[1] & 0xFFFFFFFF, want
+                )
+
+
+def _walk(e):
+    seen, stack = set(), [e]
+    while stack:
+        x = stack.pop()
+        if x not in seen:
+            seen.add(x)
+            yield x
+            stack.extend(E.children(x))
+
+
+class MoreIntegerOps(unittest.TestCase):
+    """Kernels using integer ops that real kernels use: their store offsets on concrete
+    inputs (fixtures evaluate()), with no address wrap reported, and the refusals that
+    remain."""
+
+    def offsets(self, body, n, family="cute", **kw):
+        f = run(PRE + body + "    ret;\n", family=family, **kw)
+        self.assertEqual(f.refusals, [])
+        self.assertEqual(kir_errors(f), [])
+        trace = evaluate(f, {"n": n})
+        self.assertEqual([t for t in trace if t[0] != "gstore"], [])  # no wrap
+        return [o for t in trace for o in t[2]]
+
+    def test_abs(self):
+        body = """
+    sub.s32 %r3, %r1, %r2;
+    abs.s32 %r4, %r3;
+    cvt.s64.s32 %rd2, %r3;
+    abs.s64 %rd3, %rd2;
+    cvt.u32.u64 %r5, %rd3;
+    add.s32 %r6, %r4, %r5;
+    mul.wide.s32 %rd4, %r6, 4;
+    add.s64 %rd5, %rd1, %rd4;
+    st.global.b32 [%rd5], %r2;
+"""
+        self.assertEqual(self.offsets(body, 50), [2 * abs(t - 50) for t in range(128)])
+
+    def test_mul_hi_64_and_16_bits(self):
+        # (t + n) // 13 by LLVM's magic number (qk_norm_rope.py:38), the signed high half
+        # of (t - 64) * -2**62 (floor(-(t - 64) / 4)), and the 16-bit (500 t * 0xCCCD) >> 16.
+        body = """
+    cvt.u64.u32 %rd2, %r1;
+    cvt.u64.u32 %rd3, %r2;
+    add.s64 %rd4, %rd2, %rd3;
+    mul.hi.u64 %rd5, %rd4, 1418980313362273202;
+    sub.s32 %r3, %r1, 64;
+    cvt.s64.s32 %rd6, %r3;
+    mul.hi.s64 %rd7, %rd6, -4611686018427387904;
+    add.s64 %rd8, %rd5, %rd7;
+    mul.lo.s32 %r4, %r1, 500;
+    cvt.u16.u32 %rs1, %r4;
+    mul.hi.u16 %rs2, %rs1, 52429;
+    cvt.u64.u16 %rd9, %rs2;
+    add.s64 %rd10, %rd8, %rd9;
+    shl.b64 %rd11, %rd10, 2;
+    add.s64 %rd12, %rd1, %rd11;
+    st.global.b32 [%rd12], %r2;
+"""
+        want = [(t + 1000) // 13 + (-(t - 64)) // 4 + (500 * t * 52429 >> 16)
+                for t in range(128)]  # fmt: skip
+        for fam in ("cute", "ttgir"):
+            self.assertEqual(self.offsets(body, 1000, family=fam), want)
+
+    def test_packed_16x2(self):
+        # lanes (lo, hi) = (-1, t & 7) and (2, 3): add (1, (t & 7) + 3), max.u (0xFFFF,
+        # max(t & 7, 3)), min.s (-1, min(t & 7, 3)), sub (-3, (t & 7) - 3); max.relu.s of
+        # the first with itself (0, t & 7)
+        body = """
+    and.b32 %r3, %r1, 7;
+    shl.b32 %r4, %r3, 16;
+    or.b32 %r5, %r4, 65535;
+    mov.b32 %r6, 196610;
+    add.s16x2 %r7, %r5, %r6;
+    max.u16x2 %r8, %r5, %r6;
+    min.s16x2 %r9, %r5, %r6;
+    max.relu.s16x2 %r10, %r5, %r5;
+    sub.u16x2 %r11, %r5, %r6;
+    mov.b32 {%rs1, %rs2}, %r7;
+    mov.b32 {%rs3, %rs4}, %r8;
+    mov.b32 {%rs5, %rs6}, %r9;
+    mov.b32 {%rs7, %rs8}, %r10;
+    mov.b32 {%rs9, %rs10}, %r11;
+    cvt.s32.s16 %r12, %rs1;
+    cvt.s32.s16 %r13, %rs2;
+    cvt.u32.u16 %r14, %rs3;
+    cvt.s32.s16 %r15, %rs4;
+    cvt.s32.s16 %r16, %rs5;
+    cvt.s32.s16 %r17, %rs6;
+    cvt.s32.s16 %r18, %rs7;
+    cvt.s32.s16 %r19, %rs8;
+    cvt.s32.s16 %r20, %rs9;
+    cvt.s32.s16 %r21, %rs10;
+    add.s32 %r22, %r12, %r13;
+    add.s32 %r22, %r22, %r14;
+    add.s32 %r22, %r22, %r15;
+    add.s32 %r22, %r22, %r16;
+    add.s32 %r22, %r22, %r17;
+    add.s32 %r22, %r22, %r18;
+    add.s32 %r22, %r22, %r19;
+    add.s32 %r22, %r22, %r20;
+    add.s32 %r22, %r22, %r21;
+    mul.wide.s32 %rd2, %r22, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    st.global.b32 [%rd3], %r2;
+"""
+        want = []
+        for t in range(128):
+            h = t & 7
+            want.append((1 + h + 3) + (0xFFFF + max(h, 3)) + (-1 + min(h, 3))
+                        + (0 + h) + (-3 + h - 3))  # fmt: skip
+        self.assertEqual(self.offsets(body, 0), want)
+
+    def test_redux_sync(self):
+        # add of the lane ids (496), max.u of tid (32 w + 31), min.s of tid - 100, or of
+        # 1 << (lane % 4) (15): every lane gets its warp's reduction
+        body = """
+    mov.u32 %r3, %laneid;
+    redux.sync.add.s32 %r4, %r3, -1;
+    redux.sync.max.u32 %r5, %r1, -1;
+    sub.s32 %r6, %r1, 100;
+    redux.sync.min.s32 %r7, %r6, -1;
+    and.b32 %r8, %r3, 3;
+    shl.b32 %r9, 1, %r8;
+    redux.sync.or.b32 %r10, %r9, -1;
+    add.s32 %r11, %r4, %r5;
+    add.s32 %r11, %r11, %r7;
+    add.s32 %r11, %r11, %r10;
+    mul.wide.s32 %rd2, %r11, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    st.global.b32 [%rd3], %r2;
+"""
+        want = [496 + (t | 31) + (t // 32 * 32 - 100) + 15 for t in range(128)]
+        for fam in ("cute", "ttgir"):
+            self.assertEqual(self.offsets(body, 0, family=fam), want)
+        # Of data: one value per warp, Data; refused only where it reaches a root.
+        data = """
+    ld.global.f32 %f1, [%rd1];
+    mov.b32 %r3, %f1;
+    redux.sync.add.s32 %r4, %r3, -1;
+    st.global.b32 [%rd1], %r4;
+"""
+        self.assertEqual(run(PRE + data + "    ret;\n").refusals, [])
+        f = run(PRE + data.replace("st.global.b32 [%rd1], %r4", """
+    mul.wide.s32 %rd2, %r4, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    st.global.b32 [%rd3], %r2""") + "    ret;\n")  # fmt: skip
+        self.assertIn("data value from", f.refusals[0]["msg"])
+        f = run(PRE + """
+    mov.u32 %r3, %laneid;
+    setp.lt.u32 %p1, %r3, 16;
+    @!%p1 bra SKIP;
+    redux.sync.add.s32 %r4, %r3, -1;
+SKIP:
+    ret;
+""")  # fmt: skip
+        self.assertIn("only part of warp(s)", f.refusals[0]["msg"])
+
+    def test_relu_bfind_dp2a(self):
+        body = """
+    sub.s32 %r3, %r1, 64;
+    max.relu.s32 %r4, %r3, -5;
+    min.relu.s32 %r5, %r3, 10;
+    bfind.u32 %r6, %r1;
+    bfind.shiftamt.u32 %r7, %r1;
+    bfind.s32 %r8, %r3;
+    dp2a.lo.u32.u32 %r9, %r1, 770, %r2;
+    dp2a.hi.s32.s32 %r10, %r3, -16777216, 0;
+    add.s32 %r11, %r4, %r5;
+    add.s32 %r11, %r11, %r6;
+    add.s32 %r11, %r11, %r7;
+    add.s32 %r11, %r11, %r8;
+    add.s32 %r11, %r11, %r9;
+    add.s32 %r11, %r11, %r10;
+    mul.wide.s32 %rd2, %r11, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    st.global.b32 [%rd3], %r2;
+"""
+
+        def msb(v):
+            return v.bit_length() - 1 if v else -1
+
+        want = []
+        for t in range(128):
+            x = t - 64
+            hi = -1 if x < 0 else 0  # x's upper half, sign-extended
+            want.append(max(x, -5, 0) + max(min(x, 10), 0) + msb(t)
+                        + (31 - msb(t) if t else -1) + msb(~x if x < 0 else x)
+                        + 7 + 2 * t + hi * -1)  # fmt: skip
+        self.assertEqual(self.offsets(body, 7), want)
+
+    def test_carry_chain(self):
+        # 0xFFFFFFFF + t carries for t >= 1 (add.cc/addc); so does t * 2**24 + 0xFF000000
+        # (mad.lo.cc), which madc.hi adds to the high word of t * 2**28, t >> 4.
+        body = """
+    mov.b32 %r3, -1;
+    add.cc.u32 %r4, %r3, %r1;
+    addc.cc.u32 %r5, %r2, 0;
+    addc.u32 %r6, 0, 0;
+    mad.lo.cc.u32 %r7, %r1, 16777216, -16777216;
+    madc.hi.u32 %r8, %r1, 268435456, 0;
+    add.s32 %r9, %r5, %r8;
+    add.s32 %r9, %r9, %r6;
+    mul.wide.s32 %rd2, %r9, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    st.global.b32 [%rd3], %r2;
+"""
+        want = [5 + (t >= 1) + (t >> 4) + (t >= 1) for t in range(128)]
+        self.assertEqual(self.offsets(body, 5), want)
+        f = run(PRE + """
+    setp.lt.s32 %p1, %r1, %r2;
+    @%p1 add.cc.u32 %r4, %r1, 1;
+    ret;
+""")  # fmt: skip
+        self.assertIn("carry-flag instruction under a predicate", f.refusals[0]["msg"])
+        f = run(PRE + """
+    add.cc.u32 %r4, %r1, 1;
+    setp.lt.s32 %p1, %r1, %r2;
+    @%p1 bra NEXT;
+NEXT:
+    addc.u32 %r5, %r2, 0;
+    mul.wide.s32 %rd2, %r5, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    st.global.b32 [%rd3], %r2;
+    ret;
+""")  # fmt: skip
+        self.assertIn("not set in its block", f.refusals[0]["msg"])
+
+    def test_borrow_chain(self):
+        # sub.cc/subc(.cc): a - (b + CC.CF), the borrow out to CC.CF (ISA), against that
+        # formula for every thread and several n (n - t - borrow wraps for t > n); the
+        # differences reach the address through their low and top bits.
+        body = """
+    sub.cc.u32 %r4, %r1, 64;
+    subc.cc.u32 %r5, %r2, %r1;
+    subc.cc.u32 %r6, 1, 0;
+    subc.u32 %r7, 3, 1;
+    sub.cc.u32 %r8, %r2, %r2;
+    subc.u32 %r9, 5, 0;
+    and.b32 %r10, %r5, 7;
+    shr.u32 %r11, %r4, 29;
+    shr.u32 %r12, %r5, 28;
+    add.s32 %r13, %r10, %r11;
+    add.s32 %r13, %r13, %r12;
+    add.s32 %r13, %r13, %r6;
+    add.s32 %r13, %r13, %r7;
+    add.s32 %r13, %r13, %r9;
+    mul.wide.s32 %rd2, %r13, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    st.global.b32 [%rd3], %r2;
+"""
+
+        def sub(a, b, cin):  # (difference mod 2**32, borrow out)
+            return (a - b - cin) % 2**32, int(b + cin > a)
+
+        for n in (0, 5, 64, 127, 1000, -1):
+            want = []
+            for t in range(128):
+                d4, c = sub(t, 64, 0)
+                d5, c = sub(n % 2**32, t, c)
+                d6, c = sub(1, 0, c)
+                d7, _ = sub(3, 1, c)
+                d9 = 5  # sub.cc of n - n: no borrow
+                want.append((d5 & 7) + (d4 >> 29) + (d5 >> 28) + d6 + d7 + d9)
+            with self.subTest(n=n):
+                self.assertEqual(self.offsets(body, n), want)
+        f = run(PRE + """
+    setp.lt.s32 %p1, %r1, %r2;
+    @%p1 subc.u32 %r4, %r1, 1;
+    ret;
+""")  # fmt: skip
+        self.assertIn("carry-flag instruction under a predicate", f.refusals[0]["msg"])
+        f = run(PRE + """
+    sub.cc.u32 %r4, %r1, 1;
+    setp.lt.s32 %p1, %r1, %r2;
+    @%p1 bra NEXT;
+NEXT:
+    subc.cc.u32 %r5, %r2, 0;
+    mul.wide.s32 %rd2, %r5, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    st.global.b32 [%rd3], %r2;
+    ret;
+""")  # fmt: skip
+        self.assertIn("not set in its block", f.refusals[0]["msg"])
+
+    def test_barrier_red(self):
+        # popc of t < n over the 128 threads, and of t < n (n >= 128): thread 0 stores at
+        # min(n, 128) + 1000 * (n >= 128); exact when the role is the whole block
+        body = """
+    setp.lt.s32 %p1, %r1, %r2;
+    barrier.red.popc.aligned.u32 %r3, 0, %p1;
+    barrier.red.and.aligned.pred %p2, 0, %p1;
+    bar.red.or.pred %p3, 0, 128, !%p1;
+    selp.b32 %r4, 1000, 0, %p2;
+    selp.b32 %r5, 10000, 0, %p3;
+    add.s32 %r6, %r3, %r4;
+    add.s32 %r6, %r6, %r5;
+    setp.eq.s32 %p4, %r1, 0;
+    mul.wide.s32 %rd2, %r6, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    @%p4 st.global.b32 [%rd3], %r2;
+"""
+        for fam in ("cute", "ttgir"):
+            f = run(PRE + body + "    ret;\n", family=fam)
+            self.assertEqual(f.refusals, [])
+            for n, want in ((40, 10040), (0, 10000), (200, 1128)):
+                self.assertEqual(evaluate(f, {"n": n})[-1][2], [want])
+        # CuTe splits warps 0-1 from 2-3 (the branch): each role sees half the block.
+        split = """
+    shr.u32 %r7, %r1, 6;
+    setp.eq.s32 %p5, %r7, 0;
+    @%p5 bra A;
+    st.global.b32 [%rd1+4], %r2;
+A:
+"""
+        f = run(PRE + split + body + "    ret;\n", family="cute")
+        self.assertIn("barrier.red.popc.aligned.u32 over threads outside the role",
+                      f.refusals[0]["msg"])  # fmt: skip
+        # bar.red is barrier.red.aligned (ISA): under a lane-varying condition, refused
+        lane = """
+    and.b32 %r7, %r1, 31;
+    setp.lt.u32 %p5, %r7, 16;
+    @!%p5 bra B;
+    {bar} %r8, 0, %p5;
+B:
+    ret;
+"""
+        for bar in ("bar.red.popc.u32", "barrier.red.popc.aligned.u32"):
+            f = run(PRE + lane.format(bar=bar))
+            self.assertIn(f"{bar[:-4]} under a condition that differs between the lanes",
+                          f.refusals[0]["msg"])  # fmt: skip
+        f = run(PRE + lane.format(bar="barrier.red.popc.u32"))  # not aligned: allowed
+        self.assertEqual(f.refusals, [])
+
+    def test_sat_mul24_sad_cvt_prmt(self):
+        # x = t - 64: min(x, 47) + max(x, -48) by add/sub.sat; -x by mul24.lo.s32 of
+        # 0xFFFFFF (-1 as 24 bits); t by mul24.hi.u32 of 0x1010000 (bit 24 dropped); -x
+        # by mul24.hi.s32 of -65536; n + |x - 5| and |t - 100| by sad; max(x, 0) and
+        # clamp(4x, -128, 127) by cvt.sat; 4x wrapped to s8, sign-extended into the b32
+        # register as ptxas does; bytes of 0x08070605:0x04030201 picked by prmt's modes
+        body = """
+    sub.s32 %r3, %r1, 64;
+    add.sat.s32 %r4, %r3, 2147483600;
+    sub.s32 %r4, %r4, 2147483600;
+    sub.sat.s32 %r5, %r3, 2147483600;
+    add.s32 %r5, %r5, 2147483600;
+    mul24.lo.s32 %r6, %r3, 16777215;
+    mul24.hi.u32 %r7, %r1, 16842752;
+    mul24.hi.s32 %r8, %r3, -65536;
+    sad.s32 %r9, %r3, 5, %r2;
+    sad.u32 %r10, %r1, 100, 0;
+    cvt.sat.u8.s32 %r11, %r3;
+    shl.b32 %r12, %r3, 2;
+    cvt.sat.s8.s32 %r13, %r12;
+    cvt.s8.s32 %r14, %r12;
+    mov.b32 %r15, 67305985;
+    mov.b32 %r16, 134678021;
+    and.b32 %r17, %r1, 3;
+    prmt.b32.rc16 %r18, %r15, %r16, %r17;
+    shr.u32 %r18, %r18, 24;
+    prmt.b32.ecl %r19, %r15, %r16, %r17;
+    and.b32 %r19, %r19, 255;
+    prmt.b32.f4e %r20, %r15, %r16, 6;
+    shr.u32 %r20, %r20, 24;
+    add.s32 %r21, %r4, %r5;
+    add.s32 %r21, %r21, %r6;
+    add.s32 %r21, %r21, %r7;
+    add.s32 %r21, %r21, %r8;
+    add.s32 %r21, %r21, %r9;
+    add.s32 %r21, %r21, %r10;
+    add.s32 %r21, %r21, %r11;
+    add.s32 %r21, %r21, %r13;
+    add.s32 %r21, %r21, %r14;
+    add.s32 %r21, %r21, %r18;
+    add.s32 %r21, %r21, %r19;
+    add.s32 %r21, %r21, %r20;
+    mul.wide.s32 %rd2, %r21, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    st.global.b32 [%rd3], %r2;
+"""
+        want = []
+        for t in range(128):
+            x = t - 64
+            want.append(min(x, 47) + max(x, -48) - x + t - x + 9 + abs(x - 5)
+                        + abs(t - 100) + max(x, 0) + max(min(4 * x, 127), -128)
+                        + ((4 * x + 128) % 256 - 128) + (4 if t & 1 else 2)
+                        + (t & 3) + 1 + 6)  # fmt: skip
+        for fam in ("cute", "ttgir"):
+            self.assertEqual(self.offsets(body, 9, family=fam), want)
+        f = run(PRE + """
+    prmt.b32 %r3, %r1, %r2, %r1;
+    mul.wide.s32 %rd2, %r3, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    st.global.b32 [%rd3], %r2;
+    ret;
+""")  # fmt: skip
+        self.assertIn("prmt with a runtime selector", f.refusals[0]["msg"])
+
+    def test_mma_sync_is_register_data(self):
+        body = """
+    mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%f1, %f2, %f3, %f4}, {%r3, %r4, %r5, %r6}, {%r7, %r8}, {%f5, %f6, %f7, %f8};
+    st.global.f32 [%rd1], %f1;
+    ret;
+"""
+        self.assertEqual(run(PRE + body).refusals, [])
+        f = run(PRE + body.replace("st.global.f32 [%rd1], %f1", """
+    mov.b32 %r9, %f1;
+    mul.wide.s32 %rd2, %r9, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    st.global.b32 [%rd3], %r2"""))  # fmt: skip
+        self.assertIn("mma.sync", f.refusals[0]["msg"])
 
 
 if __name__ == "__main__":

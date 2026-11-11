@@ -210,7 +210,7 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
     if p1 is not None and pol["family"] != "cute":
         raise interp.Unsupported("P1", fn.name, "P1-1 on Triton kernels is M5 (D3)")
     cfg = C.build(fn)
-    roles, _dispatch = C.roles(cfg)
+    roles, dispatch = C.roles(cfg, pol["family"])
     locs, srclocs = _locs(fn, pol)
     shared = {v.name for v in module.vars if v.space == "shared"}
     align = {v.name: v.align for v in module.vars + fn.vars if v.space == "shared"}
@@ -224,6 +224,7 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
             "records": records,
             "target": facts.target,
             "shared_align": align,  # cluster.py: the peer-bit mask
+            "dispatch": dispatch is not None,  # mem.py: generic shared writes
         },
     )
     work = pol.get("work") or {}

@@ -35,7 +35,10 @@ Normalization (the spellings of LLVM, NVVM 20 and NVVM 23 meet on one mnemonic):
   - .shared::cta is .shared and .param::entry is .param; mbarrier's default .sem.scope
     (.release.cta for arrive, .acquire.cta for test/try_wait, .relaxed.cta for
     expect_tx/complete_tx) is dropped; tcgen05.mma's .scale_vec::1X/2X/4X is
-    .block32/.block32/.block16; tcgen05.cp's .warpx* follows the shape.
+    .block32/.block32/.block16; tcgen05.cp's .warpx* follows the shape;
+  - ld/st/atom/red drop memory ordering, scope, .volatile, cache operators and .noftz,
+    and put the state space first (_memory_op); strong(opcode) keeps what a load's
+    ordering decides (a strong load's value is never a metadata read, mem.py).
 E.g. `mbarrier.arrive.release.cta.shared::cta.b64` (NVVM 20), `mbarrier.arrive.shared.b64`
 (NVVM 23) and `mbarrier.arrive.shared::cta.b64` (LLVM) are all `mbarrier.arrive.shared`.
 """
@@ -99,6 +102,8 @@ def mnemonic(opcode):
             if out[i : i + 2] == default:
                 del out[i : i + 2]
                 break
+    if base in ("ld", "st", "atom", "red"):
+        out = _memory_op(out)
     # tcgen05.cp: LLVM writes .warpx4.32x128b, the ISA (and NVVM) .32x128b.warpx4.
     if out[:2] == ["tcgen05", "cp"]:
         warps = [t for t in out if t.startswith("warpx")]
@@ -108,6 +113,42 @@ def mnemonic(opcode):
         )
         out[at:at] = warps
     return ".".join(out)
+
+
+# Qualifiers of ld/st/atom/red that change no op table row: memory ordering and its
+# scope (the model has no weak memory, as the fence rows; but see strong()), .volatile,
+# the cache operators (ISA: Cache Operators: performance hints) and .noftz (subnormals
+# of f16/bf16 data, which is Data).
+_NO_EFFECT = {
+    "weak", "relaxed", "acquire", "release", "acq_rel", "volatile",
+    "cta", "cluster", "gpu", "sys", "ca", "cg", "cs", "lu", "cv", "nc", "wb", "wt", "noftz",
+}  # fmt: skip
+_SPACES = ("global", "shared", "shared::cluster", "local", "param", "const")
+# A strong load (ISA: Memory Consistency Model: .volatile, .relaxed and .acquire are
+# strong operations), or one through the .cv cache operator (ISA: Cache Operators:
+# cached lines are stale, fetch again: a value meant to change): another thread may
+# write the location while the kernel runs, so its value is Data, never the
+# host-recorded contents of a metadata load. .weak (the default) and the other cache
+# operators (.nc among them) keep the metadata read.
+_STRONG = {"volatile", "relaxed", "acquire", "cv"}
+
+
+def strong(opcode: str) -> bool:
+    """opcode (as written, before mnemonic drops its ordering) is a strong or .cv ld."""
+    base, *mods = opcode.split(".")
+    return base == "ld" and not _STRONG.isdisjoint(mods)
+
+
+def _memory_op(out: list) -> list:
+    """ld/st/atom/red: _NO_EFFECT qualifiers dropped, the state space first (after
+    .async), as LLVM and inline asm order them differently: `red.relaxed.gpu.global.add`,
+    `red.global.gpu.relaxed.add` and `red.global.add` are all `red.global.add`."""
+    base, *mods = out
+    mods = [t for t in mods if t not in _NO_EFFECT]
+    head = (
+        [base] + [t for t in mods if t == "async"] + [t for t in mods if t in _SPACES]
+    )
+    return head + [t for t in mods if t != "async" and t not in _SPACES]
 
 
 _RED_OPS = ("add", "min", "max", "inc", "dec", "and", "or", "xor")
@@ -132,9 +173,38 @@ _ROWS = [
     ),
     (
         "value",
-        "comparison, selection, moves and integer conversion (ISA: Comparison and "
-        "Selection, Data Movement and Conversion Instructions)",
-        ["setp", "selp", "mov", "cvt", "cvta.param", "cvta.global"],
+        "more integer arithmetic (ISA: Integer Arithmetic Instructions: abs, mad.hi, "
+        "max/min .relu, bfind, dp2a, add/sub .sat, mul24, sad; packed .s16x2/.u16x2 "
+        "add, sub, min, max, per 16-bit lane; prmt's modes, each a fixed byte selection "
+        "per c[1:0]): exact KIR expressions",
+        "abs mad.hi max.relu min.relu bfind bfind.shiftamt dp2a.lo dp2a.hi add.sat "
+        "sub.sat mul24.lo mul24.hi sad".split()
+        + [f"{op}.{t}16x2" for op in ("add", "sub", "min", "max") for t in "su"]
+        + ["max.relu.s16x2", "min.relu.s16x2"]
+        + [f"prmt.{m}" for m in ("f4e", "b4e", "rc8", "ecl", "ecr", "rc16")],
+    ),
+    (
+        "value",
+        "extended-precision arithmetic (ISA: Extended-Precision Integer Arithmetic "
+        "Instructions): the carry flag CC.CF is exact within a basic block",
+        "add.cc addc addc.cc sub.cc subc subc.cc mad.lo.cc mad.hi.cc madc.lo madc.hi "
+        "madc.lo.cc madc.hi.cc".split(),
+    ),
+    (
+        "event",
+        "CTA barrier with a reduction (ISA: barrier.red, bar.red): a bar.sync (no P0 "
+        "event) whose result is the and/or/popc of a predicate over the block's threads",
+        [
+            f"{b}.red.{op}{a}"
+            for op in ("and", "or", "popc")
+            for b, a in (("barrier", ""), ("barrier", ".aligned"), ("bar", ""))
+        ],
+    ),
+    (
+        "value",
+        "comparison, selection, moves and integer conversion, saturating or not (ISA: "
+        "Comparison and Selection, Data Movement and Conversion Instructions)",
+        ["setp", "selp", "mov", "cvt", "cvt.sat", "cvta.param", "cvta.global"],
     ),
     (
         "value",
@@ -163,20 +233,51 @@ _ROWS = [
     ),
     (
         "event",
-        "global memory access per thread (ISA: ld, st): gload/gstore or a metadata load",
+        "global memory access per thread (ISA: ld, st): gload/gstore or a metadata load; "
+        "a generic one by its address (shared: Data; local: as ld/st.local)",
         ["ld.global", "ld", "st.global", "st"],
     ),
     (
         "event",
-        "global atomics per thread (ISA: atom, red): gatomic (atom.exch: gstore)",
-        [f"atom.global.{op}" for op in _RED_OPS + ("exch", "cas")]
-        + [f"red.global.{op}" for op in _RED_OPS],
+        "global atomics per thread (ISA: atom, red, and red.async .global, which takes no "
+        "mbarrier: it completes on none): gatomic (atom.exch: gstore); a generic one on "
+        "shared memory is Data (mem.py)",
+        [f"atom{s}.{op}" for s in (".global", "") for op in _RED_OPS + ("exch", "cas")]
+        + [f"red{s}.{op}" for s in (".global", "") for op in _RED_OPS]
+        + ["red.async.global.add"],
+    ),
+    (
+        "event",
+        "thread-private local memory (ISA: ld, st on .local; LLVM's __local_depot): no "
+        "KIR event; a store must stay inside the depot, a load is the value stored at its "
+        "constant offset earlier in its basic block, else Data (mem.py)",
+        ["ld.local", "st.local"],
+    ),
+    (
+        "value",
+        "address conversion of shared or local memory (ISA: cvta, cvta.to): exact between "
+        "a window and the generic address of the same bytes (mem.py)",
+        [
+            "cvta.shared",
+            "cvta.to.shared",
+            "cvta.shared::cluster",
+            "cvta.to.shared::cluster",
+        ]
+        + ["cvta.local", "cvta.to.local"],
     ),
     (
         "drop",
         "shared memory data (ISA: ld, st on .shared): the values are Data (the tensormap "
         "staging and CLC response reads are handled by the memory model)",
         ["ld.shared", "st.shared"],
+    ),
+    (
+        "drop",
+        "shared memory atomics (ISA: atom, red on .shared): shared memory is no event, "
+        "an atom's results are Data; a write of shared memory, as a generic atom/red "
+        "on a shared address (mem.py)",
+        [f"atom.shared.{op}" for op in _RED_OPS + ("exch", "cas")]
+        + [f"red.shared.{op}" for op in _RED_OPS],
     ),
     (
         "event",
@@ -204,13 +305,19 @@ _ROWS = [
     ),
     (
         "refuse",
-        "relaxed arrive and invalidation (ISA: mbarrier.arrive .relaxed, mbarrier.inval): "
-        "not modeled, as both legacy frontends refuse them",
+        "relaxed arrive (ISA: mbarrier.arrive .relaxed): not modeled, as both legacy "
+        "frontends refuse it",
         [
             "mbarrier.arrive.relaxed.cta.shared",
             "mbarrier.arrive.expect_tx.relaxed.cta.shared",
-            "mbarrier.inval.shared",
         ],
+    ),
+    (
+        "event",
+        "invalidation (ISA: mbarrier.inval): the end of a role's private synchronous "
+        "cycle on the slot (init, arrivals, wait), whose events sync.py removes; refused "
+        "otherwise",
+        ["mbarrier.inval.shared"],
     ),
     (
         "event",
@@ -233,7 +340,8 @@ _ROWS = [
     (
         "event",
         "bulk copy (ISA: cp.async.bulk, cp.reduce.async.bulk): g2s/reduce per issuing "
-        "thread, s2g deduplicated per warp (tma.py, measured per ptxas version)",
+        "thread, s2g deduplicated per warp (tma.py, measured per ptxas version); "
+        ".add.noftz (f16/bf16) only keeps subnormals: still an add",
         [
             "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes",
             "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes"
@@ -241,6 +349,7 @@ _ROWS = [
             "cp.async.bulk.shared.global.mbarrier::complete_tx::bytes",
             "cp.async.bulk.shared::cluster.shared.mbarrier::complete_tx::bytes",
             "cp.async.bulk.global.shared.bulk_group",
+            "cp.reduce.async.bulk.global.shared.bulk_group.add.noftz",
         ]
         + [f"cp.reduce.async.bulk.global.shared.bulk_group.{op}" for op in _RED_OPS],
     ),
@@ -324,7 +433,8 @@ _ROWS = [
             ".multicast::cluster::all",
             "clusterlaunchcontrol.query_cancel.is_canceled",
             "clusterlaunchcontrol.query_cancel.get_first_ctaid",
-        ],
+        ]
+        + [f"clusterlaunchcontrol.query_cancel.get_first_ctaid::{a}" for a in "xyz"],
     ),
     (
         "event",
@@ -352,9 +462,11 @@ _ROWS = [
     (
         "event",
         "in-kernel tensormap (ISA: tensormap.replace, tensormap.cp_fenceproxy): fields "
-        "collected per cp_fenceproxy into a descriptor",
+        "collected per cp_fenceproxy into a descriptor (a .global replace, a tensormap "
+        "edited in global memory, is refused by tma.py)",
         [
-            f"tensormap.replace.{field}.shared"
+            f"tensormap.replace.{field}.{space}"
+            for space in ("shared", "global")
             for field in (
                 "global_address",
                 "rank",
@@ -381,9 +493,10 @@ _ROWS = [
     ),
     (
         "drop",
-        "argument staging of a call (ISA: st, .param state space): only calls of "
-        "__assertfail, vprintf and libdevice are accepted, their arguments are Data",
-        ["st.param"],
+        "argument staging of a call (ISA: st, .param state space, also spelled "
+        ".param::func): only calls of __assertfail, vprintf and libdevice are accepted, "
+        "their arguments are Data",
+        ["st.param", "st.param::func"],
     ),
     (
         "drop",
@@ -408,8 +521,20 @@ _FAMILIES = [
     ),
     (
         "drop",
+        "L2 cache eviction policy (ISA: createpolicy): an opaque value that only the "
+        ".L2::cache_hint operand of a memory instruction takes, which no rule reads",
+        ["createpolicy"],
+    ),
+    (
+        "drop",
         "shared memory data (ISA: ldmatrix, stmatrix): the values are Data",
         ["ldmatrix", "stmatrix"],
+    ),
+    (
+        "drop",
+        "warp-level matrix multiply on registers (ISA: mma.sync): no memory access, the "
+        "results are Data",
+        ["mma.sync"],
     ),
 ]
 

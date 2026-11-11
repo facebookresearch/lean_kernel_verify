@@ -101,7 +101,12 @@ the DSL helper the MMA is located in (a heuristic, for the report only).
 `cfg.py` splits the PTX into basic blocks and admits only the shapes real kernels have:
 reducible flow, every exit edge of a natural loop leaving to one block, exactly one
 `ret`/`exit`, `brx.idx` only in the Triton dispatch (below). Anything else (a guarded
-`ret`, a loop with exits to two blocks) is refused naming the lines.
+`ret`, a loop with exits to two blocks) is refused naming the lines. An unguarded `trap`
+ends its block, which goes on at the other successor of its one predecessor, a
+conditional branch, as if the trap were not reached: Triton places a
+`tl.device_assert`'s failing path after the `ret` (`call __assertfail; trap;`, a KIR
+`assert false` under the failing threads' mask), CuTe writes `if x: trap()`. A trap
+reached otherwise is refused.
 
 `regions.py` builds a tree per role: an if runs from its branch to the immediate
 post-dominator; a loop has a header, one iteration as its body and one exit block (several
@@ -121,6 +126,11 @@ later is emitted on each path. `interp.py` translates it:
   evaluation error (ERROR), never a pass. The registers a loop carries are variables
   assigned in parallel on every back and exit edge, their kinds widened to a fixed point.
   The specs read traces, not loop shapes: a `for` is only cheaper to evaluate.
+* After a loop, a register that every back and exit edge leaves at one loop-invariant
+  value is that value (LLVM rematerializes `mov r, 0` or `mov r, %tid.x` in a loop body
+  and reads it after the loop).
+* The carry flag of `add.cc`/`addc` and `sub.cc`/`subc` lives within a basic block
+  (`ir_ops_ptx.md`, "Values").
 * The blocking wait loop around `mbarrier.try_wait.parity` is one `wait`
   (`ir_ops_ptx.md`, "mbarriers").
 
@@ -128,8 +138,8 @@ later is emitted on each path. `interp.py` translates it:
 
 Within a role, a thread-varying value is an integer expression over LANE, WARP and the
 elect symbols; a value is uniform if substituting every thread of the role gives one
-result (exact BitVec folding plus exact intervals). Shuffles and ballots substitute
-lanes, and a value computed from per-lane loads and shuffles is a table of 32 per-lane
+result (exact BitVec folding plus exact intervals). Shuffles, ballots and warp
+reductions substitute lanes, and a value computed from per-lane loads and shuffles is a table of 32 per-lane
 values, so warp-cooperative code (a varlen tile scheduler's per-lane `cu_seqlens` loads,
 prefix sums and ballots) is exact. The block must be (32k, 1, 1), and every launch of a
 variant must have the same block and cluster.
@@ -138,14 +148,19 @@ variant must have the same block and cluster.
   kernel's dispatch must match Triton's protocol item by item, on the CFG and reaching
   definitions (not on adjacent instructions): `wid = shfl.sync.idx(%tid.x >> 5, 0)` and a
   branch on `wid < D` of either polarity; the worker switch loop (optional `setmaxnreg`,
-  `barrier.sync 1`, `ld.shared.b8 s, [smem + wid + K]`, the out-of-range bypass,
-  `brx.idx s`); the default role's immediate stores of every worker's state before its
-  first fork barrier and of the exit state before its last; a fork-barrier count that no
-  path changes. Each worker runs the switch loop twice, into its state and into exit, so
-  state k's role `partition<k>` is the code before the dispatch, one pass of the loop
-  header and the region from target k back to the header, then `ret`; `default` is warps
-  0..D-1. A state whose region only synchronizes (padding) has no role. A failing item
-  refuses the kernel and names the item. A branch on the warp inside a role is a mask.
+  `barrier.sync 1`, `ld.shared.b8 s, [smem + wid + K]`, then the out-of-range bypass and
+  `brx.idx s`, or, with at most 3 worker states, the chain of `s == v` branches LLVM
+  lowers the switch to); the default role's immediate stores (a vector of immediates
+  too) of every worker's state before its first fork barrier and of the exit state
+  before its last; a fork-barrier count that no path changes. Each branch condition must
+  be the only result of its `setp`. A generic write of shared memory (through
+  `cvta.shared`) or an `atom`/`red.shared` in such a kernel is refused: the state bytes
+  are checked against `st.shared` only. Each worker runs the switch loop twice, into its
+  state and into exit, so state k's role `partition<k>` is the code before the dispatch,
+  one pass of the loop header and the region from target k back to the header, then
+  `ret`; `default` is warps 0..D-1. A state whose region only synchronizes (padding) has
+  no role. A failing item refuses the kernel and names the item. A branch on the warp
+  inside a role is a mask.
 * **CuTe DSL.** Partition refinement: a role starts as every warp of the block; a branch
   condition, mbarrier address, remote CTA rank, named-barrier id or count, or a select
   between two tensors that is uniform within each warp but differs between warps of the
@@ -169,10 +184,15 @@ that guards it.
 value reaches a global offset, a TMA coordinate or a metadata-load index through any
 chain of `let`s (loop-carried induction variables included) is marked. Not marked: the
 nodes of a `mul.hi` expansion (magic-number division) and of a sign extension or signed
-bit field. In `(x + c) << k` LLVM keeps only the low bits of `c` that survive the shift
-(`(n - 2) << 7` may become `(n + 0x1FFFFFE) << 7`), so the intermediate wrap is judged on
-the constant closest to 0 with those low bits: the rewrite reports no wrap the source does
-not have (and a hand-written such address with a huge `c` is not reported either).
+bit field. The other expansions are built so that no marked node wraps where the
+instruction does not: bits that `brev`, `bfi`, `prmt`, `shf`, `vote.ballot`,
+`%lanemask_*` or a `mov` packing registers move into the sign bit come from shifts of
+sign-extended fields (or logical shifts), and 64-bit `mul.hi`, `.sat`, `sad` and the
+carry flag are computed where nothing wraps. In `(x + c) << k` LLVM keeps only the low
+bits of `c` that survive the shift (`(n - 2) << 7` may become `(n + 0x1FFFFFE) << 7`),
+so the intermediate wrap is judged on the constant closest to 0 with those low bits: the
+rewrite reports no wrap the source does not have (and a hand-written such address with a
+huge `c` is not reported either).
 
 ## Family conventions
 
@@ -198,16 +218,24 @@ contract:
 ## Memory
 
 Addresses are expressions over reserved bases: a kernel tensor's address (its pointer
-parameter, or the pointer field of a struct parameter) and a shared symbol's. A global
-access (`ld`/`st.global`, generic `ld`/`st` on a global address, `atom`, `red`,
-`cp.async`) peels its address into (tensor, byte offset) through adds, subtracts and
-selects; a select between two tensors takes the arm the role's condition picks (CuTe: a
+parameter, or the pointer field of a struct parameter), a shared symbol's and a local
+variable's (LLVM's `__local_depot`), and the generic addresses of the same shared and
+local bytes, which only `cvta` makes (so a generic address is never taken for a window
+one). A global access (`ld`/`st.global`, generic `ld`/`st`/`atom`/`red` on a global
+address, `atom`/`red.global`, `red.async`, `cp.async`) peels its address into (tensor,
+byte offset) through adds, subtracts and selects; a select between two tensors takes the arm the role's condition picks (CuTe: a
 condition uniform per warp splits the role). The element offset is the byte offset over
 the element size, provably exact, else the access is refused. An integer global load of
-the register's width whose value reaches a root is a metadata read, KIR
-`load(T, [index])`, and T is a metadata tensor whose recorded contents the input
-carries. The family assembly checks that the contents are those the kernel reads
-(`frontend_ttgir.md`, `frontend_cute.md`).
+the register's width whose value reaches a root is a metadata read,
+KIR `load(T, [index])`, and T is a metadata tensor whose recorded contents the input
+carries; not a strong load (`.volatile`, `.relaxed`, `.acquire`, also `.cv`), whose
+location another thread may write while the kernel runs: its value is Data. The family
+assembly checks that the contents are those the kernel reads (`frontend_ttgir.md`,
+`frontend_cute.md`). A generic access of shared memory is data, as `ld`/`st.shared` and
+`atom`/`red.shared` (an explicitly global one there is an error); local memory is the
+thread's own: no event, a store kept inside its variable by a KIR assert, a load exact
+only where the same thread stored those bytes at a constant offset earlier in the basic
+block (`ir_ops_ptx.md`, "Global memory").
 
 **mbarriers.** An mbarrier address is a shared symbol plus a byte offset, the same for
 every thread of the role. Arrays are runs of adjacent 8-byte slots initialized with one
@@ -220,7 +248,9 @@ array is the one holding the constant part of its offset (a loop-carried address
 that constant outside the carried slot), its index `(offset - start) / 8`, exact by
 structure or known trailing zeros; if either is unknown the use is refused (an if-chain
 over candidate arrays would make unreachable waits static waiters). Counts must be host
-values.
+values. A private synchronous cycle that `mbarrier.inval` ends (TLX's `tlx.async_dot`
+without mBarriers) is removed from the KIR; any other inval is refused (`ir_ops_ptx.md`,
+"mbarriers").
 
 ## TMA descriptors
 
@@ -240,15 +270,23 @@ values.
   descriptor (address 0) has extent 0 and no footprint; every TMA instruction through it
   is a KIR `assert false` (the hardware reads its extents as 2^32 at address 0).
 * **In-kernel descriptor** (`tl.make_tensor_descriptor`): a 128-byte shared staging
-  buffer zeroed by a full warp (`st.shared.b32 0`), filled by `tensormap.replace` and
-  copied to global memory by `tensormap.cp_fenceproxy`. Each cp_fenceproxy takes the
-  fields written since its buffer's last zeroing (one buffer may serve two descriptors in
-  a tile); the zeroing, the replaces and the copy must be in one statement list. A TMA
-  instruction uses the descriptor a cp_fenceproxy of its role wrote at the same address
-  earlier in the same loop iteration, on an enclosing path; anything else is refused.
-  Stores and reduces through it are `gstore` / `gatomic` of its base pointer with exactly
-  the TMA footprint (extents read unsigned: the tensormap's `global_dim` is a b32), so
-  `intended_writes` names the base pointer; a load through one is refused.
+  buffer zeroed by a full warp (`st.shared.b32 0`, also of a register known to be 0),
+  filled by `tensormap.replace` and copied to global memory by
+  `tensormap.cp_fenceproxy`. Each cp_fenceproxy takes the fields written since its
+  buffer's last zeroing (one buffer may serve two descriptors in a tile); a rank never
+  replaced keeps the zeroed 0, rank 1 (Triton writes none for a 1-D descriptor). Any
+  other write of shared memory by the role that may overlap an open buffer closes it (a
+  later replace or copy of it is refused): a `st.shared` or an `atom`/`red.shared` (also
+  under a data predicate), a generic `st`/`atom`/`red` on those bytes, and `stmatrix`,
+  `cp.async`, TMA and bulk copies into shared memory, mbarrier and
+  `tcgen05.alloc`/`commit` and CLC writes whatever their bytes. The zeroing, the
+  replaces and the copy must be in one statement list; a `tensormap.replace` of a
+  descriptor in global memory is refused. A TMA instruction uses the descriptor a
+  cp_fenceproxy of its role wrote at the same address earlier in the same loop
+  iteration, on an enclosing path; anything else is refused. Stores and reduces through
+  it are `gstore` / `gatomic` of its base pointer with exactly the TMA footprint
+  (extents read unsigned: the tensormap's `global_dim` is a b32), so `intended_writes`
+  names the base pointer; a load through one is refused.
 * **Bulk copies** (non-tensor `cp.async.bulk` global -> shared): the 1-D descriptor
   `bulk_<T>_<n>` over T's storage (box n elements), for the transaction bytes, plus the
   footprint `gload`.
@@ -343,8 +381,10 @@ parser cannot read, an internal error): ERROR. Common reasons:
 | Message | Meaning |
 |---|---|
 | `data value from ... reaches ... (slice soundness)` | a dropped value (float, shared or tensor memory contents, a data load) decides an event, a branch, an address or a predicate; the origin names the instruction and line that produced it |
-| `irreducible control flow`, `the loop at ... exit edges`, `N ret/exit`, `guarded ret` | a control-flow shape outside the supported ones |
+| `irreducible control flow`, `the loop at ... exit edges`, `N ret/exit`, `guarded ret`, `trap at line N is not reached by one conditional branch` | a control-flow shape outside the supported ones |
 | `warp-specialize dispatch (<item>): ...` | a TLX dispatch that does not match the protocol (a Triton change of its lowering) |
+| `a generic write of shared memory in a warp-specialized kernel`, `atom.shared... in a warp-specialized kernel` | a TLX dispatch kernel that writes shared memory through `cvta.shared` or a shared atomic |
+| `mbarrier.inval of ... ends no private synchronous cycle ...` | an inval whose slot's events since its init are not exact arrivals and one wait of parity 0 in one statement list |
 | `no op table row for ...` (error) | an instruction without a row: `ir_ops_ptx.md` and `ops.py` need one |
 | `... that several lanes of a warp may execute, compiled by ptxas X for sm_N: its issuing is measured for ...` | a multi-lane TMA or bulk copy from a compiler or target whose issuing was not measured |
 | `a global access whose address has no tensor provenance` | an address from a loaded pointer, an integer or an unnamed parameter |
@@ -362,8 +402,9 @@ source line it names; the PTX it quotes is in the run's `frontend/` directory.
 Lean dominates a run (`specs.md`, "Limits"). The KIR size it scales with comes from the
 events per access site (CuTe: a thread loop per site; TLX: one event over the threads),
 lane tables of warp-cooperative code (32 values per step in every role that runs it),
-roles split per warp range, and `while` loops (only constant-bound counted loops are
-`for`s). The translator keeps it down: only the slice is emitted, subexpressions are
+roles split per warp range, `while` loops (only constant-bound counted loops are
+`for`s), and exact expansions whose thread-dependent operands cannot be bound by a `let`
+(a 64-bit `mul.hi` that is no division by a constant: a tree of 16-bit limbs). The translator keeps it down: only the slice is emitted, subexpressions are
 shared through `let`s, thread offsets fold into closed forms over the thread index (TLX),
 adjacent accesses of one source line merge into one multi-lane event, and the CuTe
 assembly rerolls LLVM's unrolled blocks into `for` loops (the same trace).
@@ -380,7 +421,13 @@ assembly rerolls LLVM's unrolled blocks into `for` loops (the same trace).
   to the allocation, multicast bulk copies, multicast or cta_group::2 TMA loads and
   shared::cluster bulk copies that several lanes of a warp may execute (issuing not
   measured, `ir_ops_ptx.md`), im2col TMA, packed sub-byte TLX descriptors, loads through
-  in-kernel descriptors, the control-flow shapes above, and anything whose value would
-  have to come from Data.
+  in-kernel descriptors and descriptors edited in global memory, `mbarrier.inval` outside
+  a private synchronous cycle, carry-flag instructions under a predicate, generic writes
+  of shared memory and shared atomics in TLX warp-specialized kernels, the control-flow
+  shapes above, and anything whose value would have to come from Data.
+* Memory ordering is not modeled: `.volatile`, `.relaxed`/`.acquire` and scopes change
+  no event. A weak integer global load reads the input's recorded contents; a strong one
+  (`.volatile`, `.relaxed`, `.acquire`) or a `.cv` one is Data, as another thread may
+  write it.
 * The elected lane of `elect.sync` is unspecified: operands under it must not depend on
   it, and a value that does is refused where it matters.

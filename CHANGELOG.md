@@ -40,6 +40,30 @@ First public release.
   sm_100 or sm_103 (`ISSUE_TARGETS`, measured on a GB200 and a GB300), else refused.
   A store whose copies would depend on the lane `elect.sync` picks is refused, as a load
   or reduce is.
+- PTX translation, coverage: `ld`/`st`/`atom`/`red` with any memory ordering, scope,
+  `.volatile` or cache operator (the model has no weak memory, but the value of a strong
+  load, `.volatile`, `.relaxed` or `.acquire`, or of a `.cv` one is Data, never a
+  metadata read: another thread may write it), generic and vector atomics, shared-memory
+  atomics (`atom`/`red.shared`: no event, Data results), `red.async.global`; `cvta`
+  between the shared or local windows and generic addresses; thread-local memory
+  (`__local_depot`); integer `abs`, `mad.hi`, `.relu`, `bfind`, `dp2a`, `add`/`sub.sat`,
+  `mul24`, `sad`, packed `.s16x2`/`.u16x2`, the `prmt` modes, saturating `cvt`, the
+  carry and borrow chains (`add.cc`, `addc`, `sub.cc`, `subc`, `mad*.cc`) and 16- and
+  64-bit `mul.hi` (a division by a constant as `udiv`); `redux.sync`, `barrier.red` and
+  `bar.red`; `.add.noftz` bulk reduces; CLC `get_first_ctaid::{x,y,z}`; `createpolicy`
+  and `mma.sync` (drops); Triton's `tl.device_assert` (`st.param::func`, a `trap` ending
+  its block); the Triton warp-specialize dispatch as a compare chain (at most 3 worker
+  states) and with a state table of vector immediates; in-kernel descriptors without a
+  rank (1-D) or zeroed through a register known to be 0; `mbarrier.inval` that ends a
+  private synchronous cycle (the cycle is removed). An integer `cvt` into a wider
+  register now extends a signed type by its sign, and bits that `brev`, `bfi`, `prmt`,
+  `shf`, ballots, lane masks or register packing move into the sign bit are no longer
+  reported as address wraps (P0-1). Refused: a shared write that may overlap an open
+  tensormap staging buffer before its copy (also under a data predicate), a
+  `tensormap.replace` in global memory, a generic shared write or a shared atomic in a
+  TLX warp-specialized kernel, a carry-flag instruction under a predicate, an
+  `mbarrier.inval` outside such a cycle; an explicit `.global` access through a shared
+  address is an error.
 - CuTe dump: the LaunchRecord address candidates of a launch whose TVM-FFI environment
   stream is not the jit function's last parameter are no longer shifted by one
   parameter.

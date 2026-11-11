@@ -17,8 +17,11 @@ recognizer on a warp-specialized kernel in each branch polarity (workers on @!p 
 the default falling through and padding states; the default on @p bra with unrelated
 instructions in between, a worker preamble, setmaxnreg and a partition loop), checking
 the warp -> state map, padding, exit state and each role's control flow (one pass of
-the switch loop header, whose definitions the regions read); and one
-refusal per protocol item (entry, header, table, exit, forks), each naming its item.
+the switch loop header, whose definitions the regions read); the state table written as
+a vector of immediates; the dispatch as a compare chain without brx.idx (each role
+passing the links up to its own; looked for in Triton kernels only); and one refusal
+per protocol item (entry, header, table, exit, forks), each naming its item, among them
+branches on the complement result q of a `setp p|q` (not read as the comparison).
 """
 
 import sys
@@ -219,6 +222,56 @@ $RET:
 )
 
 
+# Warp-specialized with at most 3 worker states: LLVM compares the state byte in a chain
+# instead of a brx.idx jump table (the last link negated). 12 warps, 4 default: warps
+# 4-7 -> 0, 8-11 -> 1, exit 2.
+WS_CHAIN = kernel(
+    """
+    mov.u32 %r1, %tid.x;
+    shr.u32 %r2, %r1, 5;
+    shfl.sync.idx.b32 %r3, %r2, 0, 31, -1;
+    ld.param.u64 %rd1, [k_param_0];
+    setp.lt.u32 %p1, %r3, 4;
+    @!%p1 bra $LOOP;
+    st.shared.b32 [global_smem+28], 0;
+    st.shared.b32 [global_smem+32], 16843009;
+    barrier.sync 1;
+    barrier.sync 1;
+    st.global.b32 [%rd1], %r1;
+    barrier.sync 1;
+    st.shared.b32 [global_smem+32], 33686018;
+    st.shared.b32 [global_smem+28], 33686018;
+    barrier.sync 1;
+$RET:
+    ret;
+$S1:
+    barrier.sync 1;
+    st.global.b32 [%rd1+4], %r6;
+    barrier.sync 1;
+$LOOP:
+    barrier.sync 1;
+    mov.b32 %r6, global_smem;
+    add.s32 %r7, %r6, %r3;
+    ld.shared.b8 %r5, [%r7+24];
+    setp.eq.b32 %p2, %r5, 0;
+    @%p2 bra $S0;
+    setp.eq.b32 %p3, %r5, 1;
+    @%p3 bra $S1;
+    setp.ne.b32 %p4, %r5, 2;
+    @!%p4 bra $RET;
+    barrier.sync 1;
+    barrier.sync 1;
+    bra.uni $LOOP;
+$S0:
+    barrier.sync 1;
+    st.global.b32 [%rd1+8], %r6;
+    barrier.sync 1;
+    bra.uni $LOOP;
+""",
+    threads=384,
+)
+
+
 class Shape(unittest.TestCase):
     def test_blocks_dominators_loops(self):
         g = build(
@@ -311,6 +364,39 @@ $X:
 """)
         )
         self.assertEqual(list(g.loops), ["$L"])
+
+    def test_trap_goes_on_after_its_branch(self):
+        # Triton's device asserts after the ret (`call __assertfail; trap;`), CuTe's
+        # `if x: trap()`: a trap block goes on where its branch's other side does, as if
+        # the trap were not reached; a guarded trap ends no block
+        g = build(
+            kernel("""
+    @%p1 bra $A1;
+    add.s32 %r2, %r2, 1;
+    @%p2 bra $J;
+    trap;
+$J:
+    @%p3 bra $A2;
+    @%p4 trap;
+    add.s32 %r2, %r2, 2;
+    ret;
+$A1:
+    trap;
+$A2:
+    trap;
+""")
+        )
+        b1, b2 = holding(g, "add.s32 %r2, %r2, 1"), holding(g, "@%p4 trap")
+        self.assertEqual(g.blocks["$A1"].succs, (b1,))
+        (cute,) = [b for b in g.blocks[b1].succs if b != "$J"]
+        self.assertEqual(g.blocks[cute].succs, ("$J",))
+        self.assertEqual(g.blocks["$A2"].succs, (b2,))
+        self.assertEqual(g.blocks[b2].instrs[-1].base, "ret")
+        # reached otherwise than by one conditional branch: refused
+        for body in ("    bra.uni $A;\n    ret;\n$A:\n    trap;\n",
+                     "    @%p1 bra $A;\n    @%p2 bra $A;\n    ret;\n$A:\n    trap;\n"):  # fmt: skip
+            with self.assertRaisesRegex(cfg.CfgError, "not reached by one conditional"):
+                build(kernel(body))
 
     def test_refusals(self):
         cases = {
@@ -430,6 +516,87 @@ class WarpSpecialize(unittest.TestCase):
             self.assertNotIn("$BYP", r.succs)
         self.assertNotIn("$HDR", default)
 
+    def test_vector_of_immediates_table(self):
+        # LLVM merges the state stores of adjacent warps into one vector store
+        text = WS_TAKEN.replace(
+            "st.shared.b64 [global_smem+1032], 144399974472351744",
+            "st.shared.v2.b32 [global_smem+1032], {0, 33620739}",
+        ).replace(
+            "st.shared.b64 [global_smem+1032], 289360691352306692",
+            "st.shared.v2.b32 [global_smem+1032], {67372036, 67372036}",
+        )
+        rs, d = cfg.roles(build(text))
+        self.assertEqual(d.warps, {4: 0, 5: 0, 6: 0, 7: 0, 8: 3, 9: 3, 10: 1, 11: 2})
+        self.assertEqual((d.exit_state, d.padding), (4, (3,)))
+        self.assertEqual(
+            [r.name for r in rs], [r.name for r in cfg.roles(build(WS_TAKEN))[0]]
+        )
+        with self.assertRaisesRegex(
+            cfg.CfgError, r"dispatch \(table\): .*not as an immediate"
+        ):
+            cfg.roles(build(text.replace("{0, 33620739}", "{%r1, 33620739}")))
+
+    def test_compare_chain(self):
+        g = build(WS_CHAIN)
+        rs, d = cfg.roles(g)
+        self.assertEqual(
+            d.warps, {**dict.fromkeys(range(4, 8), 0), **dict.fromkeys(range(8, 12), 1)}
+        )
+        self.assertEqual(
+            (d.default_warps, d.exit_state, d.padding, d.header), (4, 2, (), "$LOOP")
+        )
+        self.assertEqual(
+            [(r.name, r.warps) for r in rs],
+            [("default", (0, 1, 2, 3)), ("partition0", (4, 5, 6, 7)),
+             ("partition1", (8, 9, 10, 11))],
+        )  # fmt: skip
+        # each role passes the links up to its own, then its region, whose back edge
+        # (S1 falls through into the header) becomes ret; the bypass is in no role
+        link2 = g.blocks["$LOOP"].succs[1]
+        link3 = g.blocks[link2].succs[1]
+        p0, p1 = rs[1].succs, rs[2].succs
+        self.assertEqual(
+            (p0["$LOOP"], p0["$S0"], p0["$RET"]), (("$S0",), ("$RET",), ())
+        )
+        self.assertEqual(
+            (p1["$LOOP"], p1[link2], p1["$S1"]), ((link2,), ("$S1",), ("$RET",))
+        )
+        self.assertNotIn(link2, p0)
+        bypass = g.blocks[link3].succs[1]
+        for r in rs:
+            self.assertNotIn(link3, r.succs)
+            self.assertNotIn(bypass, r.succs)
+        bad = {
+            "has `st.shared": WS_CHAIN.replace(
+                "    setp.eq.b32 %p3",
+                "    st.shared.b32 [global_smem], 0;\n    setp.eq.b32 %p3",
+            ),
+            "compares the state byte with 256": WS_CHAIN.replace(
+                "%r5, 1;", "%r5, 256;"
+            ),
+        }
+        for msg, text in bad.items():
+            with (
+                self.subTest(msg),
+                self.assertRaisesRegex(cfg.CfgError, rf"dispatch \(header\): .*{msg}"),
+            ):
+                cfg.roles(build(text))
+
+        # a link on the complement result q of `setp.eq p|q` (taken when s != v) is no
+        # link: on the first, no chain (one role); on another, the chain ends early
+        def pair(v):
+            p = f"%p{v + 2}"
+            return WS_CHAIN.replace(
+                f"{p}, %r5, {v};\n    @{p} bra", f"{p}|%p9, %r5, {v};\n    @%p9 bra"
+            )
+
+        rs, d = cfg.roles(build(WS_CHAIN), "cute")  # a chain is Triton's lowering only
+        self.assertEqual(([r.name for r in rs], d), (["default"], None))
+        rs, d = cfg.roles(build(pair(0)))
+        self.assertEqual(([r.name for r in rs], d), (["default"], None))
+        with self.assertRaisesRegex(cfg.CfgError, r"dispatch \(exit\): .*not the one"):
+            cfg.roles(build(pair(1)))
+
     def test_protocol_refusals(self):
         def drop(text, line):
             assert line in text, line
@@ -461,6 +628,15 @@ class WarpSpecialize(unittest.TestCase):
                 "taken when wid < 4",
                 WS_FALL.replace("@!%p1 bra $LOOP", "@%p1 bra $LOOP"),
             ),
+            # the guard is the complement result of a setp pair (and not even read)
+            (
+                "entry",
+                "is not on wid < D",
+                WS_CHAIN.replace(
+                    "setp.lt.u32 %p1, %r3, 4;\n    @!%p1 bra",
+                    "setp.lt.u32 %p1|%p8, %r3, 4;\n    @!%p8 bra",
+                ),
+            ),
             (
                 "entry",
                 "taken when wid < 4",
@@ -489,6 +665,14 @@ class WarpSpecialize(unittest.TestCase):
                 "header",
                 r"`@\(state > 3\) bra`",
                 WS_FALL.replace("setp.gt.u32 %p2, %r5, 3", "setp.gt.u32 %p2, %r5, 2"),
+            ),
+            (
+                "header",
+                r"`@\(state > 3\) bra`",
+                WS_FALL.replace(
+                    "setp.gt.u32 %p2, %r5, 3;\n    @%p2 bra",
+                    "setp.gt.u32 %p2|%p9, %r5, 3;\n    @%p9 bra",
+                ),
             ),
             (
                 "header",

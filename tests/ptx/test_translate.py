@@ -114,15 +114,13 @@ $BYPASS:
 )
 
 
-def ws_facts(**pol):
+def ws_facts(text=WS, **pol):
     params = [{"ptx": "k_param_0", "kind": "ptr", "name": "x", "size": 8, "fields": {}},
               {"ptx": "k_param_1", "kind": "scalar", "name": "n", "size": 4, "fields": {}}]  # fmt: skip
     policy = T.policy(
         "ttgir", src_root="/src", params=params, tensors={"x": {"elem_bytes": 4}}, **pol
     )
-    return T.translate(
-        WS.replace("smem+24", "smem+24"), "k", [{"block": [256, 1, 1]}], policy
-    )
+    return T.translate(text, "k", [{"block": [256, 1, 1]}], policy)
 
 
 class Contract(unittest.TestCase):
@@ -148,6 +146,24 @@ class Contract(unittest.TestCase):
             f.tensors, {"x": {"uses": ["gstore"], "metadata": False, "elem_bytes": 4}}
         )
         self.assertEqual(kir_errors(f), [])
+
+    def test_generic_shared_write_is_refused(self):
+        # a generic store may rewrite a worker's state byte, which the dispatch
+        # recognizer reads from st.shared only (cfg.py)
+        gen = "    cvt.u64.u32 %rd4, %r30;\n    cvta.shared.u64 %rd5, %rd4;\n" \
+            "    st.u32 [%rd5+24], 0;\n"  # fmt: skip
+        f = ws_facts(
+            WS.replace("    barrier.sync 1;\n", gen + "    barrier.sync 1;\n", 1)
+        )
+        self.assertIn("a generic write of shared memory in a warp-specialized kernel",
+                      f.refusals[0]["msg"])  # fmt: skip
+        # ... as may a shared atomic, though no generic address
+        red = "    red.shared.add.u32 [%r30+24], 1;\n"
+        f = ws_facts(
+            WS.replace("    barrier.sync 1;\n", red + "    barrier.sync 1;\n", 1)
+        )
+        self.assertIn("red.shared.add.u32 in a warp-specialized kernel",
+                      f.refusals[0]["msg"])  # fmt: skip
 
     def test_addr_marks_per_role(self):
         f = ws_facts()
@@ -391,6 +407,48 @@ class Contract(unittest.TestCase):
             )
             self.assertEqual(offs, want)
             self.assertNotIn("overflow", [t[0] for t in evaluate(f, {"n": 1})])
+
+    def test_bit_moves_do_not_wrap(self):
+        # bits moved into bit 31 by brev, prmt, bfi, shf, vote.ballot and %lanemask_eq
+        # (libdevice ffs is brev + bfind.shiftamt): no arithmetic, so no address wrap
+        f_body = """
+    ld.param.u64 %rd1, [k_param_0];
+    mov.u32 %r1, %tid.x;
+    brev.b32 %r2, %r1;
+    shr.u32 %r3, %r2, 27;
+    or.b32 %r4, %r1, 128;
+    prmt.b32 %r5, %r4, 0, 0x0123;
+    shr.u32 %r6, %r5, 24;
+    add.s32 %r7, %r3, %r6;
+    bfi.b32 %r8, %r1, 0, 31, 1;
+    shr.u32 %r9, %r8, 31;
+    add.s32 %r10, %r7, %r9;
+    shf.l.wrap.b32 %r11, %r1, %r1, 31;
+    shr.u32 %r12, %r11, 31;
+    add.s32 %r13, %r10, %r12;
+    setp.eq.u32 %p1, %r1, 31;
+    vote.sync.ballot.b32 %r14, %p1, -1;
+    shr.u32 %r15, %r14, 31;
+    add.s32 %r16, %r13, %r15;
+    mov.u32 %r17, %lanemask_eq;
+    shr.u32 %r18, %r17, 31;
+    add.s32 %r19, %r16, %r18;
+    mul.wide.s32 %rd2, %r19, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    st.global.b32 [%rd3], %r1;
+    ret;
+"""
+        for fam in ("ttgir", "cute"):
+            f = run(f_body, family=fam, threads=32)
+            self.assertEqual(kir_errors(f), [])
+            trace = evaluate(f, {"n": 1})
+            self.assertNotIn("overflow", [t[0] for t in trace])
+            offs = sorted(o for t in trace for o in t[2])
+            rev5 = [int(f"{t:05b}"[::-1], 2) for t in range(32)]
+            want = [
+                rev5[t] + (t | 128) + 2 * (t & 1) + 1 + (t == 31) for t in range(32)
+            ]
+            self.assertEqual(offs, sorted(want))
 
 
 class ParamTable(unittest.TestCase):

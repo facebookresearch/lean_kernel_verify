@@ -316,14 +316,25 @@ class NamedBarriers(unittest.TestCase):
     bar.sync 1, 64;
     barrier.sync.aligned 2;
     mov.b32 %r20, 3;
-    bar.arrive %r20, 96;""",
+    bar.arrive %r20, 96;
+    barrier.red.popc.aligned.u32 %r21, 4, %p12;
+    bar.red.and.pred %p13, 5, 32, %p12;""",
             threads=64,
         )
         self.assertEqual(f.refusals, [])
         got = [
             (e["id"]["v"], e["count"]["v"], e["sync"]) for e in events(f, "named_bar")
         ]
-        self.assertEqual(got, [(1, 64, True), (2, 64, True), (3, 96, False)])
+        self.assertEqual(
+            got,
+            [
+                (1, 64, True),
+                (2, 64, True),
+                (3, 96, False),
+                (4, 64, True),
+                (5, 32, True),
+            ],
+        )
         self.assertEqual(kir_errors(f), [])
 
     def test_per_warp_id_splits(self):

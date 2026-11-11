@@ -7,7 +7,7 @@
 parameters and mbarriers.
 
     Memory(cfg, params, tensors, policy)    one per kernel variant; interp.py calls
-        execute(tr, instr, mnemonic)        the op table's event rows and ld.param
+        execute(tr, instr, mnemonic)        the op table's event rows, ld.param, cvta
         symbol(tr, name, w)                 a symbol operand (shared-memory address)
         wait(tr, instr)                     the wait pseudo-instruction (regions.Wait)
         anchor_value(tr, instr, site)       the value of a work anchor
@@ -25,6 +25,12 @@ but not in the role splits the role (CuTe; _pick_bases). An address that is no s
 is refused, never guessed (design §5.5). tma.py adds
 `%d:<param>`, a descriptor parameter's address, and `%x:<param>`, Triton's scratch
 pointer: only TMA instructions may use them (any other global access is refused).
+`%l:<var>` is the local-window address of a `.local` variable (LLVM's __local_depot);
+`%S:<symbol>` and `%L:<var>` are the generic addresses of the same bytes, which only
+cvta makes (_cvta: cvta.shared(::cluster) %s: -> %S:, cvta.to.shared(::cluster) %S: ->
+%s:, cvta.local %l: -> %L:, cvta.to.local %L: -> %l:, the offset kept; of anything else
+Data), so a generic address is never taken for a window one (a shared-memory rule wants
+%s:). A generic ld/st/atom/red whose address is %S: (or %s:) accesses shared memory: Data.
 
 Global accesses (ld/st.global, generic ld/st whose address peels to a tensor, atom/red,
 cp.async) are events of the issuing threads on the tensor (interp.Translator.mem_event):
@@ -37,6 +43,22 @@ the role uses only for data costs nothing, one that reaches a root makes T a met
 tensor (translate.py finds the loads in the KIR). Its index is replaced by 0 where the
 mask is false, so a lane that does not read never makes the load fail; the predicated
 instruction's own select keeps the old value there (KIR evaluates only the chosen arm).
+A strong load (ops.strong: .volatile, .relaxed, .acquire; also .cv) reads what another
+thread may write while the kernel runs, not the recorded contents: its value is Data
+(still a gload, and a load anchor's index). An atom or red is a gatomic (atom.exch a
+gstore) of its vector's elements, whatever its ordering and scope (ops.py drops them);
+red.async.global is one too (it names no mbarrier: there is no completion to model). An
+atom's results are Data. atom/red.shared (ops.py drops) write shared memory: no event,
+as a generic one on a shared address (_shared_write).
+
+Local memory (ld/st.local through %l:, generic ld/st through %L:) is the thread's own: no
+event. A store must stay inside its variable (beyond it lie the thread's other local data,
+e.g. ptxas spills, which the model keeps in registers): a KIR assert, per thread where
+the offset varies. A load is exact where the same thread stored the same bytes (offset
+and width) at a constant offset earlier in the basic block, unpredicated: those values
+live in Translator.env[LOCAL], which interp.run forgets at the start of each basic block
+(so no merge or loop slot is needed); any other load is Data, which the slicer refuses
+where it reaches a root. A store at a runtime offset forgets everything known.
 
 Kernel parameters: `params[i]` = {"kind": "ptr" | "scalar" | "aggregate" | "tensormap",
 "name", "fields": {offset: {"size", "kind", "name"}}} per PTX parameter (translate.py
@@ -69,11 +91,23 @@ import re
 from pathlib import Path
 
 from . import cluster, expr as E, ops, sync, tma
-from .interp import Data, Translator, Unsupported
+from .interp import Data, LOCAL, Translator, Unsupported
+from .parse import type_bytes
 
 # Mnemonics of global loads and stores (a generic one by its address).
 _GLOBAL_LD = ("ld.global", "ld")
 _GLOBAL_ST = ("st.global", "st")
+# ... and of the explicitly global accesses (a shared address faults).
+_EXPLICIT_GLOBAL = ("ld.global", "st.global", "atom.global", "red.global", "red.async")
+# cvta between a window and generic addresses: (operand's base, result's base) prefixes.
+_CVTA = {
+    "cvta.shared": ("%s:", "%S:"),
+    "cvta.shared::cluster": ("%s:", "%S:"),
+    "cvta.to.shared": ("%S:", "%s:"),
+    "cvta.to.shared::cluster": ("%S:", "%s:"),
+    "cvta.local": ("%l:", "%L:"),
+    "cvta.to.local": ("%L:", "%l:"),
+}
 
 
 class Memory:
@@ -88,6 +122,11 @@ class Memory:
         self.shared = {v.name for v in self.fn.vars if v.space == "shared"} | set(
             policy.get("shared_symbols", ())
         )
+        self.local = {  # .local variable (the __local_depot frame) -> its bytes
+            v.name: type_bytes(v.type) * (v.array or 1)
+            for v in self.fn.vars
+            if v.space == "local"
+        }
         self.loads: dict = {}  # id(ld.global) -> (tensor, element index), for anchors
         self.tma = tma.Tma(
             self, policy.get("records") or []
@@ -97,6 +136,8 @@ class Memory:
     def symbol(self, tr: Translator, name: str, w: int):
         if name in self.shared:
             return E.var(f"%s:{name}", w)
+        if name in self.local:
+            return E.var(f"%l:{name}", w)
         if self.params.get(name, {}).get("kind") == "tensormap":  # tma.py: a descriptor
             return self.tma.symbol(name, w)
         return Data(f"the address of {name} (no shared-memory or tensor provenance)")
@@ -179,30 +220,40 @@ class Memory:
 
     # ---------------------------------------------------------------- dispatch
     def execute(self, tr: Translator, i, mn: str) -> None:  # noqa: C901 (one case per op family)
+        if mn.startswith(tma.SHARED_WRITES):  # (tma.py: tensormap staging buffers)
+            self.tma.close_staging(tr)
         if mn == "ld.param":
             return self._ld_param(tr, i)
         if mn.startswith(sync.PREFIXES):  # sync.py: tcgen05, CLC, cluster scope
             return sync.execute(tr, i, mn)
         if mn == "cvta.param":  # tma.py: generic addressing of a descriptor parameter
             return self.tma.cvta_param(tr, i)
+        if mn.startswith("cvta"):
+            return self._cvta(tr, i, mn)
         if mn.startswith("mapa"):  # cluster.py: a peer CTA's shared memory
             return cluster.mapa(tr, i)
         if mn.startswith(
             tma.PREFIXES
         ):  # tma.py: TMA, bulk copies, in-kernel tensormaps
             return self.tma.execute(tr, i, mn)
+        if mn in ("ld.local", "st.local") or (
+            mn in ("ld", "st")
+            and self._is_local(tr, i.operands[1 if mn == "ld" else 0])
+        ):
+            return self._local(tr, i, mn)
         if mn in _GLOBAL_LD or mn.startswith("ld.global"):
             return self._load(tr, i, mn)
         if mn in _GLOBAL_ST or mn.startswith("st.global"):
             return self._store(tr, i)
-        if mn.startswith(("atom.global", "red.global")):
+        if mn.startswith(("atom", "red")):
             return self._atomic(tr, i, mn)
         if mn.startswith(("cp.async.ca", "cp.async.cg")):
             return self._cp_async(tr, i)
         if mn.startswith("mbarrier."):
             return self._mbarrier(tr, i, mn)
         if mn.startswith(("bar.", "barrier.")):  # barrier.cluster: sync.py, above
-            if mn in ("bar.sync", "bar.arrive") or mn.endswith(".aligned"):
+            bar = mn in ("bar.sync", "bar.arrive") or mn.startswith("bar.red.")
+            if bar or mn.endswith(".aligned"):  # bar.*: barrier.*.aligned (ISA)
                 tr.aligned(mn)
             return  # no P0 event, as both legacy frontends (named_bar is P1, M3)
         if mn == "call":
@@ -281,7 +332,8 @@ class Memory:
     # ---------------------------------------------------------- global memory
     def _global(self, tr: Translator, i, op, nbytes: int):
         """(tensor, element offset, elements) of a global access of nbytes at operand op,
-        or None if its address is a shared one (generic ld/st)."""
+        or None if its address is a shared one (generic ld/st/atom/red; through a global
+        one, ld/st/atom/red.global or red.async: an error)."""
         a = self.address(tr, op)
         a = tr.as_int(a, "a global address")
         p = peel(a)
@@ -290,7 +342,10 @@ class Memory:
         if p is None:
             tr.fail(i, "a global access whose address has no tensor provenance")
         base, off = p
-        if base[2].startswith("%s:"):
+        if base[2][:3] in ("%s:", "%S:"):
+            mn = ops.mnemonic(i.opcode)
+            if mn.startswith(_EXPLICIT_GLOBAL):
+                tr.fail(i, f"{mn} on shared memory through a global address", "error")
             return None
         if not base[2].startswith("%g:"):  # tma.py's descriptor parameters and scratch
             tr.fail(i, f"a global access through {base[2][1:]} (only TMA instructions)")
@@ -330,6 +385,7 @@ class Memory:
         self._event(tr, "gload", name, off, n)
         eb = self.tensors[name]["elem_bytes"]
         per = n // len(regs)  # elements per register
+        strong = ops.strong(i.opcode)
         for k, r in enumerate(regs):
             if r[0] != "reg":
                 continue
@@ -339,26 +395,52 @@ class Memory:
             idx = E.bin("add", off, E.const(k, 64))
             if k == 0:
                 self.loads[id(i)] = (name, off)
+            if strong:  # another thread may write it during the run: no metadata read
+                tr.env[r[1]] = Data(f"{i.opcode} of {name} at {tr.loc(i)} (a strong "
+                                    "load: another thread may write it)")  # fmt: skip
+                continue
             v = E.load(name, tr.guard(idx, 0), bits)
             tr.write(r[1], _extend(tr, r[1], v, _signed(i.opcode)))
 
     def _store(self, tr: Translator, i) -> None:
         val = i.operands[1]
         n = len(val[1]) if val[0] == "vec" else 1
-        g = self._global(tr, i, i.operands[0], n * _elem_bits(i.opcode) // 8)
-        if g is None:
-            return  # a generic store to shared memory: data
+        nbytes = n * _elem_bits(i.opcode) // 8
+        g = self._global(tr, i, i.operands[0], nbytes)
+        if g is None:  # a generic store to shared memory: data
+            self._shared_write(tr, i, i.operands[0], nbytes)
+            return
         self._event(tr, "gstore", *g)
 
+    def _shared_write(self, tr: Translator, i, op, nbytes: int) -> None:
+        """A generic st/atom/red of shared memory: it closes the staging buffers it may
+        overlap (tma.py); refused in a warp-specialized kernel, whose dispatch recognizer
+        sees the state bytes' st.shared writes only (cfg.py)."""
+        if self.policy.get("dispatch"):
+            what = "a generic write of shared memory"
+            what = i.opcode if ".shared" in i.opcode else what
+            tr.fail(i, f"{what} in a warp-specialized kernel "
+                       "(the dispatch's state bytes are checked against st.shared only)")  # fmt: skip
+        self.tma.close_staging(tr, self.address(tr, op), nbytes)
+
     def _atomic(self, tr: Translator, i, mn: str) -> None:
+        """atom/red (.global or generic; red.async.global): a gatomic (atom.exch: gstore)
+        of the vector's elements per thread; atom/red.shared (interp.py routes the drop
+        here), or a generic one whose address is a shared one, is shared-memory data, as
+        a generic ld/st. An atom's results are Data."""
         ret = mn.startswith("atom")
-        k = 1 if ret else 0
-        g = self._global(tr, i, i.operands[k], _elem_bits(i.opcode) // 8)
+        nbytes = _vec(i.opcode) * _elem_bits(i.opcode) // 8
+        op = i.operands[1 if ret else 0]
+        g = None if ".shared" in mn else self._global(tr, i, op, nbytes)
         if g is None:
-            tr.fail(i, f"{mn} on shared memory through a global address", "error")
-        self._event(tr, "gstore" if mn.endswith(".exch") else "gatomic", *g)
-        if ret and i.operands[0][0] == "reg":
-            tr.env[i.operands[0][1]] = Data(f"{i.opcode} result at {tr.loc(i)}")
+            self._shared_write(tr, i, op, nbytes)
+        else:
+            self._event(tr, "gstore" if mn.endswith(".exch") else "gatomic", *g)
+        if ret:
+            dst = i.operands[0]
+            for r in dst[1] if dst[0] == "vec" else [dst]:
+                if r[0] == "reg":
+                    tr.env[r[1]] = Data(f"{i.opcode} result at {tr.loc(i)}")
 
     def _cp_async(self, tr: Translator, i) -> None:
         """cp.async.{ca,cg}.shared.global [dst], [src], size{, src-size | ignore-src}
@@ -395,6 +477,73 @@ class Memory:
             tr.fail(i, "cp.async from a shared address", "error")
         self._event(tr, "gload", *g)
         tr.mask = saved
+
+    # ------------------------------------------------------------ local memory
+    def _is_local(self, tr: Translator, op) -> bool:
+        """The address operand op of a generic ld/st is a generic local address."""
+        a = self.address(tr, op)
+        p = None if isinstance(a, Data) else peel(a)
+        return p is not None and p[0][2].startswith("%L:")
+
+    def _local(self, tr: Translator, i, mn: str) -> None:
+        """ld/st.local through a local-window address, or a generic ld/st through a
+        generic local one, of the thread's depot (module doc)."""
+        store = mn.startswith("st")
+        addr, val = i.operands[:2] if store else i.operands[1::-1]
+        regs = list(val[1]) if val[0] == "vec" else [val]
+        size = _elem_bits(i.opcode) // 8
+        p = peel(tr.as_int(self.address(tr, addr), "a local address"))
+        window = "%l:" if mn.endswith(".local") else "%L:"
+        if p is None or not p[0][2].startswith(window):
+            tr.fail(i, "a local access that is no offset into the thread's local depot")
+        depot, off = p[0][2][3:], p[1]
+        k = off[2] if E.is_const(off) else None
+        known = tr.env.get(LOCAL, {})
+        if not store:
+            for j, r in enumerate(regs):
+                if r[0] != "reg":
+                    continue
+                got = None if k is None else known.get((depot, k + j * size))
+                if got is None or got[0] != size or _reg_type(tr, r[1]) == "f":
+                    tr.env[r[1]] = Data(f"{i.opcode} of local memory at {tr.loc(i)}")
+                else:
+                    tr.write(r[1], _extend(tr, r[1], got[1], _signed(i.opcode)))
+            return
+        n = size * len(regs)
+        if n > self.local[depot]:
+            tr.fail(i, f"a {n}-byte store into the {self.local[depot]}-byte {depot}")
+        # Beyond the depot lie the thread's other local data (ptxas spills): a KIR
+        # assert, per thread where the offset varies.
+        lim = E.const(self.local[depot] - n, E.width(off))
+        tr.require(E.cmp("ule", off, lim), f"st.local inside {depot}")
+        if k is None:  # a runtime offset: any byte may change
+            tr.env[LOCAL] = {}
+            return
+        new = {(d, o): x for (d, o), x in known.items()
+               if d != depot or o + x[0] <= k or k + n <= o}  # fmt: skip
+        for j, r in enumerate(regs):
+            v = tr.operand_value(r, 8 * size)
+            if i.guard is None and not isinstance(v, Data):  # predicated: unknown
+                new[(depot, k + j * size)] = (size, E.resize(v, 8 * size, False))
+        tr.env[LOCAL] = new
+
+    # ------------------------------------------------------- address conversion
+    def _cvta(self, tr: Translator, i, mn: str) -> None:
+        """cvta.global keeps the address (the global window is the generic one). Between
+        a window of shared or local memory and generic addresses (_CVTA) the base changes
+        and the offset stays: the same bytes. The issuing CTA's shared memory only: its
+        shared::cluster addresses are its shared::cta ones (ISA: Shared Memory window);
+        another CTA's (cluster.Remote) is Data, as is a value of another window."""
+        v = tr.operand(i, 1, 64)
+        if mn != "cvta.global":
+            frm, to = _CVTA[mn]
+            p = None if isinstance(v, Data) else peel(v)
+            if p is None or not p[0][2].startswith(frm):
+                v = Data(f"{i.opcode} of no {frm[1]} address at {tr.loc(i)}")
+            else:
+                v = E.bin("add", E.var(to + p[0][2][3:], 64), E.resize(p[1], 64, False))
+        if i.operands[0][0] == "reg":
+            tr.write(i.operands[0][1], v)
 
     # --------------------------------------------------------------- mbarriers
     def _smem(self, tr: Translator, i, op):
@@ -521,10 +670,13 @@ class Memory:
 # ------------------------------------------------------------------ addresses
 
 
+_BASES = ("%g:", "%s:", "%S:", "%l:", "%L:", "%d:", "%x:")  # (_is_base)
+
+
 def _is_base(x) -> bool:
-    """A tensor (%g:), shared symbol (%s:), descriptor parameter (%d:, tma.py) or scratch
-    (%x:, tma.py) address."""
-    return x[0] == "var" and x[2][:3] in ("%g:", "%s:", "%d:", "%x:")
+    """A tensor (%g:), shared symbol (%s:; generic: %S:), local variable (%l:; generic:
+    %L:), descriptor parameter (%d:, tma.py) or scratch (%x:, tma.py) address."""
+    return x[0] == "var" and x[2][:3] in _BASES
 
 
 def peel(e):
@@ -547,11 +699,11 @@ def peel(e):
         if p is not None and p[0][2].startswith("%s:"):
             return E.var(p[0][2], 32), E.trunc(p[1], 32)
     if k == "ext" and not e[2] and E.width(e) == 64 and E.width(e[3]) == 32:
-        # A zero-extended 32-bit shared or parameter-space address (cvt.u64.u32; tma.py's
-        # staging buffers and descriptors): its window is below 2^32, base + offset does
-        # not wrap there.
+        # A zero-extended 32-bit shared, local or parameter-space address (cvt.u64.u32;
+        # tma.py's staging buffers and descriptors; the local depot before cvta.local):
+        # its window is below 2^32, base + offset does not wrap there.
         p = peel(e[3])
-        if p is not None and p[0][2][:3] in ("%s:", "%d:"):
+        if p is not None and p[0][2][:3] in ("%s:", "%l:", "%d:"):
             return E.var(p[0][2], 64), E.resize(p[1], 64, False)
     return None
 
@@ -623,13 +775,19 @@ def _sum(c: int, terms: list, w: int):
 
 def _elem_type(opcode: str) -> str:
     for t in reversed(opcode.split(".")):
-        if re.fullmatch(r"[bsuf](8|16|32|64|128)", t):
+        if re.fullmatch(r"[bsuf](8|16|32|64|128)|b?f16x2|bf16", t):
             return t
     raise ValueError(f"no element type in {opcode}")
 
 
 def _elem_bits(opcode: str) -> int:
-    return int(_elem_type(opcode)[1:])
+    return 8 * type_bytes(_elem_type(opcode))
+
+
+def _vec(opcode: str) -> int:
+    """The vector width of a .v2/.v4/.v8 access, else 1."""
+    m = re.search(r"\.v(\d+)\b", opcode)
+    return int(m[1]) if m else 1
 
 
 def _signed(opcode: str) -> bool:

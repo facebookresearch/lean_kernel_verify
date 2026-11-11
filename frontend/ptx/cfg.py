@@ -6,32 +6,47 @@
 """Control flow of the PTX frontend: basic blocks, dominators, natural loops, the shape
 check, and the roles of a kernel (the Triton warp-specialize dispatch recognizer).
 
-    build(fn) -> Cfg                    roles(cfg) -> ([Role], Dispatch or None)
+    build(fn) -> Cfg                    roles(cfg, family) -> ([Role], Dispatch or None)
 
 build: the basic blocks of a parse.Function. A block starts at a label or after a
 branch and ends at `bra` (guarded: successors are the target, then the fall-through),
-`brx.idx` (the labels of its `.branchtargets`) or `ret`/`exit` (none). Labels of
-inline-asm scopes (`waitLoop#k`) are blocks like any other, so a wait loop is a natural
-loop with one exit. A block without a label is named `@<line of its first instruction>`.
-Unreachable blocks are dropped. Dominators: Cooper, Harvey and Kennedy, "A Simple, Fast
-Dominance Algorithm". Then the shape check admits only what the real kernels have:
-reducible, every natural loop's exit edges leaving to one block, exactly one `ret`. Anything
-else, like a guarded ret or control falling off the end, is a CfgError naming the lines:
-the variant is refused, not guessed.
+`brx.idx` (the labels of its `.branchtargets`), `ret`/`exit` (none) or an unguarded
+`trap`: the kernel aborts, and the run goes on as if the trap were not reached (ops.py),
+at the other successor of the block's one predecessor, a conditional branch (Triton's
+`call __assertfail; trap;` blocks after the ret, CuTe's `if x: trap()`); else refused.
+Labels of inline-asm scopes (`waitLoop#k`) are blocks like any other, so a wait loop is
+a natural loop with one exit. A block without a label is named `@<line of its first
+instruction>`. Unreachable blocks are dropped. Dominators: Cooper, Harvey and Kennedy,
+"A Simple, Fast Dominance Algorithm". Then the shape check admits only what the real
+kernels have: reducible, every natural loop's exit edges leaving to one block, exactly
+one `ret`. Anything else, like a guarded ret or control falling off the end, is a
+CfgError naming the lines: the variant is refused, not guessed.
 
-roles: a kernel without brx.idx is one role, "default". A kernel with one is a Triton
-warp-specialized kernel, and its dispatch must match the protocol item by item, else a
-CfgError names the failing item. The match is on the CFG and on reaching definitions,
-never on adjacency: unrelated instructions may sit anywhere in between.
+roles: a kernel with brx.idx, or (Triton family only) with a loop whose header loads the
+state byte as below and branches on comparing it (with at most 3 worker states LLVM
+lowers the switch to a compare chain, no jump table), is a Triton warp-specialized
+kernel, and its dispatch must match the protocol item by item, else a CfgError names the
+failing item; any other kernel is one role, "default". The match is on the CFG and on
+reaching definitions, never on adjacency: unrelated instructions may sit anywhere in
+between. A branch condition is a `setp.cmp p, a, b` whose only result p is the guard: of
+`setp p|q` the guard may be q, the complement, and a matcher reading cmp would get it
+wrong.
 
   entry    wid = shfl.sync.idx(%tid.x >> 5, 0, 31, -1), then a branch on wid < D (D
            default warps) of either polarity; one side reaches the worker switch loop,
            the other (the default) never does
   header   the switch loop header: optional setmaxnreg, barrier.sync 1 (no count: the
-           whole CTA), ld.shared.b8 s, [smem + wid + K], the out-of-range bypass
-           `@(s > N) bra`, then a block ending in `brx.idx s` over N+1 targets
-  table    immediate st.shared stores of the default write the state of every worker
-           warp w (byte smem + K + w, D <= w < nwarps) before its first fork barrier
+           whole CTA), ld.shared.b8 s, [smem + wid + K], then either the out-of-range
+           bypass `@(s > N) bra` and a block ending in `brx.idx s` over N+1 targets
+           (state k: target k), or a chain of `@(s == v) bra T` (or the negation): the
+           header's own branch, then each next block holding only pure instructions and
+           such a branch, with the previous link as its only predecessor (state v: the T
+           of the first link comparing v; the chain ends at a block that is no link, the
+           bypass)
+  table    immediate st.shared stores of the default (a vector of immediates too: LLVM
+           merges adjacent ones, `st.shared.v2.b32 [..], {imm, imm}`) write the state of
+           every worker warp w (byte smem + K + w, D <= w < nwarps) before its first fork
+           barrier
   exit     ... and the exit state E, the target holding only `ret`, to every worker
            after its second and before its fourth (last) fork barrier; both rounds run
            on every path of the default, no other st.shared to smem + constant touches
@@ -42,17 +57,18 @@ never on adjacency: unrelated instructions may sit anywhere in between.
 
 Each worker runs the switch loop exactly twice: once into its state, once into E. So
 state k's role is the pre-dispatch code, the worker-side code up to the header, one pass
-of the header and of the brx.idx block with the bypass and brx.idx resolved to target k,
-the region from target k to its back edges into the header, then `ret`. The header pass
-stays because the pure instructions LLVM puts in the header and the brx.idx block
-(anything else there is refused) define registers the regions read; their second pass,
-into E, only precedes `ret`. A used state whose region only syncs (fork and cluster
+of the header and of the brx.idx block (or the chain links up to the one deciding k)
+with their branches resolved to target k, the region from target k to its back edges
+into the header, then `ret`. The header pass stays because the pure instructions LLVM
+puts in the header, the brx.idx block and the links (anything else there is refused)
+define registers the regions read; their second pass, into E, only precedes `ret`. A used state whose region only syncs (fork and cluster
 barriers, setmaxnreg, unconditional bra) is padding and has no role. Roles: "default" (warps
 0..D-1) and "partition<k>" (the warps in state k), as the TTGIR frontend names them.
 
 Ceiling: the table/exit check sees st.shared whose address folds to smem + constant
-through mov/add; a computed-address store (or an atom/red) into the state bytes would go
-unseen (the smem address-slot analysis can close this).
+through mov/add; a computed-address st.shared into the state bytes would go unseen (the
+smem address-slot analysis can close this). atom/red.shared and a generic st/atom/red
+of shared memory (cvta.shared) in a kernel with a dispatch are refused (mem.py).
 """
 
 import re
@@ -146,6 +162,15 @@ def build(fn):
         n: _succs(fn, blocks, alias, n, names[k + 1] if k + 1 < len(names) else None)
         for k, n in enumerate(names)
     }
+    for n in names:
+        last = blocks[n].instrs[-1] if blocks[n].instrs else None
+        if last is not None and last.base == "trap" and last.guard is None:
+            preds = [m for m, s in succ.items() if n in s]
+            other = set(succ[preds[0]]) - {n} if len(preds) == 1 else set()
+            if len(other) != 1:
+                raise CfgError(f"{fn.name}: trap at line {last.line} is not reached by "
+                               "one conditional branch")  # fmt: skip
+            succ[n] = (other.pop(),)
     rpo = _rpo(fn, names[0], succ)
     reach = set(rpo)
     blocks = {n: blocks[n] for n in names if n in reach}
@@ -170,7 +195,9 @@ def build(fn):
 
 
 def _ends(i):
-    return i.base in ("bra", "brx", "ret", "exit")
+    return i.base in ("bra", "brx", "ret", "exit") or (
+        i.base == "trap" and i.guard is None
+    )
 
 
 def _succs(fn, blocks, alias, name, fall):
@@ -278,8 +305,9 @@ def _check_shape(cfg):
 # ---------------------------------------------------------------------------- roles
 
 
-def roles(cfg):
-    """The roles of the kernel and its warp-specialize Dispatch (None without brx.idx)."""
+def roles(cfg, family="ttgir"):
+    """The roles of the kernel and its warp-specialize Dispatch (None without one; a
+    compare-chain dispatch is looked for in the Triton family only)."""
     fn = cfg.fn
     brx = [
         b
@@ -292,11 +320,22 @@ def roles(cfg):
             f"{fn.name}: brx.idx at lines {lines}; only one dispatch is supported"
         )
     nwarps = _nwarps(fn)
-    if not brx:
-        warps = tuple(range(nwarps)) if nwarps else None
-        succs = {b: blk.succs for b, blk in cfg.blocks.items()}
-        return [Role("default", warps, cfg.entry, succs)], None
-    return _warp_specialized(cfg, brx[0], nwarps)
+    if brx:
+        return _warp_specialized(cfg, *_jump_table(cfg, brx[0]), nwarps)
+    chains = [(h, ld) for h in cfg.loops if family == "ttgir"
+              for ld in [_state_load(cfg, h)]
+              if ld is not None and _link(cfg, h, (h, ld))]  # fmt: skip
+    if len(chains) > 1:
+        lines = [cfg.blocks[h].instrs[ld].line for h, ld in chains]
+        raise CfgError(
+            f"{fn.name}: state byte loads at lines {lines}; only one dispatch is supported"
+        )
+    if chains:
+        h, ld = chains[0]
+        return _warp_specialized(cfg, h, ld, _compare_chain(cfg, h, ld), nwarps)
+    warps = tuple(range(nwarps)) if nwarps else None
+    succs = {b: blk.succs for b, blk in cfg.blocks.items()}
+    return [Role("default", warps, cfg.entry, succs)], None
 
 
 def _nwarps(fn):
@@ -313,10 +352,9 @@ def _no(cfg, item, msg):
 _LD_B8 = re.compile(r"ld\.shared(?:::cta)?\.[bu]8")
 
 
-def _warp_specialized(cfg, xb, nwarps):
+def _warp_specialized(cfg, h, ld, arms, nwarps):
+    """arms: {state: (the blocks from the header h to the one deciding it, its target)}."""
     blocks = cfg.blocks
-    h, ld = _header(cfg, xb)
-    targets = blocks[xb].succs
     db, D, wid, default, worker = _entry(cfg, h, nwarps)
     smem, K = _state_base(cfg, h, ld, wid)
     ret = next(
@@ -325,20 +363,21 @@ def _warp_specialized(cfg, xb, nwarps):
         if blk.instrs and blk.instrs[-1].base in ("ret", "exit")
     )
     pre, side, dflt = _parts(cfg, h, db, default, worker, ret)
-    warps, E = _state_map(cfg, smem, K, D, nwarps, targets, default, dflt, ret)
+    warps, E = _state_map(cfg, smem, K, D, nwarps, arms, default, dflt, ret)
     first = {b: blocks[b].succs for b in dflt}
     out = [
         Role("default", tuple(range(D)), cfg.entry, _flow(cfg, pre, db, default, first))
     ]
     padding = []
     for k in sorted(set(warps.values())):
-        t = targets[k]
+        path, t = arms[k]
         region = _region(cfg, k, t, h)
         if all(_syncs_only(i) for u in region for i in blocks[u].instrs):
             padding.append(k)
             continue
         rest = {u: blocks[u].succs for u in side}
-        rest.update({h: (xb,), xb: (t,), ret: ()})
+        rest.update(zip(path, [(u,) for u in path[1:] + (t,)]))
+        rest[ret] = ()
         rest.update({u: _to(blocks[u].succs, h, ret) for u in region})
         mine = tuple(w for w, s in warps.items() if s == k)
         succs = _flow(cfg, pre, db, worker, rest)
@@ -374,7 +413,7 @@ def _parts(cfg, h, db, default, worker, ret):
     return pre, side, dflt
 
 
-def _state_map(cfg, smem, K, D, nwarps, targets, default, dflt, ret):
+def _state_map(cfg, smem, K, D, nwarps, arms, default, dflt, ret):
     """({worker warp: state}, exit state) from the default's two rounds of stores."""
     lo, hi = K + D, K + nwarps
     table, exit_ = _state_stores(cfg, smem, lo, hi, default, dflt, ret)
@@ -385,8 +424,8 @@ def _state_map(cfg, smem, K, D, nwarps, targets, default, dflt, ret):
     E = exit_[lo]
     if (
         set(exit_.values()) != {E}
-        or E >= len(targets)
-        or targets[E] != ret
+        or E not in arms
+        or arms[E][1] != ret
         or [i.base for i in cfg.blocks[ret].instrs] != ["ret"]
     ):
         raise _no(
@@ -396,7 +435,7 @@ def _state_map(cfg, smem, K, D, nwarps, targets, default, dflt, ret):
             " not the one state whose target is the block holding only ret",
         )
     warps = {w: table[K + w] for w in range(D, nwarps)}
-    bad = {w: s for w, s in warps.items() if s >= len(targets) or s == E}
+    bad = {w: s for w, s in warps.items() if s not in arms or s == E}
     if bad:
         raise _no(cfg, "table", f"warps start in states {bad}: the exit state or none")
     return warps, E
@@ -420,9 +459,9 @@ def _region(cfg, k, t, h):
     return region
 
 
-def _header(cfg, xb):
-    """(header, index of the state load) of the switch loop whose brx.idx ends block xb.
-    Besides the protocol's instructions, the header and xb hold only pure ones."""
+def _jump_table(cfg, xb):
+    """(header, index of the state load, arms) of the switch loop whose brx.idx ends block
+    xb. Besides the protocol's instructions, the header and xb hold only pure ones."""
     blocks = cfg.blocks
     brx = blocks[xb].instrs[-1]
     if len(blocks[xb].preds) != 1:
@@ -447,34 +486,12 @@ def _header(cfg, xb):
             f"{cfg.where(h)} is not a switch loop header ending "
             "in the out-of-range bypass `@p bra`",
         )
-    fork = ld = None
-    for k, i in enumerate(instrs[:-1]):
-        if i.guard is None and _is_fork(i) and fork is None:
-            fork = k
-        elif i.guard is None and i.opcode.startswith("setmaxnreg") and fork is None:
-            pass
-        elif (
-            i.guard is None
-            and _LD_B8.fullmatch(i.opcode)
-            and fork is not None
-            and ld is None
-        ):
-            ld = k
-        elif not _pure(i):
-            raise _no(cfg, "header", f"unexpected `{i.text}` at line {i.line}")
+    ld = _header_load(cfg, h)
     for i in blocks[xb].instrs[:-1]:
         if not _pure(i):
             raise _no(cfg, "header", f"unexpected `{i.text}` at line {i.line}")
-    if ld is None:
-        raise _no(
-            cfg,
-            "header",
-            f"{cfg.where(h)} lacks barrier.sync 1 followed by "
-            "ld.shared.b8 of the state byte",
-        )
     state, n = instrs[ld].operands[0], len(blocks[xb].succs) - 1
-    cpos = _def(cfg, h, len(instrs) - 1, bypass.guard[0])
-    cmp = _instr(cfg, cpos)
+    cpos, cmp = _setp(cfg, h)
     if (
         bypass.guard[1]
         or not cmp
@@ -490,7 +507,95 @@ def _header(cfg, xb):
             f"the bypass at line {bypass.line} is not "
             f"`@(state > {n}) bra` before brx.idx of that state",
         )
-    return h, ld
+    return h, ld, {k: ((h, xb), t) for k, t in enumerate(blocks[xb].succs)}
+
+
+def _header_load(cfg, h):
+    """The index of the state load ld.shared.b8 in the switch loop header h, after an
+    optional setmaxnreg and the fork barrier; the header's other instructions but its last
+    (its branch) must be pure."""
+    fork = ld = None
+    instrs = cfg.blocks[h].instrs
+    for k, i in enumerate(instrs[:-1]):
+        if i.guard is None and _is_fork(i) and fork is None:
+            fork = k
+        elif i.guard is None and i.opcode.startswith("setmaxnreg") and fork is None:
+            pass
+        elif (
+            i.guard is None
+            and _LD_B8.fullmatch(i.opcode)
+            and fork is not None
+            and ld is None
+        ):
+            ld = k
+        elif not _pure(i):
+            raise _no(cfg, "header", f"unexpected `{i.text}` at line {i.line}")
+    if ld is None:
+        raise _no(
+            cfg,
+            "header",
+            f"{cfg.where(h)} lacks barrier.sync 1 followed by "
+            "ld.shared.b8 of the state byte",
+        )
+    return ld
+
+
+def _state_load(cfg, h):
+    """The index of an unguarded ld.shared.b8 after an unguarded fork barrier in block h,
+    or None: what marks a compare-chain dispatch's header (roles)."""
+    instrs = cfg.blocks[h].instrs
+    fork = next(
+        (k for k, i in enumerate(instrs) if i.guard is None and _is_fork(i)), None
+    )
+    if fork is None:
+        return None
+    return next((k for k, i in enumerate(instrs) if k > fork and i.guard is None
+                 and _LD_B8.fullmatch(i.opcode)), None)  # fmt: skip
+
+
+def _link(cfg, b, ld):
+    """(v, target, other) if block b ends in `@p bra` on p = (s == v) or (s != v), s the
+    state the instruction at position ld loads: target is b's successor when s == v;
+    else None."""
+    blk = cfg.blocks[b]
+    br = blk.instrs[-1] if blk.instrs else None
+    if br is None or br.base != "bra" or br.guard is None or len(blk.succs) != 2:
+        return None
+    pp, p = _setp(cfg, b)
+    parts = p.opcode.split(".") if p else []
+    if not (
+        p
+        and parts[1] in ("eq", "ne")
+        and p.operands[1][0] == "reg"
+        and p.operands[2][0] == "imm"
+        and _def(cfg, *pp, p.operands[1][1]) == ld
+    ):
+        return None
+    taken, fall = blk.succs
+    if (parts[1] == "eq") != br.guard[1]:
+        return p.operands[2][1], taken, fall
+    return p.operands[2][1], fall, taken
+
+
+def _compare_chain(cfg, h, ld):
+    """{state: (links from the header h to the one deciding it, target)} of the compare
+    chain the header h starts (module doc, item header); the first link comparing a value
+    decides it."""
+    _header_load(cfg, h)
+    arms, path, b = {}, (h,), h
+    while True:
+        v, t, b = _link(cfg, b, (h, ld))
+        if not 0 <= v < 256:
+            raise _no(cfg, "header", f"the chain compares the state byte with {v}")
+        arms.setdefault(v, (path, t))
+        blk = cfg.blocks[b]
+        if b in path or _link(cfg, b, (h, ld)) is None:
+            return arms  # the bypass: no role runs it
+        bad = [i for i in blk.instrs[:-1] if not _pure(i)]
+        if len(blk.preds) != 1 or bad:
+            why = f"`{bad[0].text}`" if bad else f"{len(blk.preds)} predecessors"
+            raise _no(cfg, "header", f"the chain link {cfg.where(b)} has {why}")
+        path += (b,)
 
 
 def _pure(i):
@@ -513,14 +618,11 @@ def _entry(cfg, h, nwarps):
     if db is None:
         raise _no(cfg, "entry", f"no conditional branch dominates {cfg.where(h)}")
     br = blocks[db].instrs[-1]
-    pp = _def(cfg, db, len(blocks[db].instrs) - 1, br.guard[0])
-    p = _instr(cfg, pp)
+    pp, p = _setp(cfg, db)
     parts = p.opcode.split(".") if p else []
     if not (
         p
-        and parts[0] == "setp"
         and parts[1] in ("lt", "ge")
-        and len(p.operands) == 3
         and p.operands[1][0] == "reg"
         and p.operands[2][0] == "imm"
     ):
@@ -617,7 +719,9 @@ def _state_stores(cfg, smem, lo, hi, default, dflt, ret):
                 msg = f"`{i.text}` at line {i.line} writes the state bytes {why}"
                 raise _no(cfg, item, msg)
             got = rounds[n > 0]
-            data = (i.operands[1][1] % (1 << 8 * size)).to_bytes(size, "little")
+            vals = _immediates(i.operands[1])  # not None: _store_fault
+            k = size // len(vals)
+            data = b"".join((v % (1 << 8 * k)).to_bytes(k, "little") for v in vals)
             for a in span:
                 if a in got:
                     raise _no(
@@ -636,11 +740,19 @@ def _store_fault(cfg, i, n, b, default, ret):
         return f"after {n} fork barriers"
     if i.guard is not None:
         return "under a guard"
-    if i.operands[1][0] != "imm":
+    if _immediates(i.operands[1]) is None:
         return "not as an immediate"
     if b != default and ret in _reach(cfg, default, {b}):
         return "not on every path"
     return None
+
+
+def _immediates(op):
+    """The values of an immediate store operand, or of a vector of immediates (LLVM
+    merges adjacent state stores into `st.shared.v2.b32 [..], {imm, imm}`), in memory
+    order; None if any is not an immediate."""
+    xs = op[1] if op[0] == "vec" else (op,)
+    return [x[1] for x in xs] if all(x[0] == "imm" for x in xs) else None
 
 
 def _flow(cfg, pre, db, first, rest):
@@ -717,14 +829,17 @@ def _forks(cfg, start, stop, what):
 
 # ---------------------------------------------------------------------------- dataflow
 
-# Opcodes whose first operand is read, not written.
+# Opcodes whose first operand is read, not written (but barrier.red's is its result).
 _READS_FIRST = ("brx", "bar.", "barrier", "nanosleep", "tcgen05.dealloc")
+_BAR_RED = ("bar.red.", "barrier.red.")
 
 
 def _dests(i):
     """Registers i may write: those of its first operand. Taking a read for a write
     only makes a match fail, never succeed."""
-    if not i.operands or i.opcode.startswith(_READS_FIRST):
+    if not i.operands or (
+        i.opcode.startswith(_READS_FIRST) and not i.opcode.startswith(_BAR_RED)
+    ):
         return ()
     op = i.operands[0]
     regs = op[1] if op[0] in ("vec", "list") else op[1:] if op[0] == "pair" else (op,)
@@ -760,6 +875,18 @@ def _def(cfg, b, k, reg):
 
 def _instr(cfg, pos):
     return cfg.blocks[pos[0]].instrs[pos[1]] if pos else None
+
+
+def _setp(cfg, b):
+    """(position, instruction) of the `setp.cmp p, a, b` defining the guard of the
+    branch ending block b (module doc, roles); (None, None) if it is defined otherwise,
+    like by a pair `setp p|q` or a `setp.cmp.bop p, a, b, c` (combining with c)."""
+    instrs = cfg.blocks[b].instrs
+    pos = _def(cfg, b, len(instrs) - 1, instrs[-1].guard[0])
+    p = _instr(cfg, pos)
+    if not p or p.base != "setp" or p.operands[0][0] != "reg" or len(p.operands) != 3:
+        return None, None
+    return pos, p
 
 
 def _lin(cfg, b, k, op, wid, depth=8):

@@ -7,7 +7,8 @@
 
 A copy of frontend/cute/expr.py (frozen with the CuTe frontend during the migration)
 plus the exact expansions of PTX integer instructions into KIR nodes (the end of this
-file: mul.hi/mul.wide, bfe, bfi, prmt, lop3, popc, clz, brev, shf, cvt widths), known
+file: mul.hi/mul.wide, bfe, bfi, prmt and its modes, lop3, popc, clz, brev, shf, cvt
+widths and saturation, add/sub.sat, mul24, sad), known
 trailing zeros (tz), exact division by a constant (div_exact), the nodes a `let` must
 not hoist out of a `select` arm (unsafe), and a few folds that keep thread offsets
 affine (`(t/32)*32 + t%32 = t`, masks and ors that cannot change a value) and predicates
@@ -954,9 +955,79 @@ def mul_wide(a, b, signed: bool):
 
 
 def mul_hi(a, b, signed: bool):
-    """mul.hi (32-bit operands): the high half of the 64-bit product."""
+    """mul.hi: the high half of the double-width product. Address arithmetic marks every
+    add/sub/mul/shl a value passes through and Lean reports their signed wraps (design
+    §5.8), so each width is computed where no such node can wrap, or in the one form
+    translate.mark_addr skips:
+      32 bits: trunc(lshr(mul(ext a, ext b), 32), 32), the form mark_addr skips (its
+               unsigned product may pass 2**63);
+      16 bits: the product at 64 bits (|p| < 2**32) shifted by 16, arithmetically when
+               signed, so that the truncation never drops bits;
+      64 bits: KIR has no i128: x udiv d when that is provably the same (_magic_div:
+               LLVM's division by a constant), else the product of 16-bit limbs
+               (_mul_hi64), whose tree repeats a 16 times."""
     w = width(a)
-    return trunc(bin("lshr", mul_wide(a, b, signed), const(w, 2 * w)), w)
+    if w == 64:
+        x, m = (b, a) if is_const(a) else (a, b)
+        q = _magic_div(x, m, signed) if is_const(m) else None
+        return q if q is not None else _mul_hi64(a, b, signed)
+    if w == 32:
+        return trunc(bin("lshr", mul_wide(a, b, signed), const(w, 2 * w)), w)
+    p = bin("mul", ext(a, 64, signed), ext(b, 64, signed))
+    return trunc(bin("ashr" if signed else "lshr", p, const(w, 64)), w)
+
+
+def _magic_div(x, m, signed: bool):
+    """(x << k) udiv d if that is mul.hi(x, m) (64 bits) for every value of x, else None
+    (LLVM divides by a constant c as mul.hi(x >> s, m) >> t, m ~ 2**(64 + t) / (c >> s)).
+    x's interval is [0, X] (so a signed mul.hi with m >= 0 is the unsigned one); for the
+    least k with X << k below 2**63, d = ceil(2**(64 + k) / m) and e = m d - 2**(64 + k)
+    has X e < 2**64. Then x m / 2**64 = (x << k) / d + x e / (d 2**64), and the second
+    term is below 1/d: the floors agree (Granlund and Montgomery, Division by Invariant
+    Integers using Multiplication, 1994). The shift cannot wrap (address marks)."""
+    iv, mu = interval(x), _unsigned(m[2], 64)
+    if iv is None or iv[0] < 0 or mu == 0 or (signed and m[2] < 0):
+        return None
+    for k in range(64 - iv[1].bit_length()):
+        d = -(-(1 << (64 + k)) // mu)
+        if iv[1] * (mu * d - (1 << (64 + k))) < 1 << 64:
+            if d >= 1 << 63:
+                return None
+            return bin("udiv", bin("shl", x, const(k, 64)), const(d, 64))
+    return None
+
+
+def _mul_hi64(a, b, signed: bool):
+    """The high 64 bits of the 128-bit product of a and b, from four 16-bit limbs each
+    (the top one signed when `signed`), with no add, mul or shl that wraps as a signed
+    i64: every partial product and column sum stays below 2**35 in magnitude, the carry
+    is an exact floor shift, and the result is (top digit << 48) + the 48 bits below it,
+    the top digit taken as signed (an unsigned one through a sign extension, the
+    ashr(shl) form mark_addr skips) so that its shift cannot wrap either."""
+    m16, sh = const(0xFFFF, 64), "ashr" if signed else "lshr"
+
+    def limbs(x):
+        low = [bin("and", bin("lshr", x, const(16 * k, 64)), m16) for k in range(3)]
+        return low + [bin(sh, x, const(48, 64))]
+
+    la, lb = limbs(a), limbs(b)
+    digits, carry = [], const(0, 64)
+    for k in range(7):  # column k of the product has weight 2**(16k)
+        col = carry
+        for i in range(max(0, k - 3), min(k, 3) + 1):
+            col = bin("add", col, bin("mul", la[i], lb[k - i]))
+        digits.append(bin("and", col, m16))
+        carry = bin(sh, col, const(16, 64))
+    low48 = bin("add", digits[4], bin("add", bin("shl", digits[5], const(16, 64)),
+                                      bin("shl", digits[6], const(32, 64))))  # fmt: skip
+    top = carry if signed else _sx64(carry, 16)
+    return bin("add", bin("shl", top, const(48, 64)), low48)
+
+
+def _sx64(a, w: int):
+    """The i64 sign extension of the w-bit value whose zero extension is the i64 `a`."""
+    k = const(64 - w, 64)
+    return bin("ashr", bin("shl", a, k), k)
 
 
 def popc(a):
@@ -983,7 +1054,7 @@ def brev(a):
     out = const(0, w)
     for k in range(w):
         bit = bin("and", bin("lshr", a, const(k, w)), const(1, w))
-        out = bin("or", out, bin("shl", bit, const(w - 1 - k, w)))
+        out = bin("or", out, shl_bits(bit, w - 1 - k))
     return out
 
 
@@ -1016,7 +1087,7 @@ def bfi(a, b, pos: int, length: int):
     n = min(length, w - pos)
     field = ((1 << n) - 1) << pos
     keep = bin("and", b, const(~field, w))
-    return bin("or", keep, bin("and", bin("shl", a, const(pos, w)), const(field, w)))
+    return bin("or", keep, bin("and", shl_bits(a, pos), const(field, w)))
 
 
 def prmt(a, b, sel: int):
@@ -1029,7 +1100,7 @@ def prmt(a, b, sel: int):
         byte = bin("and", bin("lshr", src, const(8 * (s & 3), 32)), const(255, 32))
         if s & 8:  # the byte's top bit, copied into all 8 bits
             byte = bin("mul", bin("lshr", byte, const(7, 32)), const(255, 32))
-        out = bin("or", out, bin("shl", byte, const(8 * i, 32)))
+        out = bin("or", out, shl_bits(byte, 8 * i))
     return out
 
 
@@ -1058,8 +1129,8 @@ def shf(a, b, n: int, left: bool, wrap: bool):
     if n == 32:
         return a if left else b
     if left:  # the high word of (b:a) << n
-        return bin("or", bin("shl", b, const(n, 32)), bin("lshr", a, const(32 - n, 32)))
-    return bin("or", bin("lshr", a, const(n, 32)), bin("shl", b, const(32 - n, 32)))
+        return bin("or", shl_bits(b, n), bin("lshr", a, const(32 - n, 32)))
+    return bin("or", bin("lshr", a, const(n, 32)), shl_bits(b, 32 - n))
 
 
 def cvt_int(a, dst_bits: int, src_bits: int, src_signed: bool):
@@ -1067,3 +1138,135 @@ def cvt_int(a, dst_bits: int, src_bits: int, src_signed: bool):
     signedness (or truncated) to dst_bits."""
     v = resize(a, src_bits, False)
     return resize(v, dst_bits, src_signed)
+
+
+def lanes16(a):
+    """The two 16-bit lanes of a packed 32-bit value (ISA: .s16x2/.u16x2), low first."""
+    return [trunc(a, 16), trunc(bin("lshr", a, const(16, 32)), 16)]
+
+
+def shl_bits(a, k: int):
+    """a << k for a constant 0 <= k < w, a move of bits (the ones shifted out are dropped
+    by design: brev, bfi, prmt, shf, packing): unless a's interval shows the shift does
+    not wrap, the shift of the sign extension of a's low w - k bits, the same bits, so
+    that no node wraps as a signed integer (address arithmetic, design §5.8;
+    translate._sext_operand skips the extension)."""
+    if k == 0:
+        return a
+    w, c = width(a), const(k, width(a))
+    ia = interval(a)
+    if ia is not None and -(1 << (w - 1)) <= ia[0] << k and ia[1] << k < 1 << (w - 1):
+        return bin("shl", a, c)
+    return bin("shl", bin("ashr", bin("shl", a, c), c), c)
+
+
+def pack16(lo, hi):
+    """Two 16-bit lanes as one 32-bit value. The high lane is shifted from its sign
+    extension and the low one added: the same bits as the unsigned (hi << 16) | lo, but
+    neither node wraps as a signed i32 (address arithmetic, design §5.8)."""
+    return bin("add", bin("shl", ext(hi, 32, True), const(16, 32)), ext(lo, 32, False))
+
+
+def bfind(a, signed: bool, shiftamt: bool):
+    """bfind: the position of the most significant non-sign bit of a (the top 1, or the
+    top 0 of a negative signed a), with .shiftamt the left shift that moves it to the top
+    bit instead; 0xFFFFFFFF when there is none. The result is 32 bits wide."""
+    w = width(a)
+    x = (
+        select(cmp("slt", a, const(0, w)), bin("xor", a, const(-1, w)), a)
+        if signed
+        else a
+    )
+    n = clz(x)
+    r = n if shiftamt else bin("sub", const(w - 1, 32), n)
+    return select(cmp("eq", x, const(0, w)), const(-1, 32), r)
+
+
+def dp2a(a, b, c, hi: bool, a_signed: bool, b_signed: bool):
+    """dp2a.lo/.hi: c + a.h0 * b.b(k) + a.h1 * b.b(k + 1), k = 2 for .hi else 0: the two
+    16-bit halves of a times two bytes of b, each extended by its operand's type (32-bit,
+    wrapping). The halves and bytes are bit fields (bfe), whose products cannot wrap."""
+    k = 2 if hi else 0
+    for j in range(2):
+        h = bfe(a, 16 * j, 16, a_signed)
+        byte = bfe(b, 8 * (k + j), 8, b_signed)
+        c = bin("add", c, bin("mul", h, byte))
+    return c
+
+
+def add_sat(a, b, sub: bool):
+    """add.sat/sub.sat (.s32 only): the exact sum or difference at 64 bits clamped to
+    the signed range of the width (ISA add, sub: .sat limits the result to MININT..
+    MAXINT); no node wraps."""
+    w = width(a)
+    s = bin("sub" if sub else "add", ext(a, 64, True), ext(b, 64, True))
+    s = bin("smin", s, const((1 << (w - 1)) - 1, 64))
+    return trunc(bin("smax", s, const(-(1 << (w - 1)), 64)), w)
+
+
+def mul24(a, b, hi: bool, signed: bool):
+    """mul24.lo/.hi (.u32/.s32): bits 0-31 or 16-47 of the 48-bit product of the low 24
+    bits of a and b, sign-extended by .s32 (ptxas: SGXT 24, else a byte mask). .lo is
+    the 32-bit product of the two fields, whose wrap is mul.lo's; .hi is shifted from
+    the product at 64 bits (|p| < 2**48), so only its truncation can lose bits: when the
+    unsigned result is 2**31 or more."""
+    fa, fb = bfe(a, 0, 24, signed), bfe(b, 0, 24, signed)
+    if not hi:
+        return bin("mul", fa, fb)
+    p = bin("mul", ext(fa, 64, signed), ext(fb, 64, signed))
+    return trunc(bin("ashr", p, const(16, 64)), 32)
+
+
+def sad(a, b, c, signed: bool):
+    """sad: c + |a - b| (ISA sad: c + ((a < b) ? b - a : a - b), wrapping), compared by
+    the type's signedness. Below 64 bits it is computed at 64, where nothing wraps, and
+    truncated once: an address mark reports only a sum that does not fit the width."""
+    w = width(a)
+    if w < 64:
+        a, b, c = (ext(x, 64, signed) for x in (a, b, c))
+    lt = cmp("slt" if signed else "ult", a, b)
+    r = bin("add", c, select(lt, bin("sub", b, a), bin("sub", a, b)))
+    return trunc(r, w) if w < 64 else r
+
+
+def cvt_sat(a, dst_bits: int, dst_signed: bool, src_bits: int, src_signed: bool):
+    """cvt.sat between integer types: the source value (the low src_bits of a, read by
+    the source type) clamped to the destination type's range (ISA cvt: .sat limits the
+    result to MININT..MAXINT of the destination size, signed or unsigned), at
+    dst_bits."""
+    v = resize(a, src_bits, False)
+    lo = -(1 << (dst_bits - 1)) if dst_signed else 0
+    hi = (1 << (dst_bits - 1 if dst_signed else dst_bits)) - 1
+    if src_signed:
+        if lo > -(1 << (src_bits - 1)):
+            v = bin("smax", v, const(lo, src_bits))
+        if hi < (1 << (src_bits - 1)) - 1:
+            v = bin("smin", v, const(hi, src_bits))
+    elif hi < (1 << src_bits) - 1:
+        v = bin("umin", v, const(hi, src_bits))
+    return resize(v, dst_bits, src_signed)
+
+
+# prmt's modes (ISA prmt): c[1:0] -> the default-mode selector that picks the same bytes
+# (nibble i: the source byte of d.b<i>, so each reads as the ISA's row d.b3 ... d.b0)
+_PRMT_MODES = {
+    "f4e": (0x3210, 0x4321, 0x5432, 0x6543),
+    "b4e": (0x5670, 0x6701, 0x7012, 0x0123),
+    "rc8": (0x0000, 0x1111, 0x2222, 0x3333),
+    "ecl": (0x3210, 0x3211, 0x3222, 0x3333),
+    "ecr": (0x0000, 0x1110, 0x2210, 0x3210),
+    "rc16": (0x1010, 0x3232, 0x1010, 0x3232),
+}
+
+
+def prmt_mode(a, b, c, mode: str):
+    """prmt.b32.<mode>: the default-mode prmt whose selector the mode and c[1:0] give
+    (no sign replication); a runtime c is a select over its four values."""
+    sels = _PRMT_MODES[mode]
+    if is_const(c):
+        return prmt(a, b, sels[c[2] & 3])
+    k = bin("and", c, const(3, width(c)))
+    out = prmt(a, b, sels[3])
+    for v in (2, 1, 0):
+        out = select(cmp("eq", k, const(v, width(c))), prmt(a, b, sels[v]), out)
+    return out

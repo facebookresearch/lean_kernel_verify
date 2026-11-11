@@ -24,8 +24,11 @@ tma.ISSUE_TARGETS, and a store whose copies depend on the elected lane; a single
 per-warp operand splits the role; tkinfo_version); bulk copies
 (g2s: gload + tma_load of bulk_<T>_<n>; s2g; reduce, its type checked); in-kernel descriptors (zeroed staging buffer, replace under a thread mask,
 cp_fenceproxy to the scratch, a store through it clipped at the extents, one buffer reused
-for two descriptors, and the refusals, a replace under a branch on data among them); the write set through descriptors; clusters,
-multicast and generic access to a descriptor refused; desc_base and segment_dims.
+for two descriptors, other shared-memory writes closing the buffer (generic st/atom/red
+through cvta.shared unless of static bytes outside it, stmatrix, cp.async, mbarrier),
+and the refusals, a replace under a branch on data among them); the write set through
+descriptors; clusters, multicast and generic access to a descriptor refused; desc_base
+and segment_dims.
 """
 
 import math
@@ -886,6 +889,18 @@ class Bulk(unittest.TestCase):
                 self.P, tensors={"x": 4})  # fmt: skip
         self.assertIn("not a constant number", f.refusals[0]["msg"])
 
+    def test_reduce_add_noftz(self):
+        # f16/bf16 .add.noftz (subnormals kept) is an add: a gatomic of the 2-byte
+        # elements (FA4's f16 dQ accumulator); its type still has to be the elements'
+        red = "cp.reduce.async.bulk.global.shared::cta.bulk_group.add.noftz.f16"
+        body = PRE.format(n=1) + BULK + f"    @%p2 {red} [%rd5], [%r21], 512;\n"
+        f = run(body, self.P, tensors={"x": 2})
+        self.assertEqual(f.refusals, [])
+        (g,) = events(f, "gatomic")
+        self.assertEqual(g["offsets"]["shape"], [256])
+        f = run(body, self.P, tensors={"x": 4})
+        self.assertIn("bulk reduce of f16 values", f.refusals[0]["msg"])
+
 
 # In-kernel descriptor: 32 threads zero the staging buffer smem+4096, thread 0 replaces
 # the fields (a masked branch), the warp copies it to this CTA's scratch (+ OFF), and the
@@ -1007,6 +1022,100 @@ class InKernel(unittest.TestCase):
         f = run(STAGE + fill(0, 0, 20, 0).replace(cut, cut + data) + use(20, 21, row=32),
                 KP, tensors=KT)  # fmt: skip
         self.assertIn("reaches a branch condition", f.refusals[0]["msg"])
+        # a tensormap edited in place in global memory (quack's GemmSm100): no fields known
+        glob = fill(0, 0, 20, 0).replace(
+            "global_dim.shared::cta.b1024.b32 [%rd15], 0x1, %r5",
+            "global_dim.global.b1024.b32 [%rd14], 0x1, %r5",
+        )
+        f = run(STAGE + glob + use(20, 21), KP, tensors=KT)
+        self.assertIn(
+            "global_dim of a tensormap in global memory", f.refusals[0]["msg"]
+        )
+
+    def test_one_dimensional_without_rank(self):
+        # Triton replaces no rank for a 1-D descriptor: the zeroed field, rank - 1 = 0
+        one = fill(0, 0, 20, 0).replace("0x1, %r5", "0x0, %r5")
+        for line in ("rank.shared::cta.b1024.b32 [%rd15], 0x1",
+                     "box_dim.shared::cta.b1024.b32 [%rd15], 0x1, 64",
+                     "global_dim.shared::cta.b1024.b32 [%rd15], 0x0, 128",
+                     "global_stride.shared::cta.b1024.b64 [%rd15], 0x0, 256"):  # fmt: skip
+            one = one.replace(f"    tensormap.replace.tile.{line};\n", "")
+        store = "    @%p2 cp.async.bulk.tensor.1d.global.shared::cta.bulk_group [%rd21, {%r51}], [%r52];\n"  # fmt: skip
+        f = run(STAGE + one + use(20, 21, row=48).split("    @%p2")[0] + store,
+                KP, tensors=KT)  # fmt: skip
+        self.assertEqual(f.refusals, [])
+        # elements 48..79 of the 32-element box, clipped at the extent 70
+        self.assertEqual(
+            footprints(f, {"rows": 70}), [("gstore", "dv", list(range(48, 70)))]
+        )
+
+    def test_other_shared_writes_close_the_buffer(self):
+        # a generic st/atom/red reaching the buffer through cvta.shared (its rank word:
+        # 16 = rank 2 - 1), or an atom/red.shared, closes it, as a st.shared does; one
+        # of static bytes outside it does not; any write of tma.SHARED_WRITES closes it;
+        # so does a st.shared, stmatrix or atom/red.shared under a data predicate (which
+        # skips the instruction's execution)
+        zero = "    st.shared.b32 [%r42], %r43;\n"
+        fence = "    cvt.u64.u32 %rd16, %r40;\n"
+        gen = "    cvt.u64.u32 %rd30, %r40;\n    cvta.shared.u64 %rd31, %rd30;\n"
+        far = "    mul.wide.u32 %rd32, %r5, 4;\n    add.s64 %rd33, %rd31, %rd32;\n"
+        dv = "    ld.param.u64 %rd34, [k_param_0];\n"
+        data = "    ld.shared.u32 %r60, [%r2+64];\n    setp.eq.s32 %p6, %r60, 0;\n"
+        for at, extra, ok in (
+            (zero, data + "    @%p6 st.shared.u32 [%r40+4], 16;\n", False),
+            (zero, data + "    @%p6 st.shared.u32 [%r40+128], 16;\n", True),
+            (
+                zero,
+                data
+                + "    @%p6 stmatrix.sync.aligned.m8n8.x1.shared.b16 [%r40], {%r43};\n",
+                False,
+            ),  # fmt: skip
+            (zero, gen + "    @%p1 st.u32 [%rd31+4], 16;\n", False),
+            (fence, gen + "    @%p1 st.u32 [%rd31+4], 16;\n", False),
+            (zero, gen + "    @%p1 red.add.u32 [%rd31+4], 16;\n", False),
+            (fence, gen + "    @%p1 atom.add.u32 %r61, [%rd31+4], 16;\n", False),
+            (zero, "    @%p1 atom.shared.add.u32 %r61, [%r40+4], 16;\n", False),
+            (fence, "    @%p1 red.shared::cta.add.u32 [%r40+4], 16;\n", False),
+            (zero, data + "    @%p6 red.shared.or.b32 [%r40+4], 16;\n", False),
+            (zero, "    @%p1 atom.shared::cta.exch.b32 %r61, [%r40+128], 16;\n", True),
+            (zero, gen + far + "    @%p1 st.u32 [%rd33], 16;\n", False),  # not static
+            (zero, gen + "    @%p1 st.u32 [%rd31+128], 16;\n", True),
+            (
+                zero,
+                "    stmatrix.sync.aligned.m8n8.x1.shared.b16 [%r2], {%r43};\n",
+                False,
+            ),  # fmt: skip
+            (zero, dv + "    cp.async.ca.shared.global [%r2], [%rd34], 4;\n", False),
+            (fence, "    mbarrier.init.shared::cta.b64 [%r2+64], 1;\n", False),
+        ):
+            with self.subTest(extra=extra.split("\n")[-2]):
+                body = STAGE + fill(0, 0, 20, 0).replace(at, at + extra) + use(20, 21)
+                f = run(body, KP, tensors=KT)
+                if ok:
+                    self.assertEqual(f.refusals, [])
+                else:
+                    self.assertIn("not zeroed by one warp first", f.refusals[0]["msg"])
+
+    def test_zeroed_through_a_register_known_zero(self):
+        # LLVM zeroes the buffer with a register an earlier loop's body sets to 0, read
+        # after the loop only: every edge leaves it at 0, so it is 0 there (interp.py)
+        loop = "    setp.ne.s32 %p8, %r5, 3;\n    mov.b32 %r44, 0;\nZL:\n" \
+            "    mov.b32 %r43, 0;\n    add.s32 %r44, %r44, 1;\n" \
+            "    setp.lt.s32 %p7, %r44, %r5;\n    @%p7 bra ZL;\n"  # fmt: skip
+        zero = "    mov.b32 %r43, 0;\n"
+        f = run(STAGE.replace(zero, loop) + fill(0, 0, 20, 0) + use(20, 21, row=32),
+                KP, tensors=KT)  # fmt: skip
+        self.assertEqual(f.refusals, [])
+        self.assertEqual([t for _e, t, _o in footprints(f, {"rows": 70})], ["dv"])
+        # another value written after the loop, or 0 under a predicate in it: refused
+        for bad in (loop + "    @%p8 mov.b32 %r43, 1;\n",
+                    loop.replace("ZL:\n" + zero, "ZL:\n    @%p8 mov.b32 %r43, 0;\n")):  # fmt: skip
+            f = run(
+                STAGE.replace(zero, bad) + fill(0, 0, 20, 0) + use(20, 21),
+                KP,
+                tensors=KT,
+            )
+            self.assertIn("not zeroed by one warp", f.refusals[0]["msg"])
 
 
 class PackedSubByte(unittest.TestCase):

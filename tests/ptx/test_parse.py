@@ -350,6 +350,56 @@ class OpsTest(unittest.TestCase):
         )
         self.assertNotEqual(ops.mnemonic("add.s32"), ops.mnemonic("add.f32"))
 
+    def test_memory_qualifiers_without_effect(self):
+        # Ordering, scope, .volatile, cache operators and .noftz of ld/st/atom/red, in
+        # any order (Triton, LLVM, inline asm), meet on the state space and the op.
+        same = {
+            "atom.global.add": [
+                "atom.global.add.f32", "atom.global.gpu.acq_rel.add.f32",
+                "atom.global.release.add.u32", "atom.global.gpu.relaxed.add.u32",
+                "atom.global.release.gpu.add.u32", "atom.global.add.noftz.f16",
+                "atom.release.sys.add.u64.global", "atom.global.gpu.acq_rel.add.v4.f32",
+            ],
+            "atom.global.min": ["atom.global.gpu.acq_rel.min.u32"],
+            "atom.global.cas": ["atom.global.acq_rel.gpu.cas.b32", "atom.global.sys.acquire.cas.b32"],
+            "atom.max": ["atom.max.acquire.gpu.u64"],
+            "red.global.add": [
+                "red.relaxed.gpu.global.add.u64", "red.global.gpu.relaxed.add.v4.f32",
+                "red.global.gpu.relaxed.add.noftz.v8.bf16",
+            ],
+            "red.global.or": ["red.global.cta.relaxed.or.b32"],
+            "red.global.max": ["red.global.gpu.relaxed.max.s32"],
+            "red.async.global.add": ["red.async.release.gpu.global.add.s32"],
+            "ld.global": [
+                "ld.global.cg.b32", "ld.global.nc.L1::no_allocate.v4.b32", "ld.volatile.global.b32",
+                "ld.relaxed.gpu.global.b32", "ld.global.acquire.gpu.b32", "ld.global.lu.b16",
+                "ld.global.ca.b8", "ld.global.cv.b32",
+            ],
+            "st.global": [
+                "st.global.cs.v4.b32", "st.global.wb.b8", "st.global.wt.b32",
+                "st.volatile.global.b32", "st.release.sys.global.b32",
+            ],
+            "ld.shared": ["ld.volatile.shared::cta.b32", "ld.relaxed.cta.shared.b32"],
+            "createpolicy.fractional": ["createpolicy.fractional.L2::evict_last.b64"],
+        }  # fmt: skip
+        for key, spellings in same.items():
+            for o in spellings:
+                with self.subTest(opcode=o):
+                    self.assertEqual(ops.mnemonic(o), key)
+        # .mmio has an effect, red.async on shared::cluster completes on an mbarrier
+        # (no rows); a mbarrier's ordering is not dropped here
+        self.assertEqual(
+            ops.mnemonic("ld.mmio.relaxed.sys.global.b32"), "ld.global.mmio"
+        )
+        cluster = (
+            "red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes"
+        )
+        self.assertNotIn(ops.mnemonic(cluster + ".add.u32"), ops.TABLE)
+        self.assertEqual(
+            ops.mnemonic("mbarrier.arrive.relaxed.cluster.shared::cta.b64"),
+            "mbarrier.arrive.relaxed.cluster.shared",
+        )
+
     def test_classes_follow_the_design(self):
         cases = {
             "setmaxnreg.dec.sync.aligned.u32 120": "drop",  # no warpgroup consistency check
@@ -379,6 +429,24 @@ class OpsTest(unittest.TestCase):
             "call.uni (%r1), vprintf, (%rd1, %rd1)": "drop",
             "call.uni (%r1), __nv_expf, (%r2)": "drop",
             "call.uni (%r1), my_helper, (%r2)": "refuse",
+            "createpolicy.fractional.L2::evict_last.b64 %rd1, 1.0": "drop",
+            "red.async.release.gpu.global.add.s32 [%rd1], %r1": "event",
+            "atom.add.relaxed.gpu.u32 %r1, [%rd1], 1": "event",
+            "st.local.v2.b32 [%r1], {%r1, %r1}": "event",
+            "cvta.to.shared::cluster.u64 %rd1, %rd1": "value",
+            "cvta.local.u64 %rd1, %rd1": "value",
+            # (sync.py, tma.py, ops.py rows of the TMA/WS/sync fixes)
+            "st.param::func.b64 [param0], %rd1": "drop",
+            "mbarrier.inval.shared::cta.b64 [%r1]": "event",
+            "clusterlaunchcontrol.query_cancel.get_first_ctaid::y.b32.b128 %r1, %r2": "event",
+            "tensormap.replace.tile.global_dim.global.b1024.b32 [%rd1], 1, %r1": "event",
+            "cp.reduce.async.bulk.global.shared::cta.bulk_group.add.noftz.bf16 [%rd1], [%r1], 256": "event",
+            "add.sat.s32 %r1, %r2, %r3": "value",
+            "sub.sat.s32 %r1, %r2, 1": "value",
+            "mul24.hi.u32 %r1, %r2, %r3": "value",
+            "sad.s64 %rd1, %rd1, %rd0, %rd1": "value",
+            "cvt.sat.u8.s32 %r1, %r2": "value",
+            "prmt.b32.rc16 %r1, %r2, %r3, %r0": "value",
         }
         for stmt, cls in cases.items():
             with self.subTest(stmt=stmt):
@@ -391,11 +459,11 @@ class OpsTest(unittest.TestCase):
 
     def test_unknown_mnemonic_raises(self):
         with self.assertRaisesRegex(
-            ops.UnknownInstruction, r"no op table row for mad\.hi"
+            ops.UnknownInstruction, r"no op table row for bmsk\.clamp"
         ):
-            ops.classify(_one("mad.hi.s32 %r1, %r2, %r3, %r1"))
-        with self.assertRaisesRegex(ops.UnknownInstruction, "ld.global.nc"):
-            ops.classify(_one("ld.global.nc.b32 %r1, [%rd1]"))
+            ops.classify(_one("bmsk.clamp.b32 %r1, %r2, %r3"))
+        with self.assertRaisesRegex(ops.UnknownInstruction, r"ld\.global\.mmio "):
+            ops.classify(_one("ld.mmio.relaxed.sys.global.b32 %r1, [%rd1]"))
 
     def test_every_fixture_instruction_is_classified(self):
         for path in (LLVM, NVVM):
@@ -423,14 +491,15 @@ class CoverageTest(unittest.TestCase):
         head = ".version 9.3\n.target sm_100a\n.address_size 64\n.visible .entry k()\n{\n.reg .b32 %r<2>;\n"
         with tempfile.TemporaryDirectory() as d:
             unknown, broken = Path(d) / "unknown.ptx", Path(d) / "broken.ptx"
-            unknown.write_text(head + "mad.hi.s32 %r1, %r1, %r1, %r1;\nret;\n}\n")
+            unknown.write_text(head + "bmsk.clamp.b32 %r1, %r1, %r1;\nret;\n}\n")
             broken.write_text(head + "add.s32 %r7, %r1, 1;\n}\n")
             out = Path(d) / "cov.json"
             self.assertEqual(_coverage(unknown, broken, "--json", out), 1)
             report = json.loads(out.read_text())
         u, b = report["files"]
         self.assertEqual(
-            u["unknown"], {"mad.hi": {"count": 1, "line": 7, "opcode": "mad.hi.s32"}}
+            u["unknown"],
+            {"bmsk.clamp": {"count": 1, "line": 7, "opcode": "bmsk.clamp.b32"}},
         )
         self.assertEqual(u["classes"], {"unknown": 1, "control": 1})
         self.assertIn("undeclared register %r7", b["error"])

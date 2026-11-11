@@ -130,7 +130,7 @@ class P1:
             self._mma(tr, i, mn)
         elif mn.startswith("tcgen05.alloc."):
             self._alloc(tr, i)
-        elif mn in _NAMED_BARS:
+        elif mn in _NAMED_BARS or mn.startswith(("bar.red.", "barrier.red.")):
             _named_bar(tr, i, mn)
 
     def issued(self, tr: interp.Translator, ev: str, var, act) -> None:
@@ -438,11 +438,14 @@ def _role_event(tr: interp.Translator, stmt: dict, what: str) -> None:
 
 
 def _named_bar(tr: interp.Translator, i, mn: str) -> None:
-    """bar/barrier.sync|arrive id[, count]: a named_bar of every thread of the role; count
-    absent, every thread of the block (ops_tmem._named_bar_asm, nvvm.barrier)."""
+    """bar/barrier.sync|arrive id[, count], or bar/barrier.red d, id[, count], c (a sync
+    with a result): a named_bar of every thread of the role; count absent, every thread
+    of the block (ops_tmem._named_bar_asm, nvvm.barrier)."""
+    red = ".red." in mn
+    n = len(i.operands) - (1 if red else 0)  # without barrier.red's predicate c
 
     def value(k: int, what: str) -> int:
-        if k >= len(i.operands):
+        if k >= n:
             return tr.k.block[0]
         e = tr.operand(i, k, 32)
         u = None if isinstance(e, interp.Data) else tr.uniform(e)
@@ -452,13 +455,14 @@ def _named_bar(tr: interp.Translator, i, mn: str) -> None:
             tr.fail(i, f"R7: named barrier {what} is not a constant")
         return u[2]
 
-    bid, count = value(0, "id"), value(1, "thread count")
+    k = 1 if red else 0  # barrier.red's operand 0 is its result
+    bid, count = value(k, "id"), value(k + 1, "thread count")
     if count <= 0 or count % 32:
         tr.fail(
             i,
             f"R7: named barrier thread count {count} is not a positive multiple of 32",
         )
-    sync = ".sync" in mn
+    sync = red or ".sync" in mn
     _role_event(tr, {"op": "event", "ev": "named_bar", "id": interp._c32(bid),
                      "count": interp._c32(count), "sync": sync, "loc": tr.loc()},
                 f"{mn.split('.')[0]}.{'sync' if sync else 'arrive'}")  # fmt: skip

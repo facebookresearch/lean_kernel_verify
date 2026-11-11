@@ -7,10 +7,12 @@
 the copy instructions and their KIR events.
 
     PREFIXES                          the event mnemonics mem.Memory.execute routes here
+    SHARED_WRITES                     the other shared-memory writes (staging buffers)
     Tma(mem, records)                 one per kernel variant (mem.Memory.tma); mem.py and
         symbol(name, w)               interp.py route here the address of a descriptor
         cvta_param(tr, i)             parameter, cvta.param, every st.shared (a tensormap
-        staging_store(tr, i)          staging buffer's zeroing), and the cp.async.bulk*,
+        staging_store(tr, i, maybe)   staging buffer's zeroing), every other write of
+        close_staging(tr, a, nbytes)  shared memory, and the cp.async.bulk*,
         execute(tr, i, mnemonic)      cp.reduce.async.bulk* and tensormap.* rows
         facts() -> (descs, values)    after every role: Facts.descs and Facts.values
     desc_base(records, k, leaves, taken) -> tensor | None
@@ -45,21 +47,27 @@ Descriptors.
     address 0: each TMA instruction on it is a KIR `assert false` per issuing thread (it
     fails wherever the instruction is issued). A descriptor null in some launches only
     has no base in those: refused (_make_host).
-  * In-kernel (Triton `tl.make_tensor_descriptor`; design §5.6): a 128-byte shared staging
-    buffer zeroed by one full warp (32 lanes x `st.shared.b32 0`, the exception to the
-    st.shared drop rule), filled by `tensormap.replace` (global_address, rank, elemtype,
-    box_dim, global_dim, global_stride per dim; element_stride 1, interleave 0; swizzle,
-    fill and atomicity have no KIR meaning) and copied to global memory by
-    `tensormap.cp_fenceproxy`, flow-sensitively: each cp_fenceproxy takes the fields
-    written since its buffer's last zeroing (TLX reuses one buffer for dV and dK in a
-    tile). The zeroing, the replaces and the cp_fenceproxy must be in one KIR statement
-    list (masked branches only: a uniform branch or loop between them could skip one),
-    with at least one issuing thread each. A TMA instruction whose descriptor address is
-    the very address expression a cp_fenceproxy of the role wrote, earlier in the same
-    loop iteration and in an enclosing branch, uses that descriptor (each tile writing it
-    again is fine); anything else is refused. Only stores and reduces use them: a clipped
-    gstore/gatomic on the base (frontend/ttgir/to_kir.py _clipped_store; extents
-    zero-extended, byte strides divided exactly); a load through one is a gap.
+  * In-kernel (Triton `tl.make_tensor_descriptor`; design §5.6): a 128-byte shared
+    staging buffer zeroed by one full warp (32 lanes x `st.shared.b32 0`, the exception
+    to the st.shared drop rule), filled by `tensormap.replace` (global_address,
+    elemtype, box_dim, global_dim, global_stride per dim; rank, which a 1-D descriptor
+    leaves at the zeroed 0 = rank 1; element_stride 1, interleave 0; swizzle, fill and
+    atomicity have no KIR meaning; a `.global` replace, editing a descriptor in global
+    memory, is refused) and copied to global memory by `tensormap.cp_fenceproxy`,
+    flow-sensitively: each cp_fenceproxy takes the fields written since its buffer's
+    last zeroing (TLX reuses one buffer for dV and dK in a tile). Any other write of
+    shared memory by the role closes the open buffers it may overlap (a later replace
+    or cp_fenceproxy of one is refused): a st.shared, or a generic st/atom/red at a %S:
+    (or %s:) address, the same bytes, unless its bytes are static and outside them; a
+    write of SHARED_WRITES closes them all. The zeroing, the replaces and the
+    cp_fenceproxy must be in one KIR statement list (masked branches only: a uniform
+    branch or loop between them could skip one), with at least one issuing thread each.
+    A TMA instruction whose descriptor address is the very address expression a
+    cp_fenceproxy of the role wrote, earlier in the same loop iteration and in an
+    enclosing branch, uses that descriptor (each tile writing it again is fine);
+    anything else is refused. Only stores and reduces use them: a clipped gstore/gatomic
+    on the base (frontend/ttgir/to_kir.py _clipped_store; extents zero-extended, byte
+    strides divided exactly); a load through one is a gap.
   * Bulk (non-tensor cp.async.bulk global -> shared): the 1-D descriptor `bulk_<T>_<n>`
     (box n elements of T) of the CuTe frontend; its shape (T's extent) and strides ([1])
     are the family assembly's (in its own tensor parameter names).
@@ -129,6 +137,14 @@ from . import cluster, expr as E, launch, ops
 from .interp import Data, Translator
 
 PREFIXES = ("cp.async.bulk", "cp.reduce.async.bulk", "tensormap.")  # mem.py routes here
+# The writes of shared memory but st.shared, generic st/atom/red and tensormap.replace,
+# each closing every open staging buffer of its role (mem.Memory.execute, interp.py):
+# stmatrix, cp.async, TMA and bulk copies into shared memory, mbarrier objects (a
+# tcgen05.commit arrives on one), tcgen05.alloc's address, a CLC response.
+SHARED_WRITES = (
+    "stmatrix", "cp.async.ca", "cp.async.cg", "cp.async.bulk.shared", "mbarrier.",
+    "tcgen05.alloc", "tcgen05.commit", "clusterlaunchcontrol.try_cancel",
+) + tuple(f"cp.async.bulk.tensor.{d}d.shared" for d in range(1, 6))  # fmt: skip
 # The compilers whose TMA / bulk issuing (module doc) was measured on hardware: CuTe DSL
 # 4.4.2's embedded nvPTXCompiler, DSL 4.6.1's, Triton's ptxas-blackwell (CUDA 13.3), CUDA
 # 13.0 and 12.8 ptxas (12.8 on sm_100a only: it cannot target sm_103a).
@@ -157,7 +173,7 @@ _ELEMTYPE_BYTES = {0: 1, 1: 2, 2: 4, 3: 4, 4: 8, 5: 8, 6: 2, 7: 4, 8: 4, 9: 8, 1
                    11: 4, 12: 4}  # fmt: skip
 _REDUCE_BITS = {"f16": 16, "bf16": 16, "f32": 32, "f64": 64, "u32": 32, "s32": 32,
                 "u64": 64, "s64": 64, "b32": 32, "b64": 64}  # fmt: skip
-_KERNEL_FIELDS = ("global_address", "rank", "elemtype")  # required besides per-dim ones
+_KERNEL_FIELDS = ("global_address", "elemtype")  # required besides per-dim ones
 
 
 @dataclass
@@ -683,14 +699,18 @@ class Tma:
                        "(or that no thread meets)")  # fmt: skip
         return act
 
-    def staging_store(self, tr: Translator, i) -> None:
+    def staging_store(self, tr: Translator, i, maybe: bool = False) -> None:
         """st.shared (a drop): 32 lanes of one warp writing b32 zeros to the 128 bytes
         from a constant offset zero a tensormap staging buffer; any other store that may
-        overlap an open staging buffer closes it (a later cp_fenceproxy of it is refused)."""
+        overlap an open staging buffer closes it (a later cp_fenceproxy of it is refused),
+        as does one that `maybe` happens (under a data predicate: of the mask's threads)."""
         stage = self._dyn(tr)["stage"]
         val = tr.operand_value(i.operands[1], 32) if len(i.operands) > 1 else None
         zero = (
-            i.opcode.endswith(".b32") and isinstance(val, tuple) and E.is_const(val, 0)
+            not maybe
+            and i.opcode.endswith(".b32")
+            and isinstance(val, tuple)
+            and E.is_const(val, 0)
         )
         if not zero and not stage:
             return  # (most stores: nothing to check)
@@ -704,9 +724,19 @@ class Tma:
         ):
             stage[(span[0], span[1])] = _Stage({}, _Ctx.of(tr))
             return
-        for s, a0 in list(stage):  # a store of unknown or overlapping bytes closes it
-            if span is None or span[0] == s and span[1] < a0 + 128 and a0 < span[3]:
-                del stage[(s, a0)]
+        _close(stage, span)
+
+    def close_staging(self, tr: Translator, a=None, nbytes: int = 16) -> None:
+        """A write of shared memory but st.shared, of nbytes per issuing thread at
+        address a (%s: or %S:; None: unknown bytes): close the open staging buffers of
+        the role it may overlap, all of them if its bytes are not static (module doc)."""
+        stage = self._dyn(tr)["stage"]
+        if not stage:
+            return
+        p = None if a is None or isinstance(a, Data) else _peel(a)
+        if p is not None and p[0][2].startswith("%S:"):  # generic: the same bytes
+            p = E.var("%s:" + p[0][2][3:], E.width(p[0])), p[1]
+        _close(stage, None if p is None else _span(tr, p, nbytes))
 
     def _stage(self, tr: Translator, i, op, what: str) -> tuple:
         sym, off = self._smem(tr, i, op, f"the {what} staging address")
@@ -729,6 +759,10 @@ class Tma:
     def _replace(self, tr: Translator, i, mn: str) -> None:
         """tensormap.replace.tile.<field>.shared::cta.b1024.<type> [a], {dim,} value."""
         what = mn.split(".")[2]
+        if mn.endswith(".global"):
+            tr.fail(i, f"tensormap.replace.{what} of a tensormap in global memory (gap: "
+                       "only shared-memory staging buffers are modeled; the fields of a "
+                       "descriptor edited in place are not known)")  # fmt: skip
         _key, st = self._stage(tr, i, i.operands[0], f"tensormap.replace.{what}")
         self._active(tr, i, f"tensormap.replace.{what}")
         dim = None
@@ -774,7 +808,10 @@ class Tma:
         missing = [x for x in _KERNEL_FIELDS if (x, None) not in f]
         if missing:
             tr.fail(i, f"in-kernel descriptor without {', '.join(missing)}")
-        rank = _const(tr, i, f[("rank", None)], "rank") + 1
+        # The field holds rank - 1; never replaced, it keeps the zeroed buffer's 0: rank
+        # 1 (Triton writes no rank for a 1-D descriptor).
+        zero = E.const(0, 32)
+        rank = _const(tr, i, f.get(("rank", None), zero), "rank") + 1
         need = [(x, k) for k in range(rank) for x in ("box_dim", "global_dim")] + [
             ("global_stride", k) for k in range(rank - 1)]  # fmt: skip
         if any(x not in f for x in need):
@@ -899,9 +936,10 @@ def _peel(e):
     return peel(e)
 
 
-def _span(tr: Translator, p):
+def _span(tr: Translator, p, nbytes: int = 16):
     """(symbol, first byte, sorted per-thread byte offsets, end byte) of a shared store's
-    address over its issuing threads, or None if that is not static."""
+    address over its issuing threads, each writing at most nbytes, or None if that is
+    not static."""
     if not p[0][2].startswith("%s:"):
         return None
     uni, var = tr.split_mask()
@@ -911,7 +949,15 @@ def _span(tr: Translator, p):
     if not offs or not all(E.is_const(o) for o in offs):
         return None
     got = sorted(o[2] for o in offs)
-    return p[0][2][3:], got[0], got, got[-1] + 16
+    return p[0][2][3:], got[0], got, got[-1] + nbytes
+
+
+def _close(stage: dict, span) -> None:
+    """Close the open staging buffers of `stage` a store of span (_span; None: unknown
+    bytes) may overlap."""
+    for s, a0 in list(stage):
+        if span is None or span[0] == s and span[1] < a0 + 128 and a0 < span[3]:
+            del stage[(s, a0)]
 
 
 def _same(a, b) -> bool:

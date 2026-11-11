@@ -12,13 +12,15 @@ tcgen05: alloc/dealloc/relinquish/ld/st/wait/cp/shift/mma emit nothing in P0, ld
 registers are Data, a .sync.aligned form under a lane condition is refused, commit is a
 commit_arrive per issuing thread, a multicast commit and cta_group::2 need a cluster
 (test_cluster.py). CLC: the
-try_cancel/query/get_first_ctaid sequence of Triton's CLC (evaluated over a schedule),
-the role prologue, refusals of other response uses (a response read elsewhere than the
-try_cancel's address or before a wait on its mbarrier, an unpredicated get_first_ctaid)
-and of CuTe CLC. Named barriers,
+try_cancel/query/get_first_ctaid sequence of Triton's CLC (evaluated over a schedule;
+the per-axis get_first_ctaid::x/::y/::z too), the role prologue, refusals of other
+response uses (a response read elsewhere than the try_cancel's address or before a wait
+on its mbarrier, an unpredicated get_first_ctaid) and of CuTe CLC. Named barriers,
 fences and griddepcontrol emit nothing; the cluster-scope forms are gaps in the Triton
-family (test_cluster.py: the CuTe family); relaxed arrive
-and inval are refused; parts of a CuTe role that emit nothing are merged. Pipelines: a
+family (test_cluster.py: the CuTe family); relaxed arrive is refused; mbarrier.inval
+ends a private synchronous cycle (init, commit, wait, inval in each loop iteration),
+which is removed, and is refused otherwise; parts of a CuTe role that emit nothing are
+merged. Pipelines: a
 wait in a loop with stage and phase slots, the LSR form of `fulls[blk % 2]`, a barrier
 index computed after a loop from registers the loop defines, an smem descriptor (bit
 operations on a shared address) carried in a loop.
@@ -249,6 +251,89 @@ class Clc(unittest.TestCase):
         )
         self.assertIn("not predicated by the is_canceled result", refusal(sync(bad)))
 
+    def test_per_axis_first_ctaid(self):
+        # CuTe DSL 4.6.1 asks for one coordinate at a time: the same values as the .v4 form
+        v4 = "@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {%r31, %r32, %r33, _}, clc_result;"
+        axes = "\n    ".join(f"@p1 clusterlaunchcontrol.query_cancel.get_first_ctaid::{a}.b32.b128 %r3{k}, clc_result;"
+                             for k, a in ((1, "x"), (2, "y"), (3, "z")))  # fmt: skip
+        f, g = sync(CLC), sync(CLC.replace(v4, axes))
+        self.assertEqual(g.refusals, [])
+        sched = {(0, 0): 5, (0, 1): 7, (0, 2): -1}
+        meta = {"__clc_launched": [1], "__clc_schedule": sched}
+        self.assertEqual(
+            evaluate(g, {"n": 1}, metadata=meta), evaluate(f, {"n": 1}, metadata=meta)
+        )
+
+
+# TLX's tlx.async_dot without mBarriers: per iteration a compiler barrier at smem+8 is
+# initialized, the MMAs' commit arrives on it, the role waits for it and invalidates it.
+CYCLE = """
+    mov.b32 %r40, 0;
+PLOOP:
+    @%p12 mbarrier.init.shared::cta.b64 [%r10+8], 1;
+    @%p12 tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%r10+8];
+    mov.b32 %r41, 0;
+{
+    .reg .pred P1;
+WAITP:
+    mbarrier.try_wait.parity.shared::cta.b64 P1, [%r10+8], %r41;
+    @!P1 bra.uni WAITP;
+}
+    @%p12 mbarrier.inval.shared::cta.b64 [%r10+8];
+    @%p12 st.global.b32 [%rd1], %r40;
+    add.s32 %r40, %r40, 1;
+    setp.lt.s32 %p13, %r40, %r2;
+    @%p13 bra PLOOP;
+"""
+
+
+class Inval(unittest.TestCase):
+    def test_private_cycle_is_removed(self):
+        f = sync(CYCLE)
+        self.assertEqual(f.refusals, [])
+        self.assertEqual(([e["ev"] for e in events(f)], f.barriers), (["gstore"], []))
+        self.assertEqual(kir_errors(f), [])
+        # beside a pipeline barrier at smem+0, which stays
+        init = "    @%p12 mbarrier.init.shared::cta.b64 [%r10], 1;\n"
+        f = sync(
+            init + CYCLE + "    @%p12 mbarrier.arrive.shared::cta.b64 _, [%r10];\n"
+        )
+        self.assertEqual([b["name"] for b in f.barriers], ["mbar_0"])
+
+    def test_refusals(self):
+        init = "    @%p12 mbarrier.init.shared::cta.b64 [%r10+8], 1;\n"
+        commit = "    @%p12 tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [%r10+8];\n"
+        cases = {
+            # too few arrivals: the wait would hang (a finding, not a cycle to drop)
+            "1 arrivals before the wait for a count of 2": CYCLE.replace("[%r10+8], 1;", "[%r10+8], 2;"),
+            "2 arrivals before the wait for a count of 1": CYCLE.replace(commit, commit * 2),
+            # a TMA load's bytes: P0-4 checks them
+            "a expect_tx event on the slot": CYCLE.replace(
+                commit, "    @%p12 mbarrier.arrive.expect_tx.shared::cta.b64 _, [%r10+8], 16;\n"),
+            # initialized once before the loop: re-used after the inval
+            "in another branch, loop or thread loop": init + CYCLE.replace(init, ""),
+            "does not end in one wait": CYCLE.replace("    @!P1 bra.uni WAITP;\n", "    @!P1 bra.uni WAITP;\n" + commit),
+            # the slot used again after the loop: no longer a private cycle's
+            "events outside a private synchronous cycle use": CYCLE + init
+            + "    @%p12 mbarrier.arrive.shared::cta.b64 _, [%r10+8];\n",
+        }  # fmt: skip
+        for msg, body in cases.items():
+            with self.subTest(msg):
+                self.assertIn(msg, refusal(sync(body)))
+        # arrivals in a counted loop, not a thread loop: 2 commits (i = 0, 2) for a
+        # count of 4, 4 arrives for a count of 1 (the wait of parity 0 waits on phase 4):
+        # both waits hang, P0-2's finding
+        arrive = "    @%p12 mbarrier.arrive.shared::cta.b64 _, [%r10+8];\n"
+        for count, ev, step in ((4, commit, 2), (1, arrive, 1)):
+            loop = f"    mov.b32 %r50, 0;\nCL:\n{ev}    add.s32 %r50, %r50, {step};\n" \
+                "    setp.lt.s32 %p20, %r50, 4;\n    @%p20 bra CL;\n"  # fmt: skip
+            body = CYCLE.replace(commit, loop).replace("+8], 1;", f"+8], {count};")
+            with self.subTest(count=count):
+                self.assertIn(
+                    "in another branch, loop or thread loop", refusal(sync(body))
+                )
+        self.assertIn("in the P1 pass", refusal(sync(CYCLE, family="cute", p1=True)))
+
 
 class Barriers(unittest.TestCase):
     def test_named_barriers_fences_griddepcontrol_emit_nothing(self):
@@ -290,7 +375,7 @@ class Barriers(unittest.TestCase):
             ),
             (
                 "@%p12 mbarrier.inval.shared::cta.b64 [%r10];",
-                "relaxed arrive and invalidation",
+                "ends no private synchronous cycle",
             ),
         ]:
             f = sync(init + "    " + stmt)

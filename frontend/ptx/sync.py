@@ -4,12 +4,14 @@
 # LICENSE file in the root directory of this source tree.
 
 """Synchronization rows of the PTX frontend besides plain mbarriers (design §5.6, §5.7):
-tcgen05, cluster launch control (CLC) and the cluster-scope barrier forms.
+tcgen05, cluster launch control (CLC), mbarrier invalidation and the cluster-scope
+barrier forms.
 
     PREFIXES                          the mnemonics mem.Memory.execute routes here
     execute(tr, i, mnemonic)          one instruction of a role (interp.Translator)
-    finish(translators) -> bool       after every role: the CLC role prologue; whether
-                                      the kernel uses CLC (Facts.clc)
+    finish(translators) -> bool       after every role: the invalidated slots' check, the
+                                      CLC role prologue; whether the kernel uses CLC
+                                      (Facts.clc)
     use_ranges(translators)           the byte ranges of dynamic mbarrier offsets over
                                       slots (BarrierUse.rng), for the CuTe array split
     top_const(offset) -> int          the constant that picks an mbarrier offset's array
@@ -47,7 +49,8 @@ design §5.6; the Triton family only, CuTe CLC is M5):
     p = clc<k> != -1, and r's token remembers clc<k> and p.
   * query_cancel.get_first_ctaid.v4 {x, y, z, _}, r of a queried token, predicated by
     its p (ISA: undefined on a response that is not canceled): x = clc<k>, y, z =
-    (clc<k> == -1 ? -1 : 0) (the mov defaults before it stay where p is false).
+    (clc<k> == -1 ? -1 : 0) (the mov defaults before it stay where p is false); the
+    per-axis forms get_first_ctaid::x/::y/::z d, r (CuTe DSL 4.6.1) give that one.
   Any other use of a response is refused. finish() gives every role the prologue
   `let __clc_k = 0; if __clc_launched[pid.x] != 0 { body }` (a CTA the schedule never
   launches runs nothing) when some role uses CLC. The family assembly declares
@@ -67,6 +70,25 @@ stages into copies) keeps the unknown interval of its expression, as without the
 analysis, so its run stays whole as the CuTe frontend's dynamic index over the stages
 keeps it.
 
+mbarrier.inval [a] (KIR has no re-initialization: a slot's phases only count up, so a
+slot initialized again after an inval would look like one barrier whose later waits
+repeat a parity). Accepted only where it ends a private synchronous cycle, which is
+elided: TLX's tlx.async_dot without mBarriers waits for its MMAs on a compiler barrier,
+`init(n); tcgen05.commit; wait(parity 0); inval` in each iteration. The cycle is the
+role's events on the slot (a constant offset) since its last bar_init: that init of a
+constant count n, arrivals (arrive, commit_arrive on the issuing CTA's slot, each of
+statically known issuing threads) adding up to exactly n, then one wait of parity 0;
+each of them, and the inval (statically known issuing threads, no runtime condition), in
+one KIR statement list (no uniform branch or loop between them). So the wait returns
+once the arrivals land (a commit's when its MMAs complete), the phase is complete and
+nothing is pending when the slot is invalidated: the cycle only orders the role after
+its own arrivals, which no P0 spec sees (P0 has no TMEM), and its events are removed.
+finish() refuses a kernel in which any other event names that slot (another role's, or
+this role's outside such a cycle: an inval does not make a later use valid). The P1
+pass refuses mbarrier.inval (its cycles order the tcgen05 ops P1 checks). Anything else
+is refused, e.g. a TMA load's cycle (Triton's synchronous descriptor load), whose
+transaction bytes P0-4 checks.
+
 Cluster scope: barrier.cluster.*, mbarrier.arrive(.expect_tx).shared::cluster (a remote
 arrive) and mbarrier.complete_tx go to cluster.py.
 """
@@ -80,7 +102,7 @@ from .interp import Data, Translator, Unsupported
 PREFIXES = (
     "tcgen05.", "clusterlaunchcontrol.", "ld.shared", "barrier.cluster",
     "mbarrier.arrive.shared::cluster", "mbarrier.arrive.expect_tx.shared::cluster",
-    "mbarrier.complete_tx",
+    "mbarrier.complete_tx", "mbarrier.inval",
 )  # fmt: skip
 
 CLC_K = "__clc_k"  # the role's query counter (frontend/ttgir/to_kir.py)
@@ -105,6 +127,8 @@ def execute(tr: Translator, i, mn: str) -> None:
         _clc(tr, i, mn)
     elif mn == "ld.shared":
         _response(tr, i)
+    elif mn == "mbarrier.inval.shared":
+        _inval(tr, i)
     else:
         cluster.execute(tr, i, mn)
 
@@ -161,7 +185,8 @@ def _clc(tr: Translator, i, mn: str) -> None:
     y = E.select(E.cmp("eq", x, E.const(-1, 32)), E.const(-1, 32), E.const(0, 32))
     dst = i.operands[0]
     regs = dst[1] if dst[0] == "vec" else [dst]
-    for k, r in enumerate(regs):
+    axis = "xyz".index(mn[-1]) if "::" in mn else 0  # get_first_ctaid::x/::y/::z
+    for k, r in enumerate(regs, axis):
         if r[0] == "reg":
             w = Data(f"the 4th component of {i.opcode} at {tr.loc(i)}")
             tr.write(r[1], x if k == 0 else y if k < 3 else w)
@@ -214,10 +239,102 @@ def _address(tr: Translator, i):
     return None if u is None else (sym, u)
 
 
+# -------------------------------------------------------------- invalidation
+
+_ARRIVALS = ("arrive", "commit_arrive")
+
+
+def _inval(tr: Translator, i) -> None:
+    """mbarrier.inval [a]: the end of a private synchronous cycle on a's slot, whose
+    events are removed (module doc); else refused."""
+    if tr.k.p1 is not None:
+        tr.fail(i, "mbarrier.inval in the P1 pass (gap: its cycle orders tcgen05 ops)")
+    sym, off = tr.k.mem._smem(tr, i, i.operands[0])
+    c = tr.uniform(off)
+    uni, var = tr.split_mask()
+    if c is None or not E.is_const(c) or not E.is_const(uni, 1) or not tr.active(var):
+        tr.fail(i, "mbarrier.inval of a slot that is not a constant offset, or under a "
+                   "condition that depends on runtime values (or that no thread meets)")  # fmt: skip
+    mine = [u for u in tr.barriers if u.sym == sym and u.const == c[2]]
+    start = max(
+        (k for k, u in enumerate(mine) if u.event["ev"] == "bar_init"), default=None
+    )
+    cycle = mine[start:] if start is not None else []
+    tops = [_top(tr.stmts, u.event) for u in cycle]
+    why = _cycle_fault(cycle, tops)
+    if why:
+        tr.fail(i, f"mbarrier.inval of {sym}+{c[2]} ends no private synchronous cycle "
+                   f"of the role (init, arrivals, one wait of parity 0): {why}")  # fmt: skip
+    gone = {id(u) for u in cycle}
+    tr.barriers[:] = [u for u in tr.barriers if id(u) not in gone]
+    drop = {id(t[0]) for t in tops if t is not None}
+    tr.stmts[:] = [s for s in tr.stmts if id(s) not in drop]
+    tr.invals.append((sym, c[2], i))
+
+
+def _top(stmts: list, ev: dict):
+    """(the statement of `stmts` holding event ev, its issuing threads): ev itself (1),
+    or a `for` over the issuing threads whose body is ev (thread mode, tr._issue: its
+    variable `issuer<n>`, which no other loop is named); None if ev is not at the top of
+    the list (inside an `if`, a program loop, a thread loop, another list)."""
+    for s in stmts:
+        if s is ev:
+            return s, 1
+        if (s["op"] == "for" and s["var"].startswith("issuer") and s["body"] == [ev]
+                and s["body"][0] is ev and s["lb"] == {"e": "const", "w": 32, "v": 0}
+                and s["step"] == {"e": "const", "w": 32, "v": 1}
+                and s["ub"]["e"] == "const"):  # fmt: skip
+            return s, s["ub"]["v"]
+    return None
+
+
+def _cycle_fault(cycle: list, tops: list) -> str | None:
+    """Why the role's uses `cycle` of a slot (from its last bar_init on) with their
+    statements `tops` are no private synchronous cycle, or None."""
+    if not cycle:
+        return "no bar_init of the slot before it"
+    if None in tops:
+        return "an event of the cycle in another branch, loop or thread loop"
+    if any(u.rest is not None for u in cycle):
+        return "a dynamic offset names the slot"
+    init, wait, arrivals = cycle[0].event, cycle[-1].event, cycle[1:-1]
+    count = init["count"]
+    if wait["ev"] != "wait" or wait.get("parity") != {"e": "const", "w": 32, "v": 0}:
+        return "it does not end in one wait of parity 0"
+    if count["e"] != "const":
+        return "the init count is not a constant"
+    n = 0
+    for u, (_s, k) in zip(arrivals, tops[1:-1]):
+        ev = u.event
+        if ev["ev"] not in _ARRIVALS or {"cta", "cta_mask", "leader"} & set(ev):
+            return f"a {ev['ev']} event on the slot (only arrivals of the issuing CTA)"
+        m = ev.get("n", {"e": "const", "v": 1})
+        if m["e"] != "const":
+            return "an arrive of a count that is not a constant"
+        n += (u.issuers if ev["ev"] == "arrive" else k) * m["v"]
+    if n != count["v"]:
+        return f"{n} arrivals before the wait for a count of {count['v']}"
+    return None
+
+
+def _check_invals(translators: list) -> None:
+    """Refuse a kernel in which an event outside an elided cycle names an invalidated
+    slot (module doc)."""
+    for tr in translators:
+        for sym, c, i in tr.invals:
+            if any(
+                u.sym == sym and u.const == c for t in translators for u in t.barriers
+            ):
+                tr.fail(i, f"mbarrier.inval of {sym}+{c}, a slot that events outside a "
+                           "private synchronous cycle use")  # fmt: skip
+
+
 def finish(translators: list) -> bool:
     """The CLC prologue of every role if some role uses CLC; whether one does. Refused:
     a queried response read from an address no try_cancel writes, or before its role
-    waits on one of that address's try_cancel mbarriers."""
+    waits on one of that address's try_cancel mbarriers; an invalidated slot used outside
+    its elided cycles."""
+    _check_invals(translators)
     if not any(tr.uses_clc for tr in translators):
         return False
     bars: dict = {}

@@ -44,7 +44,8 @@ the registers it writes that are live at its header or exit are carried in slots
 widened, and the trailing zeros of a slot narrowed, to a fixed point;
 assigned in parallel at every back edge and exit edge), and an exit edge clears the
 flag. A register the body writes before reading it, read only after the loop, starts its
-slot at any value (Data after the loop if the body makes it data). A Wait is one `wait`
+slot at any value (Data after the loop if the body makes it data); after the loop it is
+the loop-invariant value every edge leaves it at, if there is one. A Wait is one `wait`
 event per role.
 
 Events execute once per issuing thread (frontend/cute/interp.py's rules): a single event
@@ -75,6 +76,9 @@ if TYPE_CHECKING:  # mem.py and tmem.py import this module
     from .tmem import P1
 
 _LANES = tuple(range(32))
+# Translator.env key (no PTX register has this name) of what mem.py knows of the thread's
+# local memory; run forgets it at the start of each basic block.
+LOCAL = "%local"
 
 
 class Unsupported(Exception):
@@ -181,6 +185,7 @@ class Translator:
         self.waited: set = set()  # (symbol, offset) of every mbarrier waited on so far
         self.clc_cancels: list = []  # sync.py: (response address, mbarrier) per try_cancel
         self.clc_reads: list = []  # sync.py: ClcResponse.read of every queried response
+        self.invals: list = []  # sync.py: (symbol, offset, instr) of each elided cycle
 
     # ---------------------------------------------------------------- basics
     def loc(self, i=None) -> str:
@@ -584,6 +589,8 @@ class Translator:
             if stop is not None and stop():
                 break
             if isinstance(node, R.Block):
+                self.env.pop(_CC, None)  # the carry flag lives within a block (_carry)
+                self.env.pop(LOCAL, None)  # so do known local bytes (mem.py)
                 for i in node.instrs:
                     self.step(i)
             elif isinstance(node, R.If) and self.loops and node is self.loops[-1][5]:
@@ -622,10 +629,13 @@ class Translator:
             self.work(i, sites)
 
     def predicated(self, i, cls: str) -> None:
+        if _carries(ops.mnemonic(i.opcode)):  # CC.CF is not merged per thread
+            self.fail(i, "a carry-flag instruction under a predicate")
         reg, neg = i.guard
         p = self.env.get(reg, Data(f"undefined {reg}"))
         if isinstance(p, Data):
             if cls in ("value", "drop"):  # a data value, used by no root so far
+                self._shared_drop(i, ops.mnemonic(i.opcode), True)
                 for r in R.dests(i):
                     self.env[r] = Data(
                         f"{i.opcode} under a data predicate at {self.loc(i)}"
@@ -872,12 +882,13 @@ class Translator:
                 if s is not None
                 else Data(f"{r} after the loop at {self.loc(head)}")
             )
-            # P1 pass (tmem.py: TMEM addresses must be warp-uniform): a register read
-            # after the loop only that every edge leaves at one loop-invariant value
-            # (LLVM rematerializes `mov r, %tid.x` in the loop) is that value, not its
-            # slot's (whose entry value is a placeholder, so it is a per-thread family).
+            # A register read after the loop only that every edge leaves at one
+            # loop-invariant value is that value, not its slot's (whose entry value is a
+            # placeholder, so it is a per-thread family): LLVM rematerializes `mov r,
+            # %tid.x` (P1: TMEM addresses must be warp-uniform), `setp.eq p, tid, 0` or
+            # `mov r, 0` (a tensormap staging buffer's zeroing, tma.py) in the loop.
             v = exits.get(k)
-            if (self.k.p1 is not None and isinstance(v, tuple) and not E.unsafe(v)
+            if (isinstance(v, tuple) and not E.unsafe(v)
                     and E.free_vars(v).isdisjoint(inside)):  # fmt: skip
                 self.env[r] = v
 
@@ -1643,13 +1654,14 @@ class Translator:
             if mn == "ld.shared" and i.opcode.endswith(".b128"):  # a CLC response
                 self.k.mem.execute(self, i, mn)  # (sync.py)
                 return
-            if mn == "st.shared":  # a tensormap staging buffer's zeroing (tma.py)
-                self.k.mem.tma.staging_store(self, i)
+            self._shared_drop(i, mn)
             for r in R.dests(i):
                 self.env[r] = Data(f"{i.opcode} at {self.loc(i)}")
             return
-        if cls == "event" or mn in ("ld.param", "cvta.param") or mn.startswith("mapa"):
+        if cls == "event" or mn == "ld.param" or mn.startswith(("mapa", "cvta")):
             self.k.mem.execute(self, i, mn)
+            if mn.startswith(("bar.red.", "barrier.red.")):  # a bar.sync with a result
+                self._barrier_red(i, mn)
             return
         base = mn.split(".")[0]
         if base in ("elect", "shfl", "vote", "redux"):
@@ -1662,6 +1674,17 @@ class Translator:
         for r, v in zip(dsts, values):
             if r is not None:
                 self.write(r, v)
+
+    def _shared_drop(self, i, mn: str, maybe: bool = False) -> None:
+        """A dropped write of shared memory (st.shared, stmatrix, atom/red.shared)
+        closes the tensormap staging buffers it may overlap (tma.py); a st.shared may
+        also zero one, unless `maybe` (under a data predicate: it may not happen)."""
+        if mn == "st.shared":
+            self.k.mem.tma.staging_store(self, i, maybe)
+        elif mn.startswith("stmatrix"):  # (tma.SHARED_WRITES)
+            self.k.mem.tma.close_staging(self)
+        elif mn.startswith(("atom.shared", "red.shared")):  # as a generic one (mem.py)
+            self.k.mem.execute(self, i, mn)
 
     def write(self, reg: str, v) -> None:
         """Assign a register at its declared width (a narrower or wider value is extended
@@ -1734,10 +1757,12 @@ class Translator:
         if name == "%is_explicit_cluster":
             return E.const(int(tuple(dims) != (1, 1, 1)), 1)
         if name.startswith("%lanemask_"):
-            eq = E.bin("shl", E.const(1, 32), E.LANE)
-            lt = E.bin("sub", eq, E.const(1, 32))
-            le = E.bin("or", lt, eq)
+            # by logical shifts of all ones (a shift by 32 is 0): bit moves, no
+            # arithmetic that could wrap as an address's (shl(1, 31), E.shl_bits)
             ones = E.const(-1, 32)
+            lt = E.bin("lshr", ones, E.bin("sub", E.const(32, 32), E.LANE))
+            le = E.bin("lshr", ones, E.bin("sub", E.const(31, 32), E.LANE))
+            eq = E.bin("xor", le, lt)
             return {"eq": eq, "lt": lt, "le": le, "gt": E.bin("xor", le, ones),
                     "ge": E.bin("xor", lt, ones)}[name[len("%lanemask_"):]]  # fmt: skip
         if axis not in ("x", "y", "z"):  # the rest are vectors read one axis at a time
@@ -1771,13 +1796,16 @@ class Translator:
         if base == "mov":
             return self._mov(i, ndst)
         if base == "cvt":
-            return [self._cvt(i, types)]
-        if base == "cvta":
-            return [self.operand(i, 1, 64)]
+            return [self._cvt(i, mn, types)]
+        packed = re.search(r"\.([su])16x2$", i.opcode)
+        if packed:
+            return [self._packed(i, mn, packed.group(1) == "s")]
         if not types:
             self.fail(i, "integer instruction without a type", "error")
         kind, w = types[-1]
         signed = kind == "s"
+        if _carries(mn):
+            return [self._carry(i, mn, w, signed)]
         if base == "setp":
             return self._setp(i, types)
         if base == "selp":
@@ -1820,6 +1848,8 @@ class Translator:
     def _arith(self, i, mn, base, args, w, signed):  # noqa: C901 (one case per opcode)
         a = args[0]
         b = args[1] if len(args) > 1 else None
+        if mn in ("add.sat", "sub.sat"):
+            return E.add_sat(a, b, base == "sub")
         if base in ("add", "sub", "and", "or", "xor") and ".cc" not in i.opcode:
             return E.bin(base, a, b)
         if base == "not":
@@ -1835,21 +1865,30 @@ class Translator:
         if mn == "mul.wide":
             return E.mul_wide(a, b, signed)
         if mn == "mul.hi":
-            if w != 32:
-                self.fail(i, f"mul.hi on {w}-bit operands (only 32-bit is expanded)")
             return E.mul_hi(a, b, signed)
         if mn == "mad.lo":
             return E.bin("add", E.bin("mul", a, b), args[2])
         if mn == "mad.wide":
             return E.bin("add", E.mul_wide(a, b, signed), args[2])
-        if mn == "mad.hi" and w == 32:
+        if mn == "mad.hi":
             return E.bin("add", E.mul_hi(a, b, signed), args[2])
+        if base == "mul24":
+            return E.mul24(a, b, mn == "mul24.hi", signed)
+        if base == "sad":
+            return E.sad(a, b, args[2], signed)
         if base in ("div", "rem"):
             return E.bin(
                 ("s" if signed else "u") + base, self.guard(a, 0), self.guard(b, 1)
             )
-        if base in ("min", "max") and ".relu" not in i.opcode:
+        if mn in ("min", "max"):
             return E.bin(("s" if signed else "u") + base, a, b)
+        if mn in ("min.relu", "max.relu") and signed:  # negative results become 0
+            return E.bin("smax", E.bin("s" + base, a, b), E.const(0, w))
+        if base == "bfind":
+            return E.bfind(a, signed, mn == "bfind.shiftamt")
+        if base == "dp2a":
+            (ka, _), (kb, _) = _types(i.opcode)
+            return E.dp2a(a, b, args[2], mn == "dp2a.hi", ka == "s", kb == "s")
         if base in ("shl", "shr"):
             amt = _shift_amount(b, w)
             op = "shl" if base == "shl" else ("ashr" if signed else "lshr")
@@ -1870,8 +1909,10 @@ class Translator:
                 self.fail(i, "bfi with a runtime position or length")
             return E.bfi(a, b, consts[2], consts[3])
         if base == "prmt":
-            if mn != "prmt" or consts[2] is None:
-                self.fail(i, "prmt with a mode or a runtime selector")
+            if mn != "prmt":
+                return E.prmt_mode(a, b, args[2], mn.split(".")[1])
+            if consts[2] is None:
+                self.fail(i, "prmt with a runtime selector")
             return E.prmt(a, b, consts[2])
         if base == "lop3":
             if len(args) != 4 or consts[3] is None:
@@ -1882,6 +1923,59 @@ class Translator:
                 self.fail(i, "shf with a runtime shift amount")
             return E.shf(a, b, consts[2], ".l." in i.opcode, ".wrap" in i.opcode)
         self.fail(i, f"no integer rule for {i.opcode}", "error")
+
+    def _packed(self, i, mn: str, signed: bool):
+        """add/sub/min/max(.relu) on .s16x2/.u16x2: the operation on each 16-bit lane of
+        the 32-bit operands, wrapping within the lane (ISA: add, sub, min, max)."""
+        a, b = self.operand(i, 1, 32), self.operand(i, 2, 32)
+        if isinstance(a, Data) or isinstance(b, Data):
+            return self._data(f"{i.opcode} of data at {self.loc(i)}", (a, b))
+        op = mn.split(".")[0]
+        if op in ("min", "max"):
+            op = ("s" if signed else "u") + op
+        lanes = [E.bin(op, x, y) for x, y in zip(E.lanes16(a), E.lanes16(b))]
+        if ".relu." in mn:  # negative lanes become 0
+            lanes = [E.bin("smax", x, E.const(0, 16)) for x in lanes]
+        return E.pack16(*lanes)
+
+    def _carry(self, i, mn: str, w: int, signed: bool):
+        """add.cc, addc(.cc), mad.lo/hi.cc, madc.lo/hi(.cc) (ISA: Extended-Precision
+        Integer Arithmetic): x + y + CC.CF, CC.CF read by addc/madc and else 0, where x
+        is a (add) or the lo/hi half of a * b (mad); .cc writes the carry out of that sum
+        to CC.CF. sub.cc, subc(.cc): a - (b + CC.CF), CC.CF read by subc, .cc writing
+        the borrow out (b + CC.CF > a) to it. The flag is the pseudo register _CC,
+        forgotten at the start of each basic block (run) and refused under a predicate
+        (predicated): a read of a flag not written earlier in the block is Data. The
+        flag is computed without an add of its own (an address mark would report the
+        wrap that is the carry); the sum and the low product are marked as add, sub and
+        mad.lo's are."""
+        args = [self.operand(i, k, w, signed) for k in range(1, len(i.operands))]
+        cin = E.FALSE
+        if mn.startswith(("addc", "subc", "madc")):
+            cin = self.env.get(_CC, Data(f"a carry flag {i.opcode} reads at "
+                                         f"{self.loc(i)} not set in its block"))  # fmt: skip
+        data = next((x for x in [*args, cin] if isinstance(x, Data)), None)
+        if data is not None:
+            out = self._data(data.origin, [*args, cin])
+            if mn.endswith(".cc"):
+                self.env[_CC] = out
+            return out
+        x, y = args[0], args[-1]
+        if mn.startswith("sub"):
+            if mn.endswith(".cc"):  # borrow: y > x, or y == x with cin
+                self.env[_CC] = E.bin(
+                    "or", E.cmp("ugt", y, x), E.and1(cin, E.cmp("eq", y, x))
+                )
+            return E.bin("sub", E.bin("sub", x, y), E.ext(cin, w, False))
+        if mn.startswith("mad"):
+            hi = ".hi" in mn
+            x = E.mul_hi(args[0], args[1], signed) if hi else E.bin("mul", *args[:2])
+        if mn.endswith(".cc"):  # x + y + cin >= 2**w: y > ~x, or y == ~x with cin
+            nx = E.bin("xor", x, E.const(-1, w))
+            self.env[_CC] = E.bin(
+                "or", E.cmp("ugt", y, nx), E.and1(cin, E.cmp("eq", y, nx))
+            )
+        return E.bin("add", E.bin("add", x, y), E.ext(cin, w, False))
 
     def _mov(self, i, ndst: int) -> list:
         dst, src = i.operands[0], i.operands[1]
@@ -1905,24 +1999,32 @@ class Translator:
             w = sum(E.width(v) for v in vals)
             out, pos = E.const(0, w), 0
             for v in vals:
-                out = E.bin(
-                    "or", out, E.bin("shl", E.resize(v, w, False), E.const(pos, w))
-                )
+                out = E.bin("or", out, E.shl_bits(E.resize(v, w, False), pos))
                 pos += E.width(v)
             return [out]
         types = _types(i.opcode)
         return [self.operand(i, 1, types[-1][1] if types else None)]
 
-    def _cvt(self, i, types):
+    def _cvt(self, i, mn: str, types):
+        """Integer cvt (ISA cvt): the source's low bits read by its type, resized to the
+        destination type, with .sat clamped to its range first; a destination register
+        wider than the type gets the value extended by the type's signedness (ISA:
+        Operand Size Exceeding Instruction-Type Size; ptxas sign-extends cvt.s8.s32)."""
         if len(types) != 2 or any(k not in "bsu" for k, _ in types):
             return Data(f"{i.opcode} at {self.loc(i)}")
-        if re.search(r"\.(sat|rn|rz|rm|rp|rni|rzi|rmi|rpi)\b", i.opcode):
-            self.fail(i, "integer cvt with saturation or rounding")
-        (_dk, dw), (sk, sw) = types
+        if re.search(r"\.(rn|rz|rm|rp|rni|rzi|rmi|rpi)\b", i.opcode):
+            self.fail(i, "integer cvt with rounding")
+        (dk, dw), (sk, sw) = types
         a = self.operand(i, 1)
         if isinstance(a, Data):
             return a
-        return E.cvt_int(a, dw, sw, sk == "s")
+        if mn == "cvt.sat":
+            v = E.cvt_sat(a, dw, dk == "s", sw, sk == "s")
+        else:
+            v = E.cvt_int(a, dw, sw, sk == "s")
+        reg = _dest_regs(i)[0]
+        rw = _reg_width(self.k.fn.regs.get(reg, "b32")) if reg else dw
+        return E.resize(v, rw, dk == "s") if rw > dw else v
 
     def _setp(self, i, types):
         # The type may precede the comparison: `setp.u32.eq` (Triton's CLC asm).
@@ -1953,8 +2055,58 @@ class Translator:
             self._shfl(i, mn.split(".")[2])
         elif mn.startswith("vote.sync"):
             self._vote(i, mn.split(".")[2])
+        elif mn.startswith("redux.sync"):
+            self._redux(i, mn.split(".")[2])
         else:
             self.fail(i, f"{mn} (gap: not translated by the PTX frontend yet)")
+
+    def _redux(self, i, op: str) -> None:
+        """redux.sync.op d, a, -1 on integers (add, min, max, and, or, xor): every lane
+        receives op over the 32 lanes' a (ISA redux.sync), from a at each lane as
+        vote.sync's predicate; of data, one Data for the whole warp."""
+        self._full_mask(i, 2, f"redux.sync.{op}")
+        a = self.operand(i, 1, 32)
+        if isinstance(a, Data):
+            self.write(i.operands[0][1], WarpData(a.origin))
+            return
+        if _has_elect(a):
+            self.fail(
+                i,
+                f"redux.sync.{op} of a value that depends on which lane elect.sync picks",
+            )
+        if op in ("min", "max"):
+            op = ("s" if _types(i.opcode)[-1][0] == "s" else "u") + op
+        lanes = [E.subst(a, {"%lane": E.const(k, 32)}) for k in range(32)]
+        self.write(i.operands[0][1], _fold(op, lanes))
+
+    def _barrier_red(self, i, mn: str) -> None:
+        """barrier.red.{and,or,popc} d, id[, count], c (bar.red: .aligned): mem.py ran it
+        as a bar.sync (no P0 event); d, the same in every thread, is the and/or/number of
+        threads of c over the threads taking part (ISA barrier.red). Exact when those are
+        this role's threads, all of the block's, every one executing it; else (some are
+        another role's) Data, the same in all lanes of a warp."""
+        op, n = mn.split(".")[2], len(i.operands)
+        c = self.operand(i, n - 1, 1)
+        count = self.operand(i, 2, 32) if n == 4 else E.const(self.k.block[0], 32)
+        whole = (
+            self.w0 == 0
+            and 32 * self.nw == self.k.block[0]
+            and E.is_const(self.split_mask()[1], 1)
+            and not isinstance(count, Data)
+            and E.is_const(count, self.k.block[0])
+        )
+        dst = i.operands[0][1]
+        if isinstance(c, Data) or not whole:
+            why = "data" if isinstance(c, Data) else "threads outside the role"
+            self.write(dst, WarpData(f"{i.opcode} over {why} at {self.loc(i)}"))
+            return
+        if _has_elect(c):
+            self.fail(i, f"{mn} of a value that depends on which lane elect.sync picks")
+        bits = [E.subst(c, self.thread_subst(w, ln)) for w, ln in self.threads()]
+        if op == "popc":
+            self.write(dst, _fold("add", [E.ext(b, 32, False) for b in bits]))
+        else:
+            self.write(dst, _fold(op, bits))
 
     def _full_mask(self, i, k: int, what: str) -> None:
         m = self.operand(i, k, 32)
@@ -2038,7 +2190,7 @@ class Translator:
         if mode == "ballot":
             v = E.const(0, 32)
             for k, bit in enumerate(bits):
-                v = E.bin("or", v, E.bin("shl", E.ext(bit, 32, False), E.const(k, 32)))
+                v = E.bin("or", v, E.shl_bits(E.ext(bit, 32, False), k))
         elif mode == "any":
             v = _fold("or", bits)
         elif mode == "all":
@@ -2167,6 +2319,14 @@ def _fold(op, xs):
 
 def _has_elect(e) -> bool:
     return any(v.startswith("%elect") for v in E.free_vars(e))
+
+
+_CC = "%cc"  # the carry flag CC.CF in Translator.env (no PTX register has this name)
+
+
+def _carries(mn: str) -> bool:
+    """mn reads or writes the carry flag (Translator._carry)."""
+    return mn.startswith(("addc", "subc", "madc")) or mn.endswith(".cc")
 
 
 def _bare_elect(c) -> bool:

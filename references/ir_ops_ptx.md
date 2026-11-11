@@ -29,9 +29,15 @@ arithmetic, comparison, move or conversion op on any floating-point type is `<op
 `.shared::cta` is `.shared`, `.param::entry` is `.param`; mbarrier's default
 `.sem.scope` is dropped (`.release.cta` for arrive, `.acquire.cta` for
 try_wait/test_wait, `.relaxed.cta` for expect_tx/complete_tx); tcgen05.mma's
-`.scale_vec::1X/2X/4X` is `.block32/.block32/.block16`. So
+`.scale_vec::1X/2X/4X` is `.block32/.block32/.block16`; `ld`, `st`, `atom` and `red`
+drop memory ordering and scope (`.weak .relaxed .acquire .release .acq_rel .volatile`,
+`.cta .cluster .gpu .sys`: the model has no weak memory, as the fence rows; but a strong
+or `.cv` load's value is Data, "Global memory"), cache operators (`.ca .cg .cs .lu .cv
+.nc .wb .wt`: hints) and `.noftz`, and put the state space first. So
 `mbarrier.arrive.release.cta.shared::cta.b64`, `mbarrier.arrive.shared.b64` and
-`mbarrier.arrive.shared::cta.b64` are all `mbarrier.arrive.shared`.
+`mbarrier.arrive.shared::cta.b64` are all `mbarrier.arrive.shared`, and
+`red.relaxed.gpu.global.add.s32` and `red.global.gpu.relaxed.add.s32` are
+`red.global.add`.
 
 ## Classes
 
@@ -60,10 +66,15 @@ with the thread's mask as an `if` (`frontend_ptx.md`, "Family conventions").
 
 | Instruction | Value |
 |---|---|
-| `add sub mul.lo div rem min max neg and or xor not shl shr` | KIR `bin` (div/rem `sdiv/udiv/srem/urem` by type, shr `ashr/lshr`); a divisor under a mask is replaced where the mask is false |
-| `mad.lo`, `mul.wide`, `mad.wide`, `mul.hi` | mul + add; ext + mul (+ add); 32-bit mul.hi: 64-bit product, `lshr 32`, trunc (64-bit operands: refused) |
-| `popc clz brev bfe bfi prmt lop3 shf.{l,r}.{wrap,clamp}` | exact expansions; bfe/bfi positions, prmt selector, lop3 truth table and shf amount must be constants (else refused) |
-| `setp` (with `.and/.or/.xor`), `selp`, `mov`, `cvt` (integer), `cvta.global` | `cmp` (and the combine), `select`, copy, `ext`/`trunc` (saturating or rounding integer cvt: refused), identity |
+| `add sub mul.lo div rem min max neg abs and or xor not shl shr` | KIR `bin` (div/rem `sdiv/udiv/srem/urem` by type, shr `ashr/lshr`, abs a `select`); a divisor under a mask is replaced where the mask is false |
+| `mad.lo`, `mul.wide`, `mad.wide`, `mul.hi`, `mad.hi` | mul + add; ext + mul (+ add); mul.hi: 32-bit operands the 64-bit product, `lshr 32`, trunc; 16-bit the product at 64 bits shifted; 64-bit (KIR has no i128) `(x << k) udiv d` where that is provably the same (LLVM's division by a constant: x's interval known and nonnegative, m constant), else an exact product of 16-bit limbs (a large tree) |
+| `max.relu`, `min.relu` (signed), `bfind{.shiftamt}`, `dp2a.{lo,hi}`, `add.sat`, `sub.sat` (`.s32`), `mul24.{lo,hi}`, `sad` | exact expansions (ISA: Integer Arithmetic Instructions); `.sat` clamps the exact sum, `mul24` multiplies the low 24 bits (sign-extended by `.s32`) |
+| `add sub min max{.relu}` on `.s16x2`/`.u16x2` | per 16-bit lane, wrapping within the lane, the lanes repacked |
+| `add.cc`, `addc{.cc}`, `mad.{lo,hi}.cc`, `madc.{lo,hi}{.cc}` | the sum with the carry flag CC.CF, exact within a basic block: a flag not written earlier in the block is Data; refused under a predicate |
+| `sub.cc`, `subc{.cc}` | `a - (b + CC.CF)` (CC.CF read by `subc`), `.cc` writing the borrow out (`b + CC.CF > a`) to CC.CF; the flag as for `add.cc` |
+| `popc clz brev bfe bfi prmt lop3 shf.{l,r}.{wrap,clamp}` | exact expansions; bfe/bfi positions, prmt selector, lop3 truth table and shf amount must be constants (else refused); `prmt.{f4e,b4e,rc8,ecl,ecr,rc16}`: the mode's byte selection for `c & 3` (a runtime c is a select over the four) |
+| `setp` (with `.and/.or/.xor`), `selp`, `mov`, `cvt` (integer), `cvt.sat` (integer), `cvta.global` | `cmp` (and the combine), `select`, copy, `ext`/`trunc` (`.sat`: clamped to the destination type's range; rounding integer cvt: refused; a destination register wider than the type gets the value extended by the type's signedness, as ptxas does for `cvt.s8.s32`), identity |
+| `cvta.shared{::cluster}`, `cvta.to.shared{::cluster}`, `cvta.local`, `cvta.to.local` | between a window address and the generic address of the same bytes (the offset kept); of any other value, Data ("Global memory") |
 | 8- and 16-bit integers | their zero-extended i32 (signed ops on the sign extension) |
 | `ld.param` | a kernel parameter: a scalar is the KIR param of the parameter (or struct field) at its width, extended by the load type; a pointer is its tensor's base address (`frontend_ptx.md`, "Memory"); the bytes of a descriptor parameter: refused |
 | `cvta.param` | the address of a descriptor parameter (only TMA instructions may use it) |
@@ -76,11 +87,12 @@ with the thread's mask as an `if` (`frontend_ptx.md`, "Family conventions").
 | `elect.sync d\|p, -1` | p: a fresh elect symbol (one lane of each warp, which one the ISA does not say); d: Data |
 | `shfl.sync.{idx,up,down,bfly} d\|p, a, b, c, -1` | lane l gets `a` at source lane j(l) with the ISA's rule (`bval = b[4:0]`, `segmask = c[12:8]`, minLane/maxLane), its own `a` where j(l) is out of range, p telling which: a table over the lanes |
 | `vote.sync.{ballot,any,all,uni} d, p, -1` | from p at each lane; on Data, a value uniform per warp (a branch on it keeps each warp together) |
-| `redux.sync` (integer) | refused (not translated yet); on floats: drop |
+| `redux.sync.{add,min,max,and,or,xor} d, a, -1` (integer) | every lane gets the op over the 32 lanes' a (from a at each lane, as vote.sync); on Data, a value uniform per warp; on floats: drop |
+| `barrier.red.{and,or,popc}`, `bar.red.*` `d, id{, count}, p` | a `bar.sync` ("Thread barriers and clusters") whose d is the and, or or count of p over its threads: exact when they are the role's threads and all of the block's, every one executing it; else Data uniform per warp |
 | `mapa.shared::cluster d, a, r` | the shared address `a` in the CTA of rank r ("Thread barriers and clusters") |
 
-The full-mask collectives (`elect/shfl/vote.sync` with member mask -1; another mask is
-refused) need every lane of each executing warp active (undefined in PTX otherwise):
+The full-mask collectives (`elect/shfl/vote/redux.sync` with member mask -1; another
+mask is refused) need every lane of each executing warp active (undefined in PTX otherwise):
 refused when that is statically false; asserted per warp in the KIR (a FAIL on the input
 where it does not hold) when it depends on runtime values. An event under an elect symbol
 must have lane-independent operands and no other lane-dependent conjunct in its mask; a
@@ -91,11 +103,12 @@ refused where an event or a per-thread slot needs it.
 
 | Instruction | KIR | Rule |
 |---|---|---|
-| `ld.global`, generic `ld` on a global address | `gload(T, offsets, mask)` per issuing thread | `.v2/.v4`: consecutive elements (a `range`). An integer load whose element is the register's width (32 or 64 bits) also yields the value `load(T, [index])`: T becomes metadata if the value reaches a root; where the mask is false the index is 0 and the register keeps its old value |
+| `ld.global`, generic `ld` on a global address | `gload(T, offsets, mask)` per issuing thread | `.v2/.v4`: consecutive elements (a `range`). An integer load whose element is the register's width (32 or 64 bits) also yields the value `load(T, [index])`: T becomes metadata if the value reaches a root; where the mask is false the index is 0 and the register keeps its old value. A strong load (`.volatile`, `.relaxed.<scope>`, `.acquire.<scope>`) or a `.cv` one yields Data instead (below) |
 | `st.global`, generic `st` on a global address | `gstore` per issuing thread | the stored value is data |
-| `atom.global.{add,min,max,inc,dec,and,or,xor,cas}`, `red.global.*` | `gatomic` per issuing thread | `atom.exch` is a `gstore`; atom results are Data |
+| `atom.global.{add,min,max,inc,dec,and,or,xor,exch,cas}`, `red.global.*`, generic `atom`/`red` on a global address, `red.async.global.add` | `gatomic` per issuing thread, of the vector's elements | `atom.exch` is a `gstore`; atom results are Data; red.async names no mbarrier (no completion to model) |
 | `cp.async.{ca,cg}.shared.global [d], [s], n{, src-size \| ignore-src}` | `gload` of n bytes at s per issuing thread | constant n; a src-size of 0 (or a true ignore-src) reads nothing, any other src-size must be n (a KIR assert); commit/wait groups are drops |
-| generic `ld`/`st` on a shared address | none | Data |
+| generic `ld`/`st`/`atom`/`red` on a shared address, `atom.shared.*`, `red.shared.*` (`.shared::cta` too) | none | Data (refused in a TLX warp-specialized kernel if it writes: the dispatch's state bytes are checked against `st.shared` only); through `ld`/`st`/`atom`/`red.global` or `red.async`: an error (the hardware faults) |
+| `ld.local`/`st.local`, generic `ld`/`st` on a local address | none | the thread's own local memory (LLVM's `__local_depot`): a store must stay inside its variable (a KIR assert per thread); a load is the value the same thread stored at the same constant offset and width earlier in the basic block, unpredicated, else Data |
 
 An address is a tensor's base (a pointer parameter, or a pointer field of a struct
 parameter, named by the host adapter) plus a byte offset, through adds, subtracts, a
@@ -103,7 +116,15 @@ select of two offsets of one base and per-lane tables of one base; a select betw
 tensors takes the arm the role's condition picks (CuTe: a condition uniform per warp
 splits the role). Any other address is refused. The element offset is the byte offset
 divided by the element size, which must be provably exact (known trailing zeros,
-factorization), else the access is refused (a sub-element access).
+factorization), else the access is refused (a sub-element access). A generic address is
+made only by `cvta` (shared and local memory; a global one is its own generic address).
+Ordering, scope and `.volatile` change no event (Normalization). A weak integer load of
+global memory (no ordering, `.weak`, a cache operator but `.cv`, `.nc` among them) is a
+metadata read of the input's recorded contents; a strong one (`.volatile`, `.relaxed`,
+`.acquire`, through a global or a generic address), or one through `.cv` (cached lines
+are stale: fetch again), reads what another thread may write while the kernel runs, so
+its value is Data: refused where it reaches an address, a bound or a branch, as any data
+value.
 
 ## mbarriers
 
@@ -116,7 +137,8 @@ factorization), else the access is refused (a sub-element access).
 | the wait pseudo-instruction | `wait(bar(a), parity)` | once per role |
 | `mbarrier.arrive(.expect_tx).shared::cluster`, `mbarrier.complete_tx` | "Thread barriers and clusters" | |
 | `mbarrier.try_wait`, `mbarrier.test_wait` (any other use) | refused | they may return false spuriously; only the whole loop waits |
-| `mbarrier.arrive.relaxed`, `mbarrier.inval`, `cp.async.mbarrier.arrive.noinc` | refused | not modeled |
+| `mbarrier.inval.shared [a]` | the events of the private synchronous cycle it ends are removed | below; else refused |
+| `mbarrier.arrive.relaxed`, `cp.async.mbarrier.arrive.noinc` | refused | not modeled |
 
 `bar(a)`: `a` must peel to a shared symbol plus a byte offset that is the same for every
 thread of the role (CuTe: one uniform per warp splits the role); its array and index:
@@ -128,6 +150,16 @@ wait (ISA mbarrier.test_wait / mbarrier.try_wait). Arrivals: TLX `threads_per_is
 1 and an arrive's `n` is the issuing threads times the count; CuTe `threads_per_issue`
 is the gcd of the role's arrive counts and `n` the count over it.
 
+`mbarrier.inval` (KIR has no re-initialization) is accepted only where it ends a private
+synchronous cycle of its role on a constant slot, which is then elided (TLX's
+`tlx.async_dot` without mBarriers: `init(n); tcgen05.commit; wait(parity 0); inval` in
+each iteration): since the slot's last init, of a constant count n, arrivals of the
+issuing CTA (arrive, commit_arrive, each issued once or by statically known threads)
+adding up to exactly n, then one wait of parity 0, all of them and the inval in one KIR
+statement list (no branch or loop between them, a counted loop included). Any other
+event on that slot in the kernel, a P1 pass, or anything else is refused (e.g. a TMA
+load's cycle, whose transaction bytes P0-4 checks).
+
 ## TMA and bulk copies
 
 | Instruction | KIR (TLX / CuTe) |
@@ -137,10 +169,11 @@ is the gcd of the role's arrive counts and `n` the count over it.
 | `cp.reduce.async.bulk.tensor.{1-5}d.global.shared.<op>.bulk_group` | `tma_reduce` / footprint `gatomic` |
 | `cp.async.bulk.shared{::cluster}.global.mbarrier::complete_tx::bytes [dst], [g], n, [mbar]` | `gload` of the n bytes + `tma_load` of the 1-D descriptor `bulk_<T>_<n>` on mbar |
 | `cp.async.bulk.global.shared.bulk_group [g], [src], n` | `gstore` of the n bytes |
-| `cp.reduce.async.bulk.global.shared.bulk_group.<op> [g], [src], n` | `gatomic` of the n bytes |
+| `cp.reduce.async.bulk.global.shared.bulk_group.<op> [g], [src], n` | `gatomic` of the n bytes (`.add.noftz` on f16/bf16 too: still an add) |
 | `cp.async.bulk.shared::cluster.shared.mbarrier::complete_tx::bytes` | `complete_tx` in another CTA ("Thread barriers and clusters") |
 | multicast bulk g2s, im2col / gather4 / scatter4 modes | refused |
-| `tensormap.replace.*`, `tensormap.cp_fenceproxy` | an in-kernel descriptor (`frontend_ptx.md`, "TMA descriptors") |
+| `tensormap.replace.*.shared`, `tensormap.cp_fenceproxy` | an in-kernel descriptor (`frontend_ptx.md`, "TMA descriptors") |
+| `tensormap.replace.*.global` | refused (a descriptor edited in global memory: its other fields are not known) |
 | `prefetch.tensormap`, commit/wait groups | drop |
 
 Descriptors, coordinates and footprints: `frontend_ptx.md`, "TMA descriptors". PTX lists
@@ -195,6 +228,7 @@ is modeled as performed.
 | Instruction | P0 | P1 |
 |---|---|---|
 | `bar.sync`, `bar.arrive`, `barrier.sync{.aligned}`, `barrier.arrive{.aligned}` `id{, count}` | no event; the aligned forms need a mask uniform per warp | `named_bar` of the whole role: id and count constants (one uniform per warp but not per role splits the role), count a positive multiple of 32, absent: the block's threads |
+| `barrier.red.{and,or,popc}{.aligned}`, `bar.red.*` `d, id{, count}, p` | as `bar.sync`; d: "Values" | as `bar.sync` |
 | `bar.warp.sync` | drop | drop |
 | `barrier.cluster.arrive{.relaxed}{.aligned}` / `.wait{.aligned}` (CuTe) | `arrive` of every thread of the role / `wait` on `cluster_barrier` | as P0 |
 
@@ -262,23 +296,30 @@ counts.
 | `ld.shared.b128 r, [resp]` | r is the response token: read from a try_cancel's response address, after a wait of the reading role on that try_cancel's mbarrier |
 | `clusterlaunchcontrol.query_cancel.is_canceled p, r` | one query of the whole role: `let clc<k> = load(__clc_schedule, [pid.x, __clc_k])`, `__clc_k += 1`; p is `clc<k> != -1` |
 | `clusterlaunchcontrol.query_cancel.get_first_ctaid.v4 {x, y, z, _}, r` (predicated by p) | x = `clc<k>`, y, z = `clc<k> == -1 ? -1 : 0` |
+| `...get_first_ctaid::{x,y,z} d, r` (CuTe DSL 4.6.1's per-axis forms, predicated by p) | that one component |
 
 Any other use of a response is refused; so is CLC in a CuTe kernel. The schedules the
 tables hold: `frontend_ttgir.md`, "Cluster Launch Control".
 
 ## Drop and refuse
 
-Drop (no spec effect; results are Data): floating-point arithmetic, comparison, moves and
-conversions (`<op>.f`), `ld.shared`/`st.shared` (except the tensormap staging buffer's
-zeroing and the CLC response read), `ldmatrix`, `stmatrix`, `fence.*`, `membar`,
-`tcgen05.fence`, `griddepcontrol`, `setmaxnreg` (no consistency check across a warpgroup:
-real kernels run it at different points per warp), `prefetch`, `bar.warp.sync`, the
-commit/wait groups of `cp.async` and `cp.async.bulk`, `st.param` (call staging), `trap`
-(the run is evaluated as if it were not reached), `call vprintf` and calls of libdevice
-(`__nv_*`).
+Drop (no spec effect; results are Data): floating-point arithmetic, comparison, moves
+and conversions (`<op>.f`), `ld.shared`/`st.shared` and `atom`/`red.shared` (except the
+tensormap staging buffer's zeroing and the CLC response read; a shared write still
+closes the staging buffers it may overlap, `frontend_ptx.md`, "TMA descriptors"),
+`ldmatrix`, `stmatrix`, `mma.sync` (register MMA), `createpolicy` (an L2 policy only
+`.L2::cache_hint` operands take), `fence.*`, `membar`, `tcgen05.fence`,
+`griddepcontrol`, `setmaxnreg` (no consistency check across a warpgroup: real kernels
+run it at different points per warp), `prefetch`, `bar.warp.sync`, the commit/wait
+groups of `cp.async` and `cp.async.bulk`, `st.param` and `st.param::func` (call
+staging), `trap` (the run is evaluated as if it were not reached: an unguarded trap ends
+its block, which goes on at the other side of the conditional branch that reached it,
+`frontend_ptx.md`, "Control flow"), `call vprintf` and calls of libdevice (`__nv_*`).
 
 Refuse (a gap naming the instruction): `try_wait`/`test_wait` outside a wait loop, relaxed
-arrives, `mbarrier.inval`, `cp.async.mbarrier.arrive.noinc`, TMA im2col/gather4/scatter4,
-`%warpid`, and a `call` of anything but `__assertfail` (a KIR `assert false` where it is
-reached), `vprintf` and libdevice. Instructions without a row (e.g. `ld.local`) are
-errors, as above.
+arrives, `mbarrier.inval` outside a private synchronous cycle,
+`cp.async.mbarrier.arrive.noinc`, TMA im2col/gather4/scatter4, `tensormap.replace` in
+global memory, a carry-flag instruction under a predicate, `%warpid`, and a `call` of
+anything but `__assertfail` (a KIR `assert false` where it is reached: Triton's
+`tl.device_assert`), `vprintf` and libdevice. Instructions without a row (e.g.
+`atom.shared::cluster`, `ld.mmio`) are errors, as above.
