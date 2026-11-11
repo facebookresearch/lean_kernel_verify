@@ -1,9 +1,11 @@
-# PTX translation (Layer 1, both families, opt-in)
+# PTX translation (Layer 1, both families, experimental, opt-in)
 
 `lkv.py run --frontend ptx` makes both frontends translate the kernel's PTX, the code its
 compiler hands to ptxas, into KIR (`kir.md`) instead of their compiler IR, with one shared
 core and no hand-written model of the kernel. The default, `--frontend legacy`, translates
-the TTGIR (`frontend_ttgir.md`) or the CuTe DSL MLIR (`frontend_cute.md`). `run` passes
+the TTGIR (`frontend_ttgir.md`) or the CuTe DSL MLIR (`frontend_cute.md`). The PTX
+translation is experimental: it still refuses some kernels and constructs the default
+translation handles, it has known bugs, and `legacy` stays the default. `run` passes
 the choice to `to_kir` as `LKV_FRONTEND` (`legacy` or `ptx`; unset or empty is `legacy`,
 any other value an error), which also selects it when set in the environment of `run`
 (the default of `--frontend`) or of a frontend's `to_kir` run by hand.
@@ -411,6 +413,8 @@ assembly rerolls LLVM's unrolled blocks into `for` loops (the same trace).
 
 ## Limitations
 
+* Experimental: the translation has known gaps and bugs, and it refuses some kernels and
+  constructs that the default translation (`legacy`) handles; `legacy` stays the default.
 * A verdict covers the case inputs, the compiled variants they select and `max_iters`.
 * Below PTX nothing is checked (ptxas, SASS), except the TMA issuing rules measured on
   hardware (`ir_ops_ptx.md`).

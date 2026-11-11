@@ -4,7 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """Launch facts the PTX frontend needs from the host: kernel parameters, CUtensorMap
-descriptors and the tensors behind global addresses (design §5.1). Pure stdlib.
+descriptors and the tensors behind global addresses. Pure stdlib.
 
     ptx_params(ptx_text, entry=None) -> [{i, name, decl, kind, type, size, align}]
     decode(raw128) -> {dtype, elem_bits, tf32, rank, address, dims, strides_bytes, box,

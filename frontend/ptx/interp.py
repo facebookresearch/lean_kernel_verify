@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Translation of one role of a PTX kernel into KIR statements (design §5.4, §5.5).
+"""Translation of one role of a PTX kernel into KIR statements.
 
 The IR-agnostic core of frontend/cute/interp.py (thread model, slots and families,
 masks, emitters, partition refinement), driven by the region tree of regions.py instead
@@ -52,7 +52,7 @@ Events execute once per issuing thread (frontend/cute/interp.py's rules): a sing
 when one thread issues it, else a `for` over the role's threads with the thread's mask
 as an `if` (consecutive ones share the loop); waits and inits once per role, arrivals
 counted. Under the Triton policy a global access of several threads is one event over
-them (mem_event). The holes of the CuTe frontend are closed (design §5.4.1):
+them (mem_event). The holes of the CuTe frontend are closed:
   H1 the elect check is on the final event mask: under an elect symbol every other
      conjunct must be the same in every lane of a warp, and the operands must not depend
      on the lane;
@@ -139,8 +139,7 @@ class Kernel:
 # offset and the KIR JSON of the rest divided by 8 (None for a constant offset; bound in
 # the role's scope at the event), the interval of the offset (CuTe array splitting), the
 # issuing thread count of an arrive (None when counted inside a thread loop), and for a
-# bar_init its offset, its source line (path, line) and the key its array is split by
-# (design §5.6).
+# bar_init its offset, its source line (path, line) and the key its array is split by.
 @dataclass
 class BarrierUse:
     event: dict
@@ -693,7 +692,7 @@ class Translator:
 
     def _inert(self, node: R.If, c=None) -> bool:
         """A branch whose arms emit nothing controls no event, so its condition is no root
-        (design §5.5: control dependence; the CuTe frontend's slicer drops such an `if`):
+        (control dependence; the CuTe frontend's slicer drops such an `if`):
         on data (c None; e.g. a 2-CTA CuTe kernel's `if tmem_addr != 0: trap()`, trap
         not being modeled) the registers its arms set differently are Data at the join;
         on the warp (c) it splits no role (a 2-CTA CuTe kernel's `if warp == 1:` of
@@ -897,7 +896,7 @@ class Translator:
         counted loop `do { ... iv += step; } while (iv <s ub)` with every exit at that
         latch test, constant step > 0 and ub, and iv constant on entry with lb < ub and
         no i32 wrap of its last value: then `for iv in [lb, ub) step step` runs the same
-        iterations (design §5.3 item 4). Else None (a `while`)."""
+        iterations. Else None (a `while`)."""
         latch = node.body[-1] if node.body else None
         if (
             not isinstance(latch, R.If)
@@ -1024,7 +1023,7 @@ class Translator:
         """A back edge (or, brk, an exit edge) of the innermost loop: the carried slots
         take the registers' values, in parallel; an exit also clears the loop's flag. A
         slot (an offset from a base, or an index LSR steps by 8) keeps the trailing
-        zeros assumed for it (the known-bits fixed point of design §5.3 item 5), else
+        zeros assumed for it (a known-bits fixed point), else
         the loop is translated again with fewer. Under a thread-varying mask (a masked If's arm, however deeply nested
         in uniform ones) the edge is taken by some threads only: refused."""
         if not E.is_const(self.mask, 1):
@@ -1397,10 +1396,10 @@ class Translator:
     def collective(self, what: str) -> None:
         """A full-mask warp collective: every executing warp must be fully active (H3).
         Under a lane condition that depends on runtime values, a KIR assert per warp
-        checks that its lanes agree on the condition (all active or none, decision D9);
+        checks that its lanes agree on the condition (all active or none);
         without `vectorize` (CuTe: events per thread) every thread asserts that its lane
         agrees with lane 0 of its warp, in a thread loop: one assert of the condition's
-        size, not one conjunct per warp and distinct lane value (decision D8)."""
+        size, not one conjunct per warp and distinct lane value."""
         uni, var = self.split_mask()
         if _has_elect(var):
             self.fail(self.cur, f"{what} under elect.sync (one lane of the warp)")
@@ -1560,7 +1559,7 @@ class Translator:
 
     # ---------------------------------------------------------------- work
     def work(self, i, sites: list) -> None:
-        """Work-item anchors resolved at instruction i (design §5.9, translate.py):
+        """Work-item anchors resolved at instruction i (anchors.py, translate.py):
         "gate" emits one `work` event in a region once every declared field is defined
         in it (a branch arm counts the fields defined before it, run()), after the last
         definition (the TTGIR rule); "each" sets `work_<f>` and
@@ -1740,7 +1739,7 @@ class Translator:
         return Data(f"operand {op[0]} in {self.cur.opcode if self.cur else '?'}")
 
     def sreg(self, name: str):  # noqa: C901 (one case per special register)
-        """Special registers (design §5.4.1): folded from the block and cluster dims."""
+        """Special registers: folded from the block and cluster dims."""
         base, _, axis = name.partition(".")
         dims = self.k.cluster
         if name == "%laneid":
@@ -2058,7 +2057,7 @@ class Translator:
         elif mn.startswith("redux.sync"):
             self._redux(i, mn.split(".")[2])
         else:
-            self.fail(i, f"{mn} (gap: not translated by the PTX frontend yet)")
+            self.fail(i, f"{mn} (gap: not supported)")
 
     def _redux(self, i, op: str) -> None:
         """redux.sync.op d, a, -1 on integers (add, min, max, and, or, xor): every lane
@@ -2264,7 +2263,7 @@ def _register_only(seq, warp: bool) -> bool:
     wait or loop edge, nested Ifs alike; event rows only tcgen05.ld/st/wait (no P0
     event; in P1 an event, which ends the trial); no st.shared (it may zero a tensormap
     staging buffer, tma.py) or ld.shared.b128 (a CLC response, sync.py); a warp
-    collective or a .sync.aligned instruction (setmaxnreg is exempt, design §5.4.1) only
+    collective or a .sync.aligned instruction (setmaxnreg is exempt) only
     if `warp`, the branch condition being the same in all lanes of each warp."""
     for n in seq:
         if isinstance(n, R.If):

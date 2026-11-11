@@ -5,7 +5,7 @@
 
 """Integer expressions of the PTX frontend (KIR `Expr`, references/kir.md).
 
-A copy of frontend/cute/expr.py (frozen with the CuTe frontend during the migration)
+A copy of frontend/cute/expr.py (kept unchanged for the legacy CuTe translation)
 plus the exact expansions of PTX integer instructions into KIR nodes (the end of this
 file: mul.hi/mul.wide, bfe, bfi, prmt and its modes, lop3, popc, clz, brev, shf, cvt
 widths and saturation, add/sub.sat, mul24, sad), known
@@ -267,7 +267,7 @@ def _fold_ptx(op: str, w: int, a, b):  # noqa: C901 (one case per identity)
         # x << k reads the low w - k bits of x, and LLVM keeps only those of a constant
         # added to x (demanded bits: (n - 2) << 7 becomes (n + 0x1FFFFFE) << 7), which
         # then wraps where the source's does not; the constant closest to 0 with the same
-        # low bits gives the same value (design §5.8, class (d) of §8)
+        # low bits gives the same value
         x = _closest_const(a, w - b[2], set())
         if x is not None:
             return bin("shl", x, b)
@@ -956,9 +956,9 @@ def mul_wide(a, b, signed: bool):
 
 def mul_hi(a, b, signed: bool):
     """mul.hi: the high half of the double-width product. Address arithmetic marks every
-    add/sub/mul/shl a value passes through and Lean reports their signed wraps (design
-    §5.8), so each width is computed where no such node can wrap, or in the one form
-    translate.mark_addr skips:
+    add/sub/mul/shl a value passes through and Lean reports their signed wraps, so each
+    width is computed where no such node can wrap, or in the one form translate.mark_addr
+    skips:
       32 bits: trunc(lshr(mul(ext a, ext b), 32), 32), the form mark_addr skips (its
                unsigned product may pass 2**63);
       16 bits: the product at 64 bits (|p| < 2**32) shifted by 16, arithmetically when
@@ -1149,7 +1149,7 @@ def shl_bits(a, k: int):
     """a << k for a constant 0 <= k < w, a move of bits (the ones shifted out are dropped
     by design: brev, bfi, prmt, shf, packing): unless a's interval shows the shift does
     not wrap, the shift of the sign extension of a's low w - k bits, the same bits, so
-    that no node wraps as a signed integer (address arithmetic, design §5.8;
+    that no node wraps as a signed integer (address arithmetic;
     translate._sext_operand skips the extension)."""
     if k == 0:
         return a
@@ -1163,7 +1163,7 @@ def shl_bits(a, k: int):
 def pack16(lo, hi):
     """Two 16-bit lanes as one 32-bit value. The high lane is shifted from its sign
     extension and the low one added: the same bits as the unsigned (hi << 16) | lo, but
-    neither node wraps as a signed i32 (address arithmetic, design §5.8)."""
+    neither node wraps as a signed i32 (address arithmetic)."""
     return bin("add", bin("shl", ext(hi, 32, True), const(16, 32)), ext(lo, 32, False))
 
 

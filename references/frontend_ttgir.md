@@ -363,12 +363,12 @@ checks on the same trace.
 
 ## PTX translation
 
-`lkv.py run --frontend ptx` (or `LKV_FRONTEND=ptx`) makes `to_kir` translate the PTX
-`dump` writes next to each TTGIR (`<spec>.ptx`) instead of the TTGIR, with the shared PTX
-translation of both frontends and its op table: `frontend_ptx.md` and `ir_ops_ptx.md`
-(TMA and bulk copies, CLC, refusals). The case file, the dump, the names, tensors,
-params, inputs, checks and `[to_kir] ... FAILED` lines stay; the default, `legacy`, is
-the TTGIR translation above.
+The experimental `lkv.py run --frontend ptx` (or `LKV_FRONTEND=ptx`) makes `to_kir`
+translate the PTX `dump` writes next to each TTGIR (`<spec>.ptx`) instead of the TTGIR,
+with the shared PTX translation of both frontends and its op table: `frontend_ptx.md` and
+`ir_ops_ptx.md` (TMA and bulk copies, CLC, refusals). The case file, the dump, the names,
+tensors, params, inputs, checks and `[to_kir] ... FAILED` lines stay; the default,
+`legacy`, is the TTGIR translation above.
 
 ## Limitations
 

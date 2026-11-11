@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""The TTGIR dump's PTX capture for the PTX frontend (design §5.1), on small TLX kernels.
+"""The TTGIR dump's PTX capture for the PTX frontend, on small TLX kernels.
 
     buck2 test fbcode//lean_kernel_verify/tests/ttgir:test_ptx_capture
 

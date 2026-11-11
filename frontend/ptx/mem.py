@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Memory model of the PTX frontend (design §5.6): addresses, global accesses, kernel
+"""Memory model of the PTX frontend: addresses, global accesses, kernel
 parameters and mbarriers.
 
     Memory(cfg, params, tensors, policy)    one per kernel variant; interp.py calls
@@ -22,7 +22,7 @@ select between two offsets of one base, a per-thread table of offsets of one bas
 for shared addresses, a truncation to 32 bits. A global access through a select between
 two bases takes the arm its condition picks in the role; a condition uniform in each warp
 but not in the role splits the role (CuTe; _pick_bases). An address that is no such sum
-is refused, never guessed (design §5.5). tma.py adds
+is refused, never guessed. tma.py adds
 `%d:<param>`, a descriptor parameter's address, and `%x:<param>`, Triton's scratch
 pointer: only TMA instructions may use them (any other global access is refused).
 `%l:<var>` is the local-window address of a `.local` variable (LLVM's __local_depot);
@@ -79,7 +79,7 @@ frontend (one array: P0-2 makes a role that waits on one stage a static waiter o
 stage). A use belongs to the array holding the constant of its offset's
 top-level sum (sync.top_const); its index is (offset - start) / 8, exact
 by structure or known trailing zeros (a loop-carried offset slot keeps its constant part
-outside, design §5.3 item 5), else it is refused: an if-chain over candidate arrays would
+outside, slot_base), else it is refused: an if-chain over candidate arrays would
 make unreachable waits static waiters for P0-2. Names: `mbar_<start>` (CuTe), or the
 Python assignment target of the init's source line (TLX `k_fulls = tlx.alloc_barriers(..)`
 -> k_fulls, `_n` on a repeat), else `mbar_<start>`.
@@ -186,7 +186,7 @@ class Memory:
     def slot_base(self, tr: Translator, v):
         """The part of a value kept outside a slot: None for a plain integer; for an
         address its base variable, plus, for a shared one, the constant part of its
-        offset (design §5.3 item 5: the barrier array stays known)."""
+        offset (the barrier array stays known)."""
         if isinstance(v, Data) or not E.reserved(v):
             return None
         p = peel(v)
@@ -255,7 +255,7 @@ class Memory:
             bar = mn in ("bar.sync", "bar.arrive") or mn.startswith("bar.red.")
             if bar or mn.endswith(".aligned"):  # bar.*: barrier.*.aligned (ISA)
                 tr.aligned(mn)
-            return  # no P0 event, as both legacy frontends (named_bar is P1, M3)
+            return  # no P0 event, as both legacy frontends (named_bar: P1, tmem.py)
         if mn == "call":
             return self._call(tr, i)
         tr.fail(i, f"no memory rule for {mn}", "error")
@@ -307,7 +307,7 @@ class Memory:
         else:
             tr.fail(
                 i,
-                f"ld.param of the {kind} parameter {p['ptx']} (gap: not translated by the PTX frontend yet)",
+                f"ld.param of the {kind} parameter {p['ptx']} (gap: not supported)",
             )
         if entry["size"] != size:
             tr.fail(

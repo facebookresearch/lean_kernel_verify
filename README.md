@@ -60,10 +60,11 @@ lean/KV: every role of every CTA evaluated per input into event traces, then per
 report.md / report.json: a verdict per (variant, input, spec), findings at source file:line
 ```
 
-`lkv.py run --frontend ptx` (opt-in; the default is `legacy`, the IR translation above)
-makes both frontends translate the kernel's PTX instead, with one shared core and one PTX
-op table ([references/frontend_ptx.md](references/frontend_ptx.md)); the KIR then has
-`ir` `"ptx"`, and the report names the translation.
+`lkv.py run --frontend ptx` (experimental and opt-in: it still has known gaps and bugs;
+the default is `legacy`, the IR translation above) makes both frontends translate the
+kernel's PTX instead, with one shared core and one PTX op table
+([references/frontend_ptx.md](references/frontend_ptx.md)); the KIR then has `ir` `"ptx"`,
+and the report names the translation.
 
 The frontends keep only the ops that define control flow, addresses, masks, barrier
 operands or events, and stop with an error if a dropped op feeds one of them. A verdict

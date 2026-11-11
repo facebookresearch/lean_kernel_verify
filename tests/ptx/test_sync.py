@@ -4,7 +4,7 @@
 # LICENSE file in the root directory of this source tree.
 
 """Tests of the PTX core's synchronization rules (frontend/ptx/sync.py and the mbarrier,
-named-barrier and loop rules M2 kernels need) through translate() on hand-written PTX.
+named-barrier and loop rules) through translate() on hand-written PTX.
 
     python3 -I tests/ptx/test_sync.py      (or the buck target :test_sync)
 
@@ -209,7 +209,7 @@ class Clc(unittest.TestCase):
 
     def test_refusals(self):
         self.assertIn(
-            "CLC outside the Triton family", refusal(sync(CLC, family="cute"))
+            "CLC is supported in Triton kernels only", refusal(sync(CLC, family="cute"))
         )
         bad = CLC.replace(
             "ld.shared.b128 clc_result", "mov.b64 %rd9, 0;\n    ld.shared.b64 %rd9"
@@ -360,14 +360,14 @@ class Barriers(unittest.TestCase):
     def test_gaps_and_refused_forms(self):
         init = "    @%p12 mbarrier.init.shared::cta.b64 [%r10], 1;\n"
         for stmt, why in [
-            ("barrier.cluster.arrive.aligned;", "Triton family is not in v1"),
+            ("barrier.cluster.arrive.aligned;", "not supported in Triton kernels"),
             (
                 "@%p12 mbarrier.arrive.shared::cluster.b64 _, [%r10];",
-                "Triton family is not in v1",
+                "not supported in Triton kernels",
             ),
             (
                 "@%p12 mbarrier.complete_tx.shared::cta.b64 [%r10], 16;",
-                "Triton family is not in v1",
+                "not supported in Triton kernels",
             ),
             (
                 "@%p12 mbarrier.arrive.relaxed.cta.shared::cta.b64 _, [%r10];",

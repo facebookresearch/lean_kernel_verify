@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""P1 pass of the PTX frontend (design §5.10; CuTe family only, decision D3): the P1-1
+"""P1 pass of the PTX frontend (CuTe family only): the P1-1
 "TMEM reuse ordered" events of frontend/cute/ops_tmem.py read off the PTX instructions,
 so that the P1 KIR is the P0 KIR plus `tmem`, `tmem_wait` and `named_bar` events and the
 top-level `tmem` (references/kir.md change 10).
@@ -31,7 +31,7 @@ Events (the CuTe P1 pass's rules, ops_tmem.py, on PTX):
 * tcgen05.mma: D (written) 128 lanes x N columns, N / 2 for M = 128 with cta_group::2
   (CuTe's 2x2 data path layout, ops_tmem._d_cols); A from TMEM (read) 8 columns (every
   kind's K per instruction is 256 bits of a row); block-scaled kinds read SFA 4 columns and
-  SFB 4 per 128 rows of N, the CuTe DSL's TMEM layouts (wider than the ISA's, design §5.10:
+  SFB 4 per 128 rows of N, the CuTe DSL's TMEM layouts (wider than the ISA's: the
   max of the two). M and N come from the instruction descriptor's known bits (expr._bit:
   N >> 3 at bits 17-22; M >> 4 at bits 24-28, or M >> 7 at bits 27-28 for the block-scaled
   kinds; ISA instruction descriptor). The disable-output-lane mask is ignored (D is taken
@@ -53,7 +53,8 @@ Events (the CuTe P1 pass's rules, ops_tmem.py, on PTX):
 
 TMEM addresses are absolute (the CuTe DSL's fake-zero-base idiom: constants and the
 integer arithmetic on them), KIR `tmem.base` "zero" with a 512-column allocation; an
-address from the allocation's result (relative, TLX) is M5 (design §5.10). An address
+address from the allocation's result (relative, TLX: read back from shared memory, R1)
+is refused. An address
 built after a loop from a register the loop rematerializes (`mov r, %tid.x` in the body,
 r read after the loop only) is warp-uniform only if r keeps that value there: in the P1
 pass interp.Translator.run_loop gives such a register the one loop-invariant value every
@@ -72,9 +73,9 @@ several warps, issued by several threads or with a lane-varying operand; R7 a na
 barrier or tcgen05.wait reached by part of the role, a named barrier id or count that is
 not a constant (one uniform per warp splits the role) or a count that is not a positive
 multiple of 32, an mbarrier wait, arrive or commit under a runtime lane condition in a
-role of several warps; R10 (new, design §5.4.1) a role whose cp/mma and commits are not
-all issued alike (elected lane, or one fixed thread): P1-1 takes a commit as covering the
-same thread's earlier cp/mma.
+role of several warps; R10 a role whose cp/mma and commits are not all issued alike
+(elected lane, or one fixed thread): P1-1 takes a commit as covering the same thread's
+earlier cp/mma.
 """
 
 import math

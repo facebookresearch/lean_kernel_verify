@@ -216,8 +216,8 @@ class PackedPredicates(unittest.TestCase):
 
 class ShrunkConstants(unittest.TestCase):
     def test_shift_takes_the_constant_closest_to_zero(self):
-        # LLVM writes (n - 2 - i) << 7 as (n + 0x1FFFFFE - i) << 7 (bf16_fwd_2cta PTX
-        # line 315): the same value, with the constant whose wrap P0-1 would report
+        # LLVM writes (n - 2 - i) << 7 as (n + 0x1FFFFFE - i) << 7 (a 2-CTA forward
+        # kernel's PTX): the same value, with the constant whose wrap P0-1 would report
         n, i, k = E.var("n", 32), E.var("i", 32), c32(7)
         got = E.bin("shl", E.bin("sub", E.bin("add", n, c32(0x1FFFFFE)), i), k)
         self.assertIs(got, E.bin("shl", E.bin("sub", E.bin("add", n, c32(-2)), i), k))
@@ -476,7 +476,7 @@ SKIP:
         self.assertIn("all lanes of a warp or none", a["msg"])
 
     def test_h3_runtime_check_per_thread_under_cute(self):
-        # Decision D8: the CuTe policy asserts per thread that its lane agrees with lane
+        # The CuTe policy asserts per thread that its lane agrees with lane
         # 0 of its warp (one assert in a thread loop, not one conjunct per warp); n
         # splitting a warp fails it, whole warps (or none) pass.
         f = run(
@@ -687,7 +687,7 @@ W:
 
 
 class Review(unittest.TestCase):
-    """Regressions of the M1 adversarial reviews (values checked with evaluate())."""
+    """Regressions found by adversarial reviews (values checked with evaluate())."""
 
     def store_offset(self, f, n, **kw):
         (st,) = [t for t in evaluate(f, {"n": n}, **kw) if t[0] == "gstore"]
@@ -943,7 +943,7 @@ def _wraps(e, env: dict) -> tuple[list, int]:
 class MoreExpansions(unittest.TestCase):
     """mul.hi at 16 and 64 bits, packed 16-bit lanes, bfind, dp2a, add/sub.sat, mul24,
     sad, cvt.sat and prmt's modes against brute force; the mul.hi and add/sub.sat
-    expansions have no node an address mark would report (design §5.8), the others only
+    expansions have no node an address mark would report, the others only
     where the result does not fit."""
 
     def setUp(self):
@@ -1141,8 +1141,9 @@ class MoreIntegerOps(unittest.TestCase):
         self.assertEqual(self.offsets(body, 50), [2 * abs(t - 50) for t in range(128)])
 
     def test_mul_hi_64_and_16_bits(self):
-        # (t + n) // 13 by LLVM's magic number (qk_norm_rope.py:38), the signed high half
-        # of (t - 64) * -2**62 (floor(-(t - 64) / 4)), and the 16-bit (500 t * 0xCCCD) >> 16.
+        # (t + n) // 13 by LLVM's magic number (a Triton RoPE kernel), the signed high
+        # half of (t - 64) * -2**62 (floor(-(t - 64) / 4)), and the 16-bit
+        # (500 t * 0xCCCD) >> 16.
         body = """
     cvt.u64.u32 %rd2, %r1;
     cvt.u64.u32 %rd3, %r2;

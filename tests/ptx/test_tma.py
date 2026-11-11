@@ -472,7 +472,7 @@ class Issue(unittest.TestCase):
 
     def test_single_thread_operand_per_warp_splits_the_role(self):
         # thread 0 of two warps loads at coordinate tid / 32: CuTe splits the role per
-        # warp on it, as before D15 (not a thread loop over each thread's own operands)
+        # warp on it (not a thread loop over each thread's own operands)
         body = PRE.format(n=1) + TMAP64 + "    shr.u32 %r7, %r1, 5;\n"
         body += LOAD.format(nbytes=4096).replace("@%p2", "@%p1")
         f = run(body, CUTE_PARAMS, "cute", {"x": 2}, threads=64)

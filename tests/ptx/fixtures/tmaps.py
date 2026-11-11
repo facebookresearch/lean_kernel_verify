@@ -6,7 +6,7 @@
 """Real CUtensorMap bytes for the decoder tests (words w0.., the rest 0).
 
 CUTE442: descriptors CuTe DSL 4.4.2's JIT'd host code encoded in software, captured on a
-CPU-only host at its `_cudaLaunchKernelEx` (design §5.1), from
+CPU-only host at its `_cudaLaunchKernelEx`, from
 `cpasync.make_tiled_tma_atom(op, T, smem_layout, tiler)` over a torch tensor T (CPU
 addresses). `tensor` is T as a capture snapshot entry, `box` the expected KIR box (the
 smem tile in T's elements: bytes for the packed 4-bit tile).

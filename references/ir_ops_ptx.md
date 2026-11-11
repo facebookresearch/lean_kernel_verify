@@ -1,16 +1,16 @@
 # PTX op table (the PTX translation)
 
 One meaning per PTX instruction, identical for every kernel and for both families
-(TLX/Triton and CuTe DSL). It is the op table of the opt-in PTX translation
+(TLX/Triton and CuTe DSL). It is the op table of the experimental, opt-in PTX translation
 (`lkv.py run --frontend ptx`, `frontend_ptx.md`), where it takes the place of the IR op
-tables `ir_ops.md` and `ir_ops_cute.md` (trust base item 2, `design.md`). The rows follow the PTX ISA (sections named, not table
-numbers); the only compiler behavior they encode is how ptxas issues a TMA or bulk copy
-that several lanes of a warp execute ("Issuing threads", measured on hardware, gated by
-compiler version and target). Two more trust items are not ISA facts: the Triton
-warp-specialize dispatch protocol (`frontend_ptx.md`, "Threads and roles") and the
-cta_group::2 peer-bit address pattern ("Thread barriers and clusters" below). How the
-translator around the table works (control flow, roles, slicing, assembly per family):
-`frontend_ptx.md`.
+tables `ir_ops.md` and `ir_ops_cute.md` (trust base item 2, `design.md`). The rows follow
+the PTX ISA (sections named, not table numbers); the only compiler behavior they encode
+is how ptxas issues a TMA or bulk copy that several lanes of a warp execute ("Issuing
+threads", measured on hardware, gated by compiler version and target). Two more trust
+items are not ISA facts: the Triton warp-specialize dispatch protocol (`frontend_ptx.md`,
+"Threads and roles") and the cta_group::2 peer-bit address pattern ("Thread barriers and
+clusters" below). How the translator around the table works (control flow, roles,
+slicing, assembly per family): `frontend_ptx.md`.
 
 Executable form: `frontend/ptx/ops.py` (normalization and classes), `interp.py` (values,
 collectives, special registers), `mem.py` (global memory, parameters, mbarriers),

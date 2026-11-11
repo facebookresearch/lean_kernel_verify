@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""TMA and bulk copies of the PTX frontend (design §5.6, §5.7): tensor-map descriptors,
+"""TMA and bulk copies of the PTX frontend: tensor-map descriptors,
 the copy instructions and their KIR events.
 
     PREFIXES                          the event mnemonics mem.Memory.execute routes here
@@ -47,7 +47,7 @@ Descriptors.
     address 0: each TMA instruction on it is a KIR `assert false` per issuing thread (it
     fails wherever the instruction is issued). A descriptor null in some launches only
     has no base in those: refused (_make_host).
-  * In-kernel (Triton `tl.make_tensor_descriptor`; design §5.6): a 128-byte shared
+  * In-kernel (Triton `tl.make_tensor_descriptor`): a 128-byte shared
     staging buffer zeroed by one full warp (32 lanes x `st.shared.b32 0`, the exception
     to the st.shared drop rule), filled by `tensormap.replace` (global_address,
     elemtype, box_dim, global_dim, global_stride per dim; rank, which a 1-D descriptor
@@ -86,10 +86,10 @@ Events, by policy `tma` (frontend/cute/ops_mem.py, frontend/ttgir/to_kir.py):
   Bulk copies (both): g2s a `gload` of the n elements and a `tma_load` of the bulk
   descriptor (coordinate: the element offset) on the mbarrier; s2g a `gstore`; reduce a
   `gatomic`. commit_group/wait_group are drops (ops.py).
-Issuing threads (design §5.7, D15; measured on sm_100a and sm_103a hardware for every
+Issuing threads (measured on sm_100a and sm_103a hardware for every
 compiler in ISSUE_PTXAS: tests/ptx/test_gpu_tma_issue.py). An instruction is issued under
 the PTX's own predicates and elect.sync; one that at most one lane of each warp executes
-(statically) is issued once per executing thread, as before D15. One that several lanes of
+(statically) is issued once per executing thread. One that several lanes of
 a warp may execute follows ptxas's lowering, the same for every validated version:
   * TMA load and bulk g2s: once per executing lane, never merged (an ELECT loop issues
     each lane's copy with that lane's operands, identical ones too): a tma_load (its
@@ -168,7 +168,7 @@ _PACKED = {
 }
 # tensormap.replace elemtype codes (ISA tensormap.replace: .u8 .u16 .u32 .s32 .u64 .s64
 # .f16 .f32 .f32.ftz .f64 .bf16 .tf32 .tf32.ftz) -> bytes; 13-15 (packed sub-byte) are
-# not in the M3 kernels (refused).
+# refused.
 _ELEMTYPE_BYTES = {0: 1, 1: 2, 2: 4, 3: 4, 4: 8, 5: 8, 6: 2, 7: 4, 8: 4, 9: 8, 10: 2,
                    11: 4, 12: 4}  # fmt: skip
 _REDUCE_BITS = {"f16": 16, "bf16": 16, "f32": 32, "f64": 64, "u32": 32, "s32": 32,
@@ -304,7 +304,7 @@ class Tma:
         if d.kind == "kernel":
             tr.fail(
                 i,
-                "TMA load through an in-kernel descriptor (gap: not in the M2 kernels)",
+                "TMA load through an in-kernel descriptor (gap: not supported)",
             )
         coords = self._coords(tr, i, d, i.operands[1])
         sym, off, extra = cluster.load_slot(tr, i)  # its cta_mask and leader
@@ -576,7 +576,7 @@ class Tma:
             # e.g. fp4_padded (packed sub-byte host dtypes 13-15)
             if any(v.get("host_dtype") in (13, 14, 15) for v in vals):
                 raise launch.LaunchError(
-                    "a packed sub-byte Triton descriptor (gap, design §5.1)"
+                    "a packed sub-byte Triton descriptor (gap: not supported)"
                 )
             if len({(tuple(v["box"]), v["elem_size"]) for v in vals}) != 1:
                 raise launch.LaunchError("launches differ in the descriptor's box")
@@ -1058,7 +1058,7 @@ def segment_dims(desc: list, tensor: list) -> list:
     """For each descriptor dim, the tensor dim it walks (same element stride and extent),
     or None: `desc` and `tensor` are per launch [(shape, strides)] in KIR order (the
     descriptor's values and the base tensor's); a match must be unique in every launch and
-    the same in all (design §5.1: a descriptor inherits its base's segments by it)."""
+    the same in all (a descriptor inherits its base's segments by it)."""
     out = []
     for j in range(len(desc[0][0])):
         got = set()

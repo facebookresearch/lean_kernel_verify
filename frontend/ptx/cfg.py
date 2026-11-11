@@ -283,7 +283,7 @@ def _check_shape(cfg):
             {(u, s) for u in body for s in cfg.blocks[u].succs if s not in body}
         )
         # Several exit edges are fine when they all leave to one block (`while (a && b)`
-        # in the nvfp4 bwd kernels): the region translator joins them with an exit flag.
+        # in TLX backward kernels): the region translator joins them with an exit flag.
         if len({s for _u, s in exits}) != 1:
             edges = ", ".join(f"{cfg.where(u)} -> {s}" for u, s in exits) or "none"
             raise CfgError(

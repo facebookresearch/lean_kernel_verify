@@ -3,8 +3,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""GPU truth for the TMA / bulk-copy issuing rule of the PTX op table (design §5.7, GPU
-test (c), D15), for each ptxas that builds a family's cubins.
+"""GPU truth for the TMA / bulk-copy issuing rule of the PTX op table
+(frontend/ptx/tma.py), for each ptxas that builds a family's cubins.
 
     LKV_PTXAS=/path/a/ptxas:/path/b/ptxas python3 -I tests/ptx/test_gpu_tma_issue.py
 

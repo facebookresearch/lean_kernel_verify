@@ -45,7 +45,7 @@ kernel sources exported at REV + case file (host entry point, config, small conc
   |   TLX/Triton: triton.compile -> TTGIR (sm_100 or sm_103)        frontend/ttgir/dump.py
   |   CuTe DSL:   cute.compile -> initial MLIR -> analyzed stage     frontend/cute/main.py
   |   op table + program slicing (refuses on anything unknown)      to_kir
-  |   (opt-in --frontend ptx: the kernel's PTX instead of the IR, frontend/ptx/)
+  |   (experimental, opt-in --frontend ptx: the PTX instead of the IR, frontend/ptx/)
   v
 KIR JSON per compiled flag set: roles, structured control flow, exact-width integer exprs,
   |   events, inputs; frontend/kir.py (contract check) -> frontend/emit_lean.py
@@ -87,11 +87,12 @@ python3 -I $S/scripts/lkv.py check K.kir.json... --out DIR   # Layer 2 alone on 
 ```
 
 - The frontend is CuTe if the case has a `builder`, else TTGIR. `run` options:
-  `--inputs a,b`, `--target sm_103` (TTGIR only), `--jobs N` (default min(8,
-  CPUs)), `--timeout S` (per Lean file, default 3600), `--src DIR` (default: the
-  case's `src_root` / `source.src`), `--frontend ptx` (translate the kernel's PTX
-  instead of its IR, with one shared core for both frontends: `frontend_ptx.md`; default
-  `legacy`, or `$LKV_FRONTEND` when set; report.json `translation` says which ran).
+  `--inputs a,b`, `--target sm_103` (TTGIR only), `--jobs N` (default min(8, CPUs)),
+  `--timeout S` (per Lean file, default 3600), `--src DIR` (default: the case's
+  `src_root` / `source.src`), `--frontend ptx` (experimental: translate the kernel's
+  PTX instead of its IR, with one shared core for both frontends: `frontend_ptx.md`;
+  default `legacy`, or `$LKV_FRONTEND` when set; report.json `translation` says which
+  ran).
 - **Check a fix:** put base and fix in two source directories, run the same cases
   with each `--src`, and compare FAIL locations. Done when every confirmed
   root's FAIL is gone and no new FAIL appears; inputs the fixed host now rejects
@@ -289,7 +290,7 @@ table says when to read each):
   [frontend_cute.md](references/frontend_cute.md) (the dump, host patches, translation,
   refusals), with the op tables [ir_ops.md](references/ir_ops.md) (TTGIR) and
   [ir_ops_cute.md](references/ir_ops_cute.md) (CuTe): which IR op becomes which KIR event
-  or value; with `--frontend ptx`, the shared PTX translation
+  or value; with `--frontend ptx` (experimental), the shared PTX translation
   [frontend_ptx.md](references/frontend_ptx.md) and its op table
   [ir_ops_ptx.md](references/ir_ops_ptx.md);
 - KIR: [kir.md](references/kir.md), the JSON contract between the layers;
@@ -306,7 +307,7 @@ table says when to read each):
 | [references/frontend_ttgir.md](references/frontend_ttgir.md)                              | writing a TLX/Triton case, or the TTGIR frontend refuses (case format, environment pinning, host patches, CLC)                |
 | [references/frontend_cute.md](references/frontend_cute.md)                                | writing a CuTe case or builder, or the CuTe frontend refuses (work anchors, analyzed stage, DSL pin)                          |
 | [references/ir_ops.md](references/ir_ops.md), [ir_ops_cute.md](references/ir_ops_cute.md) | an op is unknown or refused, or you need the events an op produces and which threads issue them                               |
-| [references/frontend_ptx.md](references/frontend_ptx.md)                                  | running with `--frontend ptx`: how the PTX becomes roles and events, work anchors, how to read a refusal                      |
+| [references/frontend_ptx.md](references/frontend_ptx.md)                                  | running with `--frontend ptx` (experimental): how the PTX becomes roles and events, work anchors, how to read a refusal       |
 | [references/ir_ops_ptx.md](references/ir_ops_ptx.md)                                      | with `--frontend ptx`: an instruction is unknown or refused, its events and issuing threads (TMA, sub-byte)                   |
 | [references/cases.md](references/cases.md)                                                | choosing a case for a kernel, or writing a new case (fields, annotations, which inputs to choose)                             |
 | [references/bug_taxonomy.md](references/bug_taxonomy.md)                                  | someone asks what is covered and why, or which spec to add next (evidence, P1/P2, test-side complements)                      |

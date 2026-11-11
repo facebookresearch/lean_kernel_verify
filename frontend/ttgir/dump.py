@@ -36,7 +36,7 @@ host_reads.py). to_kir refuses metadata and inputs that depend on them.
 
 Writes <out>/<spec>.ttgir and <out>/<spec>.ptx per specialization of the case's kernel and
 <out>/dump.json (see references/frontend_ttgir.md for its format). For the PTX frontend
-(design §5.1) dump.json also has, per spec, the PTX file and its sha256, the compiled
+dump.json also has, per spec, the PTX file and its sha256, the compiled
 kernel's tensordesc_meta, global scratch and profile scratch sizes and the ptxas that
 assembled it, and per launch of the case's kernel a LaunchRecord (`launch`,
 capture.launch_record): grid, block, cluster and dynamic shared memory as launched and

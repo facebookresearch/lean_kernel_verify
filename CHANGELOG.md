@@ -19,16 +19,16 @@ First public release.
 - Tests: the Lean layer's KIR fixtures (`tests/lean`), the frontends' tests, the PTX
   translation's tests (`tests/ptx`) and the end-to-end tests of `lkv.py`.
 - KIR `ir` accepts `"ptx"` (KIR translated from PTX; references/kir.md change 12).
-- `lkv.py run --frontend ptx` (opt-in; the default, `legacy`, is the translation above;
-  `$LKV_FRONTEND` sets the default) makes both frontends translate the kernel's PTX
-  instead of their IR, with one shared core (`frontend/ptx/`) and one PTX op table
-  (references/frontend_ptx.md, ir_ops_ptx.md), into KIR with `ir` `"ptx"`: global and
-  metadata accesses, mbarriers, TMA and bulk copies (packed sub-byte formats too),
-  tcgen05 commits, CLC (TLX), clusters and 2-CTA kernels and the P1 pass (CuTe).
-  Refusals name the PTX instruction, its source line and its PTX line. report.json
-  `translation` and a line of report.md name the translation of a run. With CuTe DSL
-  4.4.2 the source locations are best effort, as report.json `loc_quality` and report.md
-  say.
+- `lkv.py run --frontend ptx` (experimental and opt-in, with known gaps and bugs; the
+  default, `legacy`, is the translation above; `$LKV_FRONTEND` sets the default) makes
+  both frontends translate the kernel's PTX instead of their IR, with one shared core
+  (`frontend/ptx/`) and one PTX op table (references/frontend_ptx.md, ir_ops_ptx.md), into
+  KIR with `ir` `"ptx"`: global and metadata accesses, mbarriers, TMA and bulk copies
+  (packed sub-byte formats too), tcgen05 commits, CLC (TLX), clusters and 2-CTA kernels
+  and the P1 pass (CuTe). Refusals name the PTX instruction, its source line and its PTX
+  line. report.json `translation` and a line of report.md name the translation of a run.
+  With CuTe DSL 4.4.2 the source locations are best effort, as report.json `loc_quality`
+  and report.md say.
 - PTX translation: a TMA or bulk copy that several lanes of a warp may execute follows
   the issuing rules measured on Blackwell hardware for each PTX compiler the frontends
   use (`tests/ptx/test_gpu_tma_issue.py`): loads and reduces once per lane with that

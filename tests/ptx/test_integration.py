@@ -16,7 +16,7 @@ and the families' locations. Also the PTX write set the CuTe stale-data checks u
 refused variant (translate.writes; a call or a loaded pointer leaves it unknown), the
 P1 pass of the CuTe assembly (to_kir step 6, translate_p1_ptx: checked, refused, skipped
 by --no-p1) and the switch's values. CuTe assembly (frontend/cute/to_kir.py): reroll
-(decision D8: LLVM's unrolled blocks back into a `for`, the same trace; runs it must
+(LLVM's unrolled blocks back into a `for`, the same trace; runs it must
 keep), the jit_params naming of pointers and descriptor bases, and the KIR desc tensors
 of Facts.descs (a segmented base's segments on the walking dim; a bulk descriptor's
 extent). TTGIR assembly (frontend/ttgir/to_kir.py build_ptx): host descriptor blocks
@@ -267,7 +267,7 @@ def trace(body, params=None):
 
 
 class Reroll(unittest.TestCase):
-    """cute/to_kir.py reroll (decision D8): LLVM's unrolled blocks back into a `for`."""
+    """cute/to_kir.py reroll: LLVM's unrolled blocks back into a `for`."""
 
     def unrolled(self, offsets):
         body = [let("v0", var("n"))]
@@ -364,9 +364,9 @@ class JitNames(unittest.TestCase):
 
     def test_stream_not_last(self):
         """A TVM-FFI launch passes nothing for its environment stream, wherever the jit
-        function has it (nvfp4_2cta_bwd: `..., stream, mCuSeqlensDKV, mGlobalScales`):
-        the arguments after it bind to the parameters after it, as the jit_params agree,
-        and a LaunchRecord candidate naming them shifted is an error."""
+        function has it (a 2-CTA backward kernel: `..., stream, mCuSeqlensDKV,
+        mGlobalScales`): the arguments after it bind to the parameters after it, as the
+        jit_params agree, and a LaunchRecord candidate naming them shifted is an error."""
 
         def tensor(ptr, dtype="int32"):
             return {"kind": "tensor", "dtype": dtype, "shape": [3], "stride": [1],

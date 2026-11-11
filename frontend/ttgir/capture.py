@@ -28,7 +28,7 @@ equal to 1 as constexprs) is the binder's, computed from the same values a GPU l
 sees; pointer alignment agrees with the GPU because every storage base is checked to be
 16-byte aligned, as CUDA caching-allocator blocks (512-byte aligned) are.
 
-After the compile, `launch_record` gives the launch as the GPU would see it (design §5.1
+After the compile, `launch_record` gives the launch as the GPU would see it (a
 LaunchRecord): grid, block, cluster and dynamic shared memory as CudaLauncher and the C
 launcher derive them from the kernel metadata, and the flat device parameter list as Triton
 itself builds it: `expand_signature` for the types and `wrap_handle_tensordesc` (Triton's
@@ -300,7 +300,7 @@ def _leaf(ty: str) -> tuple:
 
 
 def launch_record(launch: Launch, kernel) -> dict:
-    """The launch as CudaLauncher makes it, for the compiled `kernel` (design §5.1):
+    """The launch as CudaLauncher makes it, for the compiled `kernel`:
     {entry, grid, block, cluster, smem_dynamic, attrs, params}. Every parameter must agree
     with the PTX .entry (launch.ptx_params), block and cluster with its .reqntid and
     .reqnctapercluster."""

@@ -3,8 +3,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Work anchors of the PTX frontend (design §5.9): a case's `work` annotation -> the PTX
-instructions that define each work field.
+"""Work anchors of the PTX frontend: a case's `work` annotation -> the PTX instructions
+that define each work field.
 
     resolve(work, family, fn, sources, loc_mode) -> (sites, notes)
 
@@ -13,7 +13,7 @@ family    "ttgir" (Triton/TLX cases) or "cute"
 fn        the kernel's parse.Function
 sources   the export root(s) holding the kernel's Python files
 loc_mode  "file_line" (Triton, CuTe DSL 4.6.1) or "line_only" (CuTe DSL 4.4.2, whose
-          .file index is unreliable, decision D1): how much of a .loc frame to believe
+          .file index is unreliable): how much of a .loc frame to believe
 
 A static mapping from annotation, sources and PTX to instruction sites. The interpreter
 owns everything that needs values: which tensor a load reads and at what index (it drops
@@ -30,7 +30,7 @@ interpreter must refuse it for a field the spec reads (a segments `per` field). 
 findings worth a message that do not stop the kernel (a dropped branch, loads on several
 lines). A case error is an AnchorError naming the field and the candidates.
 
-Load anchors (CuTe; also accepted for Triton, decision D2). TEXT matches a source line of a
+Load anchors (CuTe; also accepted for Triton). TEXT matches a source line of a
 file under a root, as a substring of the line or of "<relpath>:<line>" (the legacy CuTe
 frontend matched an op's statement text and frames, cute/ops_mem.py metadata_value). TEXT
 matching no source line is a case error. The candidates are the global loads (ld.global*)
@@ -64,25 +64,26 @@ guarded load into it: Triton's masked load) are one result, at the last write. A
 that flows into another one's instruction inside the region (a subexpression the compiler
 shares with code outside, like an index scaled for two loads) gives way to it. Of several
 independent results the one at the position of the value's root expression wins: Triton
-gives each AST node's op that node's position (in the mxfp8 no-CLC kernel LLVM leaves a
+gives each AST node's op that node's position (in a TLX attention kernel LLVM leaves a
 sign extension of the helper's index, used elsewhere too, under the position of the load's
 address subexpression). Then exactly one result is the occurrence's site; any other count
 is a case error naming the candidates.
 An occurrence without instructions (a dropped constexpr branch, or a value the compiler
 folded into its uses or computed under another statement's .loc) and a tuple element
-without a result (unused there) have no value: if another work-field occurrence in the same
-statement list has a site, the statement runs, and it gets a "novalue" site at the last of
-those; else a note. Both cases happen in the JFA warp-specialized kernels: LLVM drops the
-default partition's unused `off_h`, and in the non-load-balanced path gives `pid =
-tile_idx % n_tile_num`'s rem the .loc of `off_h = off_seq_h % H` (whose own rem it sinks
-under line 0), so `off_h`'s site holds pid's value. Hence only the fields the spec reads
-deserve trust in their values; all `per` fields of the cases are `batch`, which
-resolves exactly. A field without any site in the function is a case error. This follows
-the TTGIR frontend's gating (a field counted as defined wherever its op survived to TTGIR)
-where LLVM dropped the op, not where TTGIR had dropped it already: there the TTGIR
-frontend's role has no work item, this one's has the fields that resolve (the dQ-reduce
-and MMA partitions of the nvfp4 FULL_TILES variants, whose pid and off_h TTGIR removed,
-check their accesses against the batch's segment rather than as "no current work item").
+without a result (unused there) have no value: if another work-field occurrence in the
+same statement list has a site, the statement runs, and it gets a "novalue" site at the
+last of those; else a note. Both cases happen in TLX warp-specialized attention kernels:
+LLVM drops the default partition's unused `off_h`, and in the non-load-balanced path
+gives `pid = tile_idx % n_tile_num`'s rem the .loc of `off_h = off_seq_h % H` (whose own
+rem it sinks under line 0), so `off_h`'s site holds pid's value. Hence only the fields
+the spec reads deserve trust in their values; the `per` fields of the cases checked so
+far are all `batch`, which resolves exactly. A field without any site in the function is
+a case error. This follows the TTGIR frontend's gating (a field counted as defined
+wherever its op survived to TTGIR) where LLVM dropped the op, not where TTGIR had dropped
+it already: there the TTGIR frontend's role has no work item, this one's has the fields
+that resolve (the dQ-reduce and MMA partitions of a TLX backward kernel's FULL_TILES
+variants, whose pid and off_h TTGIR removed, check their accesses against the batch's
+segment rather than as "no current work item").
 """
 
 import ast

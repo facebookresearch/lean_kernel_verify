@@ -3,9 +3,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Thread-block clusters in the PTX frontend (design §5.4.1, §5.6, §5.7): the cluster
-semantics of the CuTe family as the legacy CuTe frontend models them
-(references/frontend_cute.md "Clusters", references/kir.md change 11).
+"""Thread-block clusters in the PTX frontend: the cluster semantics of the CuTe family
+as the legacy CuTe frontend models them (references/frontend_cute.md "Clusters",
+references/kir.md change 11).
 
     mapa(tr, i)                       mem.py: mapa.shared::cluster d, a, rank
     peer(tr, v) -> Peer | None        interp.py: a shared address with the peer bit cleared
@@ -38,20 +38,20 @@ split), as the legacy frontend's interp.Remote; through a shared::cta address it
 issuing CTA's slot (no `cta`). In a cluster of one CTA a Remote must name rank 0, and no
 `cta` is written (KIR: the field needs a cluster of several CTAs).
 
-The peer bit (design §5.6, a trust item of design §7). `a & 0xFEFFFFF8` of a shared
-address `a` clears bit 24 of its shared::cluster window address, which names the even CTA
-of the issuing CTA's pair (CUTLASS's Sm100MmaPeerBitMask; the PTX ISA does not document
-the bit): a Peer, the slot at offset `a` in the CTA of rank `rank & ~1`. LLVM shrinks the
-mask by the bits it knows are zero (a 1024-aligned barrier: 0xFEFFFC00), so a mask is
-accepted when it keeps every bit at or above the symbol's .align but bit 24, clears bit
-24, and every lower bit it clears is provably zero in the offset (known trailing zeros,
-the bits its bit operations and disjoint adds may set, or an interval below that bit);
-else the value is Data, as before. A Peer is a TMA load's
-mbarrier only, and only with .cta_group::2: KIR `leader` (each destination's bytes
-complete on the slot of the even CTA of its pair). A cta_group::2 load whose mbarrier is a
-shared::cta address completes on the issuing CTA's own slot (no leader: the ISA lets the
-mbarrier be in either CTA of the pair, the address says which); a Peer without
-.cta_group::2 is refused (the mbarrier must be in the destination CTA).
+The peer bit (a trust item, references/ir_ops_ptx.md "Thread barriers and clusters").
+`a & 0xFEFFFFF8` of a shared address `a` clears bit 24 of its shared::cluster window
+address, which names the even CTA of the issuing CTA's pair (CUTLASS's
+Sm100MmaPeerBitMask; the PTX ISA does not document the bit): a Peer, the slot at offset
+`a` in the CTA of rank `rank & ~1`. LLVM shrinks the mask by the bits it knows are zero
+(a 1024-aligned barrier: 0xFEFFFC00), so a mask is accepted when it keeps every bit at or
+above the symbol's .align but bit 24, clears bit 24, and every lower bit it clears is
+provably zero in the offset (known trailing zeros, the bits its bit operations and
+disjoint adds may set, or an interval below that bit); else the value is Data, as before.
+A Peer is a TMA load's mbarrier only, and only with .cta_group::2: KIR `leader` (each
+destination's bytes complete on the slot of the even CTA of its pair). A cta_group::2
+load whose mbarrier is a shared::cta address completes on the issuing CTA's own slot (no
+leader: the ISA lets the mbarrier be in either CTA of the pair, the address says which);
+a Peer without .cta_group::2 is refused (the mbarrier must be in the destination CTA).
 
 Events (the legacy frontend's, references/frontend_cute.md "Clusters"):
   * barrier.cluster.arrive{.relaxed}{.aligned}: an `arrive` of every thread of the role
@@ -76,15 +76,15 @@ a destination Remote of another rank is refused (the mbarrier must be in the des
 CTA, and KIR has no remote tma_load). mbarrier.complete_tx and anything else on another
 CTA are gaps.
 
-Issuing (design §5.7, D15). A remote arrive and a commit follow the ISA (per executing
+Issuing. A remote arrive and a commit follow the ISA (per executing
 thread, as their shared::cta forms). The ptxas lowering of a multicast or cta_group::2 TMA
 load and of a shared::cluster bulk copy that several lanes of a warp execute was not
 measured on hardware (tests/ptx/test_gpu_tma_issue.py covers the other forms), so such an
 instruction is translated only where at most one lane of each warp executes it
 (elect.sync, a lane test), once per executing thread, and refused otherwise.
 
-The Triton family: clusters of more than one CTA are refused before translation (v1,
-design D3), and its cluster-scope barrier forms stay gaps.
+The Triton family: clusters of more than one CTA are refused before translation, and
+its cluster-scope barrier forms are gaps.
 """
 
 import math
@@ -185,9 +185,7 @@ def pair_mask(tr: Translator):
 
 def execute(tr: Translator, i, mn: str) -> None:
     if tr.k.mem.policy.get("family") != "cute":
-        tr.fail(
-            i, f"{mn} (gap: cluster scope in the Triton family is not in v1, design D3)"
-        )
+        tr.fail(i, f"{mn} (gap: cluster scope is not supported in Triton kernels)")
     if mn.startswith("barrier.cluster"):
         _cluster_barrier(tr, i, mn)
     elif mn in (

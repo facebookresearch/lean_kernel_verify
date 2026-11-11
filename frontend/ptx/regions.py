@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Region tree of one role of a PTX kernel (design §5.3): what interp.py walks.
+"""Region tree of one role of a PTX kernel: what interp.py walks.
 
     build(cfg, role) -> Tree
 
@@ -24,7 +24,7 @@ instruction says) becomes a tree of
                             ends on every path in CONTINUE (a back edge) or BREAK (an edge
                             to `exit`, the one block all exit edges go to, cfg.py's shape
                             rule; several exit edges join there: interp.py's exit flag)
-    Wait(instr, header)     the blocking wait pseudo-instruction (design §5.2.2): a loop
+    Wait(instr, header)     the blocking wait pseudo-instruction (_wait): a loop
                             that is exactly `L: try_wait.parity p, [a], ph(, hint); @!p bra
                             L` or `L: try_wait...; @p bra D; bra L; D:`, its predicate p
                             read nowhere else (frontend/cute/ops_mem.py _wait_loops, on the

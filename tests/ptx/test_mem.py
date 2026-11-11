@@ -527,8 +527,9 @@ DEPOT = """
 
 class LocalMemory(unittest.TestCase):
     def test_depot_bytes(self):
-        # nvfp4x2_kv.py: two bytes stored through the generic depot address and loaded
-        # as one b16 (Data: not one store's bytes), a printf's argument staging: no event.
+        # A Triton kernel's printf: two bytes stored through the generic depot address
+        # and loaded as one b16 (Data: not one store's bytes), the argument staging: no
+        # event.
         f = run(PRE + DEPOT + """
     cvt.u16.u32 %rs1, %r1;
     st.b8 [%SP+1], %rs1;

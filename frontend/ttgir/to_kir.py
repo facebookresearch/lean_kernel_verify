@@ -14,7 +14,7 @@ compiled to that specialization. Every unsupported construct on the kept slice a
 dropped op whose result reaches the slice is a hard error naming the op and its loc, of
 kind "gap" (refused by design) or "error" (the case or LKV must be fixed; `KirError`).
 
-Migration switch (design §8, removed when the PTX frontend becomes the only one):
+Translation switch (the PTX translation is experimental and opt-in):
 LKV_FRONTEND=ptx translates each specialization's PTX instead (build_ptx: the PTX core's
 Facts, frontend/ptx/translate.py, with this file's naming, tensors, inputs and checks;
 KIR `ir` "ptx"); unset or "legacy" is the TTGIR translation above, unchanged.
@@ -1500,7 +1500,7 @@ def _add_clc(tensors: list, params: list) -> None:
 
 
 def build_ptx(where: Path, dump: dict, key: str, case: dict) -> dict:
-    """The KIR of a specialization from its PTX (LKV_FRONTEND=ptx, design §5.11): the PTX
+    """The KIR of a specialization from its PTX (LKV_FRONTEND=ptx): the PTX
     core's Facts (frontend/ptx/translate.py) assembled as build() assembles the
     Translator's, with the same names, tensors (host descriptors and the CLC tables
     included), params, inputs and checks."""

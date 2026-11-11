@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Synchronization rows of the PTX frontend besides plain mbarriers (design §5.6, §5.7):
+"""Synchronization rows of the PTX frontend besides plain mbarriers:
 tcgen05, cluster launch control (CLC), mbarrier invalidation and the cluster-scope
 barrier forms.
 
@@ -33,7 +33,7 @@ from interp.Translator.execute); nothing here hides what it needs. cta_group::2 
 cluster of CTA pairs, a multicast commit has the commit_arrive's cta_mask (cluster.py).
 
 CLC (the TTGIR frontend's model, frontend/ttgir/to_kir.py `_clc_query`/`_with_clc`;
-design §5.6; the Triton family only, CuTe CLC is M5):
+the Triton family only, CuTe CLC is a gap):
   * try_cancel [resp], [mbar] -> `tma_load(__clc_response, [0], mbar)` per issuing
     thread: the 16-byte response lands through the async proxy and completes its
     transaction bytes on the barrier. .multicast::cluster::all is the same with a cluster
@@ -155,7 +155,7 @@ def _tcgen05(tr: Translator, i, mn: str) -> None:
 
 def _clc(tr: Translator, i, mn: str) -> None:
     if tr.k.mem.policy.get("family") != "ttgir":
-        tr.fail(i, f"{mn} (gap: CLC outside the Triton family is M5)")
+        tr.fail(i, f"{mn} (gap: CLC is supported in Triton kernels only)")
     if mn.startswith("clusterlaunchcontrol.try_cancel"):
         sym, off = tr.k.mem._smem(tr, i, i.operands[1])
         resp = _address(tr, i)

@@ -5,7 +5,7 @@
 
 """GPU truth for packed sub-byte TMA: the rules frontend/ptx/tma.py (_PACKED) and
 launch.kir_desc apply to the CUtensorMap formats 16U4_ALIGN8B, 16U4_ALIGN16B and
-16U6_ALIGN16B (design §5.1, §5.6).
+16U6_ALIGN16B.
 
     python3 -I tests/ptx/test_gpu_tma_subbyte.py   (or the buck target :test_gpu_tma_subbyte)
 

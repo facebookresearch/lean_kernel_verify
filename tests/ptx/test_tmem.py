@@ -306,7 +306,7 @@ L:
 
     def test_triton_family(self):
         f = run(PRE + ALLOC + "    ret;\n", family="ttgir", p1=True)
-        self.assertIn("P1-1 on Triton kernels is M5", refusal(f))
+        self.assertIn("no P1 pass for Triton kernels", refusal(f))
 
 
 class NamedBarriers(unittest.TestCase):

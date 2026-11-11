@@ -22,9 +22,9 @@ run    dump with the case's frontend (a buck2 binary: CuTe DSL if the case has a
        record (dump.json "env": the case's env, the shell values it ignored, the
        effective values, Triton's cache-invalidating variables).
        --frontend selects to_kir's Layer-1 translation (default $LKV_FRONTEND, else
-       legacy): legacy translates the TTGIR / CuTe DSL MLIR, ptx the kernel's PTX
-       (references/frontend_ptx.md); run sets LKV_FRONTEND for the frontend, and the
-       report names the translation (report.json "translation").
+       legacy): legacy translates the TTGIR / CuTe DSL MLIR, ptx (experimental) the
+       kernel's PTX (references/frontend_ptx.md); run sets LKV_FRONTEND for the frontend,
+       and the report names the translation (report.json "translation").
 check  the Layer-2 half of `run` on existing KIR files (e.g. tests/lean fixtures).
 export write fbsource PATHs at REV under OUT_DIR with read-only `sl files`/`sl cat`: a
        file with the first-party modules it imports at OUT_DIR/<path below fbcode/>
@@ -1407,7 +1407,7 @@ def main():
                 choices=("legacy", "ptx"),
                 default=os.environ.get("LKV_FRONTEND") or "legacy",
                 help="Layer-1 translation: legacy (TTGIR / CuTe DSL MLIR) or ptx (the "
-                "kernel's PTX); default $LKV_FRONTEND, else legacy",
+                "kernel's PTX, experimental); default $LKV_FRONTEND, else legacy",
             )
         else:
             p.add_argument("kir", nargs="+", help="KIR JSON files")

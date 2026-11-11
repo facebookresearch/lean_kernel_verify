@@ -28,7 +28,7 @@ kernel's file outside the roots or with two functions of its name. Load anchors:
 DSL 4.4.2 line-only matching against a wrong .file index, by statement text and by
 relpath:line, global loads only, one site per load (its outermost matching frame), every
 match kept with a note when they sit on different lines, text matching no source line,
-file-and-line matching refusing the wrong file, and the Triton list form (decision D2)
+file-and-line matching refusing the wrong file, and the Triton list form
 matching an inlined helper's frame, with two export roots. Bad annotations raise.
 """
 

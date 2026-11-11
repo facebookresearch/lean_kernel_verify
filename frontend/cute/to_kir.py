@@ -35,7 +35,7 @@ reads. So is a host read, before a launch of the variant, of data an earlier lau
 write (the host may branch or size the launch differently), and a dump made with a CuTe
 DSL other than the ones the op table was checked against (ops.DSL_NATIVE).
 
-Migration switch (design §8, removed when the PTX frontend becomes the only one):
+Translation switch (the PTX translation is experimental and opt-in):
 LKV_FRONTEND=ptx translates each variant's PTX instead of steps 1-4 (translate_ptx: the
 PTX core's Facts, frontend/ptx/translate.py, assembled by PtxVariant with Variant's
 tensors, inputs, checks and report: parameters named by the LaunchRecords' jit_params,
@@ -561,8 +561,8 @@ class Variant:
         }
 
 
-# PTX frontend policy per DSL. Locations (design §5.2.3): 4.4.2's .loc file numbers are
-# unreliable, only lines are trusted (decision D1); 4.6.1 has a true file table, and the
+# PTX frontend policy per DSL. Locations: 4.4.2's .loc file numbers are unreliable,
+# only lines are trusted; 4.6.1 has a true file table, and the
 # instructions of an inline asm block take the block's start loc. The TMA issuing rules
 # are gated on the compiler of the variant's cubin instead (_ptxas).
 PTX_LOCS = {
@@ -572,7 +572,7 @@ PTX_LOCS = {
 
 
 class PtxVariant(Variant):
-    """A variant translated from its PTX (LKV_FRONTEND=ptx, design §5.11): the PTX core's
+    """A variant translated from its PTX (LKV_FRONTEND=ptx): the PTX core's
     Facts in Variant's assembly (segment offsets, metadata checks, tensors, inputs). The
     host arguments are the launch's: every tensor argument has `<t>_shape<i>` and
     `<t>_stride<i>` params, whether the DSL made the leaf static or dynamic (the values
@@ -678,7 +678,7 @@ def _innermost_first(stmts: list, descs: set) -> list:
     """The role body with the coordinates of every tma_load of the host descriptors
     `descs` innermost first: the CuTe family's KIR desc dims, as the legacy CuTe frontend
     (the CuTe layout's mode order) has them, so its parity footprints (rows: dim 0) are the
-    same; the core gives them outermost first (design §5.6, the TTGIR order)."""
+    same; the core gives them outermost first (the TTGIR order)."""
     out = []
     for s in stmts:
         s = {
@@ -772,8 +772,8 @@ def _launch_params(rec: dict, launches: list, records: list) -> list:
     value for the environment stream, wherever it sits among the parameters. The skipped
     ones must agree with the LaunchRecords' jit_params: each kernel parameter that passes
     a jit leaf through holds that leaf's launch value in every launch (a tensor's data
-    pointer, a scalar's bits; _passes_through). The last parameters if they agree (every
-    kernel of the M2 cases has its stream last; without jit_params nothing can be
+    pointer, a scalar's bits; _passes_through). The last parameters if they agree (a CuTe
+    DSL kernel usually takes its stream last; without jit_params nothing can be
     checked), else the one choice of single-leaf parameters that does; none, or several,
     is an error: shifted names bind annotations and metadata to the wrong tensors."""
     params = rec["params"]
@@ -1162,7 +1162,7 @@ def _constant_part(e) -> int:
 # LLVM fully unrolls the DSL's constexpr loops (cutlass.range_constexpr), so a CuTe
 # kernel's PTX repeats a block of statements once per iteration, its constants stepping
 # with the iteration (the row 16 k of a copy, ...), where the legacy translation kept the
-# MLIR's loop as a KIR `for`. reroll turns such repeats back into a `for` (decision D8:
+# MLIR's loop as a KIR `for`. reroll turns such repeats back into a `for` (to keep
 # per-kernel Lean bytes within 1.5x of the legacy translation's); the events, their order
 # and every value stay the same.
 

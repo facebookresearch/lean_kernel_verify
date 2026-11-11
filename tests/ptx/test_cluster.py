@@ -338,7 +338,7 @@ class ClusterBarrier(unittest.TestCase):
         )
         self.assertIn("differs between the lanes of a warp", refusal(f))
         f = run(PRE + CB, family="ttgir", cluster=(1, 1, 1))
-        self.assertIn("Triton family is not in v1", refusal(f))
+        self.assertIn("not supported in Triton kernels", refusal(f))
         self.assertEqual(f.refusals[0]["kind"], "gap")
 
 

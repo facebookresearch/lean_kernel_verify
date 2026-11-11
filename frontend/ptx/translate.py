@@ -3,7 +3,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""PTX core translator (design §5.2-§5.8): one kernel's PTX + its LaunchRecords -> Facts.
+"""PTX core translator: one kernel's PTX + its LaunchRecords -> Facts.
 
     translate(ptx_text, entry, launch_records, policy) -> Facts
     policy(family, **overrides) -> dict            the adapter conventions below
@@ -24,7 +24,7 @@ count from the Facts. KIR `ir` is "ptx".
 Where a variant runs: one translate() per compiled kernel (TTGIR spec, CuTe digest),
 with the LaunchRecords of every launch of it (they must agree on block and cluster; the
 first names the params unless the policy gives them). The Triton family with a cluster
-of more than one CTA is a gap in v1 (design §1.3).
+of more than one CTA is a gap.
 
 Policy (a dict; `policy()` fills the family defaults):
     family          "ttgir" | "cute"
@@ -35,7 +35,7 @@ Policy (a dict; `policy()` fills the family defaults):
     src_root        the export root: KIR locs name files below it
     loc_prefix      "fbcode/" (TTGIR) or "" (CuTe)
     loc_mode        "file_line": the innermost .loc frame below src_root (TLX, DSL
-                    4.6.1); "line_only": DSL 4.4.2 (decision D1), the one .file is the
+                    4.6.1); "line_only": DSL 4.4.2, the one .file is the
                     kernel file and only lines are trusted, a .loc on a blank or comment
                     position (or past the line's end) inherits the previous one;
                     instructions without a loc inherit the previous one
@@ -109,7 +109,7 @@ Facts (refusals non-empty: the variant is refused, everything else empty):
     refusals   [{"kind": "gap" | "error", "msg"}]; an exception of the core is an "error"
                refusal (at the instruction being translated, if any), never raised
 
-CLI (eyeballing the M0 dumps): python3 -I translate.py --dump DUMP.json [--case
+CLI (eyeballing dumps): python3 -I translate.py --dump DUMP.json [--case
 CASE.json] [--body] [--kir] prints the Facts of every variant of a TTGIR or CuTe dump;
 --kir assembles a minimal KIR (constant shapes from the first launch) and validates it
 with frontend/kir.py.
@@ -204,11 +204,11 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
     facts.block, facts.cluster = _launch_dims(fn, records)
     if pol["family"] == "ttgir" and facts.cluster != (1, 1, 1):
         raise interp.Unsupported("launch", fn.name, f"cluster {facts.cluster}: Triton kernels with "
-                            "clusters are not in v1 (design §1.3)")  # fmt: skip
+                            "clusters of more than one CTA are not supported")  # fmt: skip
     tcgen05 = any(i.opcode.startswith("tcgen05.") for i in fn.instructions())
     p1 = tmem.P1() if pol.get("p1") and tcgen05 else None  # interp.Kernel.p1
     if p1 is not None and pol["family"] != "cute":
-        raise interp.Unsupported("P1", fn.name, "P1-1 on Triton kernels is M5 (D3)")
+        raise interp.Unsupported("P1", fn.name, "no P1 pass for Triton kernels")
     cfg = C.build(fn)
     roles, dispatch = C.roles(cfg, pol["family"])
     locs, srclocs = _locs(fn, pol)
@@ -342,7 +342,7 @@ def _launch_dims(fn, records) -> tuple:
 
 
 def _locs(fn, pol) -> tuple:
-    """({id(instr): KIR loc}, {id(instr): (source path, line)}) per design §5.2.3."""
+    """({id(instr): KIR loc}, {id(instr): (source path, line)}) per policy loc_mode."""
     root = str(pol.get("src_root") or "").rstrip("/") + "/"
     prefix, mode = pol.get("loc_prefix", ""), pol.get("loc_mode", "file_line")
     locs, srcs = {}, {}
@@ -375,8 +375,8 @@ def _frame(loc, root, mode, lines):
 
 
 def _plausible(loc, lines) -> bool:
-    """D1: the kernel file's line has code at the column (not blank, a comment, or past
-    the end of the line). The DSL writes Python's 0-based ast columns."""
+    """line_only: the kernel file's line has code at the column (not blank, a comment, or
+    past the end of the line). The DSL writes Python's 0-based ast columns."""
     if loc.file not in lines:
         try:
             lines[loc.file] = Path(loc.file).read_text().splitlines()
@@ -419,8 +419,8 @@ def _sites(fn, sites) -> dict:
 
 # ------------------------------------------------------------------ addr marking
 #
-# frontend/cute/to_kir.py mark_addr, ported unchanged but for the design §5.8 exception,
-# run per role: the nodes of a mul.hi expansion and of a sign extension (or signed bit
+# frontend/cute/to_kir.py mark_addr, ported unchanged but for one exception, run per
+# role: the nodes of a mul.hi expansion and of a sign extension (or signed bit
 # field) expansion are not marked, their operands are followed. In Exprs and TExprs alike.
 
 _ADDR_OPS = ("add", "sub", "mul", "shl")  # wraps are P0-1 violations on address paths
@@ -644,13 +644,13 @@ def _tma_write(mn: str) -> bool:
 
 def writes(ptx_text: str, entry: str, params: list) -> list | None:
     """The tensors a kernel may write, for the stale-data checks of a variant the
-    translation refused (design §5.1: the write set from the PTX, else every pointer
-    argument): the named pointers (param_table's `params`) the address of each global
-    write derives from (_Bases; through a descriptor: its base). None when some write's
-    address has an unknown or no base, or an instruction has no op-table row or is
-    refused by it (a call of a device function may store anywhere; of the refused rows
-    only try_wait/test_wait, which read shared memory, are known to write nothing): then
-    any argument may be written."""
+    translation refused (the write set from the PTX, else every pointer argument): the
+    named pointers (param_table's `params`) the address of each global write derives
+    from (_Bases; through a descriptor: its base). None when some write's address has an
+    unknown or no base, or an instruction has no op-table row or is refused by it (a call
+    of a device function may store anywhere; of the refused rows only try_wait/test_wait,
+    which read shared memory, are known to write nothing): then any argument may be
+    written."""
     module = parse.parse(ptx_text)
     fn = module.function(entry)
     try:

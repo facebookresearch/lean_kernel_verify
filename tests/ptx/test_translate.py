@@ -12,7 +12,8 @@ the barrier its default initializes and arrives on and its partition waits on), 
 addr marks per role (a let name used in two roles is marked only where it feeds an
 address, R5) and none on a mul.hi or sign-extension expansion; KIR locs (the innermost frame below the
 source root with the family's prefix, inherited without a loc; DSL 4.4.2's line-only
-rule); refusal kinds (an unknown instruction is an error, one outside the M1 set a gap,
+rule); refusal kinds (an unknown instruction is an error, a cluster
+barrier in a Triton kernel a gap,
 a control-flow shape a gap, an exception of the core an error at its instruction); work
 anchors under both rules (TTGIR gate: one event after the definition; CuTe each: -1 at
 the role's start, then the anchored load's index), and an anchored load counting only
@@ -253,7 +254,7 @@ class Contract(unittest.TestCase):
         self.assertIn("no op table row", f.refusals[0]["msg"])
         f = run("    barrier.cluster.arrive.aligned;\n    ret;\n")
         self.assertEqual(f.refusals[0]["kind"], "gap")
-        self.assertIn("not in v1", f.refusals[0]["msg"])
+        self.assertIn("not supported in Triton kernels", f.refusals[0]["msg"])
         f = run(
             "    mov.u32 %r1, %tid.x;\n    setp.eq.s32 %p1, %r1, 0;\n    @%p1 bra A;\n    ret;\nA:\n    ret;\n"
         )
