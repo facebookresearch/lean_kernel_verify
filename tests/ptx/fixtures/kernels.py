@@ -77,7 +77,7 @@ def events(facts, ev=None, role=None):
 
 def kir_errors(facts) -> list:
     """frontend/kir.py's errors for a KIR around the Facts (1-D tensors of 4096 elements,
-    every param 1, the barriers and roles as they are)."""
+    every param 1, the barriers, roles, cluster and P1 `tmem` as they are)."""
     from ....frontend import kir
 
     tensors = [{"name": n, "kind": "global", "elem_bytes": t["elem_bytes"],
@@ -96,6 +96,8 @@ def kir_errors(facts) -> list:
                             "metadata": True})  # fmt: skip
             metadata[n] = [0] * 4 ** len(strides)
     obj = {"kir_version": 1, "kernel": "k", "source": "k.py", "ir": "ptx", "target": "sm_100",
+           **({"tmem": facts.tmem} if facts.tmem else {}),  # a P1 pass's (tmem.py)
+           **({"cluster": list(facts.cluster)} if facts.cluster != (1, 1, 1) else {}),
            "grid": [{"e": "const", "w": 32, "v": 1}] * 3,
            "params": [{"name": n, "type": f"i{w}"} for n, w in facts.params.items()],
            "tensors": tensors, "barriers": facts.barriers,

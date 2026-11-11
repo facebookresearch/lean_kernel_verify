@@ -11,8 +11,10 @@ Host descriptors: the TTGIR convention (tma_load/tma_store/tma_reduce on the jit
 descriptor, the kernel's own shape/stride params, box from the record; reached by
 `mov.b32` + `cvt` + `cvta.param` or `mov.b64` + `cvta.param`) and the CuTe one (tma<k>_<base>
 with synthetic shape/stride params from the decoded CUtensorMap, a tma_load plus its gload
-footprint, stores and reduces as gstore/gatomic footprints), coordinates reversed, a packed
-sub-byte format (dim-0 coordinate divided with an alignment assert), a zero-length tensor's
+footprint, stores and reduces as gstore/gatomic footprints), coordinates reversed, packed
+sub-byte formats (PackedSubByte: KIR in bytes, the dim-0 coordinate asserted a multiple of
+the hardware's granularity and converted, a store or reduce the hardware traps on asserted
+false, packed Triton and in-kernel descriptors refused), a zero-length tensor's
 descriptor (extents 0, no footprint); the issuing threads (elect: one per warp; k = 1, 2 or
 32 lanes of a warp: loads and reduces, tensor and bulk, once per lane with its own
 operands, stores once per distinct (descriptor, coordinates, shared source) or (global
@@ -22,7 +24,7 @@ tma.ISSUE_TARGETS, and a store whose copies depend on the elected lane; a single
 per-warp operand splits the role; tkinfo_version); bulk copies
 (g2s: gload + tma_load of bulk_<T>_<n>; s2g; reduce, its type checked); in-kernel descriptors (zeroed staging buffer, replace under a thread mask,
 cp_fenceproxy to the scratch, a store through it clipped at the extents, one buffer reused
-for two descriptors, and the refusals); the write set through descriptors; clusters,
+for two descriptors, and the refusals, a replace under a branch on data among them); the write set through descriptors; clusters,
 multicast and generic access to a descriptor refused; desc_base and segment_dims.
 """
 
@@ -257,6 +259,12 @@ def decoded(
             "estrides": [1] * len(dims), "interleave": "NONE", "base": cands}  # fmt: skip
 
 
+def packed(dtype, dims, strides_bytes, box, **kw):
+    """A decoded packed sub-byte descriptor (4- or 6-bit elements) over the byte tensor q."""
+    bits = 6 if dtype == "16U6_ALIGN16B" else 4
+    return {**decoded(dims, strides_bytes, box, "q", bits, **kw), "dtype": dtype}
+
+
 CUTE_PARAMS = [("tmap", "t", decoded([128, 256], [256], [32, 64])), ("b32", "n", 7)]
 
 PRE = """
@@ -406,25 +414,6 @@ class HostCute(unittest.TestCase):
         self.assertEqual(
             writes(PRE.format(n=1) + TMAP64 + STORE, CUTE_PARAMS, "cute"), ["x"]
         )
-
-    def test_packed_sub_byte(self):
-        # 16U4: 4-bit elements in a byte tensor; dim 0 (innermost) in bytes
-        p = [
-            ("tmap", "t", decoded([256, 64], [128], [128, 16], "q", elem_bits=4)),
-            ("b32", "n", 7),
-        ]
-        f = run(PRE.format(n=1) + TMAP64 + LOAD.format(nbytes=1024).replace("{%r7, %r5}", "{%r5, %r7}"),
-                p, "cute", {"q": 1})  # fmt: skip
-        self.assertEqual(f.refusals, [])
-        d = f.descs["tma0_q"]
-        self.assertEqual(
-            (d["box"], math.prod(d["box"]) * d["elem_bytes"]), ([16, 64], 1024)
-        )
-        self.assertEqual(f.values[0]["tma0_q.shape.1"], 128)
-        (ld,) = events(f, "tma_load")
-        self.assertEqual(ld["coords"][1]["o"], "sdiv")
-        asserts = [s for s in statements(f.roles[0]["body"]) if s["op"] == "assert"]
-        self.assertIn("byte aligned", asserts[0]["msg"])
 
     def test_zero_length_descriptor(self):
         p = [
@@ -619,18 +608,20 @@ class Lanes(unittest.TestCase):
         self.assertEqual(loop["ub"]["v"], 32)
 
     def test_packed_sub_byte_load_per_lane(self):
-        p = [("tmap", "t", decoded([256, 64], [128], [128, 16], "q", elem_bits=4)),
+        p = [("tmap", "t", packed("16U4_ALIGN8B", [256, 64], [128], [128, 16])),
              ("b32", "n", 7)]  # fmt: skip
         body = PRE.format(n=1) + TMAP64 + LANES.format(k=2)
         body += "    shl.b32 %r18, %r1, 5;\n    add.s32 %r17, %r5, %r18;\n"
         body += f"    @%p3 {tma_op('load', c='%r5').replace('{%r5, %r5}', '{%r17, %r5}')};\n"
         f = run(body, p, "cute", {"q": 1}, ptxas=OK)
         self.assertEqual(f.refusals, [])
-        got = footprints(f, {**f.values[0], "param1": 4})
+        got = footprints(f, {**f.values[0], "param1": 64})
         # lane L at element column n + 32 L, byte column (n + 32 L) / 2 (dim 0 in bytes)
-        self.assertEqual([g[2] for g in got if g[0] == "tma_load"], [[4, 2], [4, 18]])
+        self.assertEqual(
+            [g[2] for g in got if g[0] == "tma_load"], [[64, 32], [64, 48]]
+        )
         asserts = [s for s in statements(f.roles[0]["body"]) if s["op"] == "assert"]
-        self.assertIn("byte aligned", asserts[0]["msg"])
+        self.assertIn("multiple of 32 16U4_ALIGN8B", asserts[0]["msg"])
 
     def test_two_descriptors_in_one_instruction_refused(self):
         body = PRE.format(n=2) + TMAP64 + TMAP_U + LANES.format(k=32)
@@ -1007,6 +998,86 @@ class InKernel(unittest.TestCase):
         self.assertIn("in-kernel descriptor (gap", f.refusals[0]["msg"])
         bad = KP[:3] + [("ptr", "__global_scratch", 0x80000)]  # not marked scratch
         self.assertIsNone(writes(STAGE + fill(0, 0, 20, 0) + use(20, 21), bad))
+        # a replace under a branch on data is no branch whose arms emit nothing
+        # (interp._inert): taking it as unconditional would clip the store at 40 rows
+        cut = "    cvt.u64.u32 %rd16, %r40;\n"
+        data = "    ld.shared.u32 %r60, [%r2+64];\n    setp.eq.s32 %p6, %r60, 0;\n" \
+            "    @%p6 bra KEEP;\n    tensormap.replace.tile.global_dim.shared::cta.b1024.b32" \
+            " [%rd16], 0x1, 40;\nKEEP:\n"  # fmt: skip
+        f = run(STAGE + fill(0, 0, 20, 0).replace(cut, cut + data) + use(20, 21, row=32),
+                KP, tensors=KT)  # fmt: skip
+        self.assertIn("reaches a branch condition", f.refusals[0]["msg"])
+
+
+class PackedSubByte(unittest.TestCase):
+    """Packed sub-byte CuTe descriptors (tma._PACKED, measured by test_gpu_tma_subbyte.py):
+    KIR in bytes of the byte tensor q, the dim-0 coordinate (here param1) asserted a multiple
+    of the format's granularity and converted, the packed bytes as transaction bytes; a
+    store or reduce the hardware traps on is an assert false."""
+
+    def run_q(self, dtype, dims, strides, box, body, launches=None):
+        t = launches or packed(dtype, dims, strides, box)
+        p = [("tmap", "t", t), ("b32", "n", 7)]
+        body = PRE.format(n=1) + TMAP64 + body.replace("{%r7, %r5}", "{%r5, %r7}")
+        return run(body, p, "cute", {"q": 1}, launches=len(launches or [0]))
+
+    def check_load(self, dtype, strides, box, kir_box, row, n, cols):
+        f = self.run_q(dtype, [256, 64], strides, [128, 16], LOAD.format(nbytes=0))
+        self.assertEqual(f.refusals, [])
+        d = f.descs["tma0_q"]
+        self.assertEqual((d["box"], d["elem_bytes"]), (kir_box, 1))  # tx: prod(box)
+        self.assertEqual(f.values[0]["tma0_q.shape.1"], row)  # dim-0 extent in bytes
+        (check,) = [s for s in statements(f.roles[0]["body"]) if s["op"] == "assert"]
+        self.assertIn(f"not a multiple of {box} {dtype} elements", check["msg"])
+        self.assertEqual(check["cond"]["a"]["o"], "srem")  # on the format's coordinate
+        self.assertEqual(check["cond"]["a"]["b"]["v"], box)
+        got = footprints(f, {**f.values[0], "param1": n})
+        # rows 32..47 (dim-1 coordinate 32, 16 box rows), the byte columns of the box
+        want = sorted(r * strides[0] + c for r in range(32, 48) for c in cols)
+        self.assertEqual([g[2] for g in got if g[0] == "gload"], [want])
+        self.assertEqual(kir_errors(f, {"q": 1}), [])
+
+    def test_align8b_load(self):
+        # 128 4-bit elements = 64 bytes a row; element column 64 is byte 32
+        self.check_load("16U4_ALIGN8B", [128], 32, [16, 64], 128, 64, range(32, 96))
+
+    def test_align16b_load(self):
+        # packed bytes too (its shared-memory copy is twice as wide); granularity 128
+        self.check_load("16U4_ALIGN16B", [128], 128, [16, 64], 128, 128, range(64, 128))
+
+    def test_u6_load(self):
+        # 6-bit: 128 elements = 96 bytes; element column 128 is byte 96 (x 3 / 4)
+        self.check_load("16U6_ALIGN16B", [192], 128, [16, 96], 192, 128, range(96, 192))
+
+    def test_store_and_reduce(self):
+        f = self.run_q("16U4_ALIGN8B", [256, 64], [128], [128, 16], STORE + REDUCE)
+        self.assertEqual(f.refusals, [])
+        self.assertEqual([e["ev"] for e in events(f)][1:], ["gstore"])
+        traps = [s for s in statements(f.roles[0]["body"]) if s["op"] == "assert"
+                 and s["cond"] == {"e": "const", "w": 1, "v": 0}]  # fmt: skip
+        self.assertEqual(len(traps), 1)
+        self.assertIn("TMA reduce through tma0_q, a 16U4_ALIGN8B descriptor: the hardware traps",
+                      traps[0]["msg"])  # fmt: skip
+        f = self.run_q("16U4_ALIGN16B", [256, 64], [128], [128, 16], STORE)
+        self.assertEqual([e["ev"] for e in events(f)][1:], [])
+        self.assertIn("TMA store through tma0_q, a 16U4_ALIGN16B descriptor",
+                      [s for s in statements(f.roles[0]["body"]) if s["op"] == "assert"][-1]["msg"])  # fmt: skip
+
+    def test_launches_with_two_formats_refused(self):
+        two = [
+            packed(dt, [256, 64], [128], [128, 16])
+            for dt in ("16U4_ALIGN8B", "16U4_ALIGN16B")
+        ]
+        f = self.run_q(None, None, None, None, LOAD.format(nbytes=0), launches=two)
+        self.assertIn("differ in the descriptor's box or format", f.refusals[0]["msg"])
+
+    def test_triton_and_in_kernel_packed_refused(self):
+        p = [("tmap", "desc_x", {**META, "host_dtype": 14})] + TTGIR_PARAMS[1:]
+        f = run(PRE.format(n=5) + TMAP32 + LOAD.format(nbytes=4096), p)
+        self.assertIn("packed sub-byte Triton descriptor", f.refusals[0]["msg"])
+        u4 = fill(0, 0, 20, 0).replace("[%rd15], 0xa;", "[%rd15], 0xd;")
+        f = run(STAGE + u4 + use(20, 21), KP, tensors=KT)
+        self.assertIn("elemtype 13 (13-15, packed sub-byte: gap)", f.refusals[0]["msg"])
 
 
 class Refusals(unittest.TestCase):
@@ -1019,7 +1090,7 @@ class Refusals(unittest.TestCase):
             + mc,
             TTGIR_PARAMS,
         )
-        self.assertIn("M3", f.refusals[0]["msg"])
+        self.assertIn("multicast TMA load outside a cluster", f.refusals[0]["msg"])
 
     def test_generic_access_through_parameters(self):
         f = run(

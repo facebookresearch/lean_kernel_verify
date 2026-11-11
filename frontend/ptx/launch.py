@@ -191,8 +191,9 @@ def kir_desc(d: dict, elem_bytes: int) -> dict:
     (ops_mem.py, `pack`), and a dtype wider than the element in elements (`scale`). The
     transaction bytes of one TMA are prod(box) * elem_bytes: for the packed formats the
     packed global bytes, also for 16U4_ALIGN16B / 16U6_ALIGN16B whose shared-memory copy
-    expands. Callers convert a dim-0 TMA coordinate c the same way, asserting
-    c % den == 0 at runtime."""
+    expands (measured: tests/ptx/test_gpu_tma_subbyte.py). Callers convert a dim-0 TMA
+    coordinate c the same way, asserting c % den == 0 at runtime (a packed format: the
+    coarser multiple the hardware takes, tma._PACKED)."""
     if d["interleave"] != "NONE" or any(e != 1 for e in d["estrides"]):
         raise LaunchError(
             f"TMA descriptor with interleave {d['interleave']}, element strides "

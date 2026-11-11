@@ -68,6 +68,10 @@ Policy (a dict; `policy()` fills the family defaults):
     tensors         {tensor: {"elem_bytes"}} of the tensors the pointer params name
                     (CuTe: optionally the first launch's "shape" and "strides", which
                     pick the base of a descriptor over an aliased tensor, tma.py)
+    p1              True: the P1 pass (CuTe only, tmem.py): the roles also carry the
+                    tmem, tmem_wait and named_bar events of P1-1, a role whose warps
+                    issue an mbarrier wait, arrive or commit only in part is split, and
+                    Facts.tmem is set (refusals tagged R1-R10)
     work            {"fields": [name, ...], "mode": "gate" (TTGIR) | "each" (CuTe),
                     "per": [fields naming tensor segments], "sites": anchor sites}: a
                     site is anchors.Site or a dict {field, kind: "load" | "assign" |
@@ -100,6 +104,8 @@ Facts (refusals non-empty: the variant is refused, everything else empty):
     clc        the bodies use CLC (sync.py): the assembly declares __clc_response,
                __clc_schedule and __clc_launched and makes the per-schedule inputs, as
                frontend/ttgir/to_kir.py build does for its Translator's uses_clc
+    tmem       the P1 pass: the P1 KIR's top-level `tmem` {"cols", "base"}, None if the
+               kernel allocates and accesses no TMEM (P1-1 has nothing to check)
     refusals   [{"kind": "gap" | "error", "msg"}]; an exception of the core is an "error"
                refusal (at the instruction being translated, if any), never raised
 
@@ -124,6 +130,7 @@ if __package__ in (None, ""):  # python3 -I path/to/translate.py
 
 from . import (  # noqa: E402
     cfg as C,
+    cluster,
     interp,
     mem as M,
     ops,
@@ -131,6 +138,7 @@ from . import (  # noqa: E402
     regions as R,
     sync,
     tma,
+    tmem,
 )
 
 DEFAULTS = {
@@ -166,6 +174,7 @@ class Facts:
     clc: bool = False
     descs: dict = field(default_factory=dict)
     values: list = field(default_factory=list)
+    tmem: dict | None = None
     refusals: list = field(default_factory=list)
 
 
@@ -181,7 +190,7 @@ def translate(ptx_text: str, entry: str, launch_records: list, pol: dict) -> Fac
         facts.refusals.append({"kind": "error", "msg": f"{type(e).__name__}: {e}"})
     if facts.refusals:
         facts.roles, facts.barriers, facts.tensors, facts.params = [], [], {}, {}
-        facts.descs, facts.values = {}, []
+        facts.descs, facts.values, facts.tmem = {}, [], None
     return facts
 
 
@@ -196,15 +205,26 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
     if pol["family"] == "ttgir" and facts.cluster != (1, 1, 1):
         raise interp.Unsupported("launch", fn.name, f"cluster {facts.cluster}: Triton kernels with "
                             "clusters are not in v1 (design §1.3)")  # fmt: skip
+    tcgen05 = any(i.opcode.startswith("tcgen05.") for i in fn.instructions())
+    p1 = tmem.P1() if pol.get("p1") and tcgen05 else None  # interp.Kernel.p1
+    if p1 is not None and pol["family"] != "cute":
+        raise interp.Unsupported("P1", fn.name, "P1-1 on Triton kernels is M5 (D3)")
     cfg = C.build(fn)
     roles, _dispatch = C.roles(cfg)
     locs, srclocs = _locs(fn, pol)
     shared = {v.name for v in module.vars if v.space == "shared"}
+    align = {v.name: v.align for v in module.vars + fn.vars if v.space == "shared"}
     mem = M.Memory(
         cfg,
         pol["params"],
         pol["tensors"],
-        {**pol, "shared_symbols": shared, "records": records, "target": facts.target},
+        {
+            **pol,
+            "shared_symbols": shared,
+            "records": records,
+            "target": facts.target,
+            "shared_align": align,  # cluster.py: the peer-bit mask
+        },
     )
     work = pol.get("work") or {}
     k = interp.Kernel(fn, mem, locs, facts.block, facts.cluster, pol["max_iters"],
@@ -212,7 +232,7 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
                  work=_sites(fn, work.get("sites", ())),
                  work_fields=tuple(work.get("fields", ())), work_mode=work.get("mode", "gate"),
                  work_per=tuple(work.get("per", ())),
-                 srclocs=srclocs)  # fmt: skip
+                 srclocs=srclocs, p1=p1)  # fmt: skip
     translators = []
     for role in roles:
         tree = R.build(cfg, role)
@@ -224,6 +244,7 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
         translators += _role(k, tree, role.name, warps[0], len(warps), pol)
     facts.barriers = mem.barriers(translators)
     facts.clc = sync.finish(translators)
+    facts.tmem = p1.top(translators) if p1 is not None else None
     for tr in translators:
         name = (
             tr.name
@@ -277,6 +298,7 @@ def _role(k, tree, name, w0, nw, pol) -> list:
         if k.work_mode == "each" and k.work_fields:  # fields are -1 until an anchor
             tr.stmts[:0] = [{"op": "let", "var": f"work_{f}", "expr": {"e": "const", "w": 64, "v": -1}}
                             for f in k.work_fields]  # fmt: skip
+        tr.stmts[:0] = cluster.prologue(tr)  # the role's cluster barrier parity
         if out and _idle(out[-1]) and _idle(tr) and out[-1].w0 + out[-1].nw == a:
             out[-1].nw += n  # warps that only park, split by LLVM's branches: one role
             continue

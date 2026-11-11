@@ -40,8 +40,9 @@ LKV_FRONTEND=ptx translates each variant's PTX instead of steps 1-4 (translate_p
 PTX core's Facts, frontend/ptx/translate.py, assembled by PtxVariant with Variant's
 tensors, inputs, checks and report: parameters named by the LaunchRecords' jit_params,
 TMA descriptors as KIR desc tensors, LLVM's unrolled blocks rerolled into `for`s; KIR
-`ir` "ptx"; the P1 pass comes with M3 of the PTX frontend); unset or "legacy" is the
-translation above, unchanged. Under DSL 4.4.2 only the PTX's line numbers are trusted
+`ir` "ptx"; step 6 translates the PTX again with the P1 pass, frontend/ptx/tmem.py,
+translate_p1_ptx); unset or "legacy" is the translation above, unchanged. Under DSL
+4.4.2 only the PTX's line numbers are trusted
 (PTX_LOCS), so a translated variant's report.json entry has "loc_quality": "line_only"
 (lkv.py marks the report's lines best effort).
 
@@ -886,9 +887,13 @@ def _ptx(module: str):
     )
 
 
-def translate_ptx(case: dict, dump: dict, recs: list, launches: list, las: list):
+def translate_ptx(
+    case: dict, dump: dict, recs: list, launches: list, las: list, p1: bool = False
+):
     """(PtxVariant, KIR) of the variant compiled by `recs` (one initial-MLIR digest) from
-    its PTX and the LaunchRecords of its launches `las` (named in `launches`)."""
+    its PTX and the LaunchRecords of its launches `las` (named in `launches`). With `p1`
+    the P1 pass (policy p1): the KIR also has the P1-1 events and, unless the kernel
+    allocates and accesses no TMEM, the top-level `tmem`."""
     T, anchors = _ptx("translate"), _ptx("anchors")
     locs = PTX_LOCS.get(dump["dsl"]["version"])
     if locs is None:
@@ -906,14 +911,17 @@ def translate_ptx(case: dict, dump: dict, recs: list, launches: list, las: list)
     per = sorted({t["segments"]["per"] for t in notes.values() if t.get("segments")})
     pol = T.policy("cute", src_root=dump["source"]["src"], params=table, **locs, ptxas=_ptxas(recs[0]),
                    tensors={n: {"elem_bytes": t["elem_bytes"], **t["first"]} for n, t in v.k.tensors.items()},
-                   max_iters=int(case.get("max_iters", 4096)),
+                   max_iters=int(case.get("max_iters", 4096)), p1=p1,
                    work={"fields": list(work), "mode": "each", "per": per, "sites": sites})  # fmt: skip
     facts = T.translate(text, fn.name, records, pol)
     if facts.refusals:
         where = Path(recs[0]["ptx"]["file"]).name
         refusal = facts.refusals[0]
         raise Unsupported("PTX", where, refusal["msg"], kind=refusal["kind"])
-    return v, v.assemble(facts, table, launches, records)
+    obj = v.assemble(facts, table, launches, records)
+    if facts.tmem is not None:
+        obj["tmem"] = facts.tmem
+    return v, obj
 
 
 def _ptxas(rec: dict) -> str | None:
@@ -944,14 +952,16 @@ def ptx_writer(case: dict, dump: dict, recs: list, launches: list, las: list):
     return v
 
 
-def _p1_ptx(rec: dict) -> dict:
-    """The P1 entry of a variant translate_ptx translated: no P1 pass before M3, so a
-    kernel without tcgen05 has nothing for P1-1 to check (what the legacy pass finds), any
-    other is not checked."""
-    if "tcgen05." in Path(rec["ptx"]["file"]).read_text():
-        return {"status": "refused", "error": "P1-1 comes with M3 of the PTX frontend"}
-    return {"status": "not_applicable",
-            "error": "the kernel allocates and accesses no tensor memory"}  # fmt: skip
+def translate_p1_ptx(
+    case: dict, dump: dict, recs: list, launches: list, las: list
+) -> dict | None:
+    """The P1 KIR of a variant translate_ptx translated (to_kir step 6): its PTX
+    translated again by the P1 pass (frontend/ptx/tmem.py); None if the kernel allocates
+    and accesses no TMEM (a PTX without tcgen05 is not translated again)."""
+    if "tcgen05." not in Path(recs[0]["ptx"]["file"]).read_text():
+        return None
+    _v, obj = translate_ptx(case, dump, recs, launches, las, p1=True)
+    return obj if "tmem" in obj else None
 
 
 def _ptx_variant(case: dict, dump: dict, recs: list, launches: list, las: list):
@@ -1584,11 +1594,13 @@ def run(case_path: Path, out: Path, p1: bool = True) -> list:
         if ptx and PTX_LOCS[entry["dsl"]]["loc_mode"] == "line_only":
             # lkv.py marks the report's source lines best effort
             entry["loc_quality"] = "line_only"
-        if p1 and ptx:
-            entry["p1"] = _p1_ptx(rec)
-        elif p1:
+        if p1:
             try:
-                obj1 = translate_p1(case, dump, rec, launches)
+                obj1 = (
+                    translate_p1_ptx(case, dump, recs, launches, las)
+                    if ptx
+                    else translate_p1(case, dump, rec, launches)
+                )
                 entry["p1"] = (
                     {
                         "status": "not_applicable",

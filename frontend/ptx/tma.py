@@ -101,14 +101,23 @@ ptxas may lower it otherwise; and its target (policy `target`, the PTX .target) 
 ISSUE_TARGETS: sm_100 only until the GB300 run of the hardware test validates sm_103.
 Scope is one warp (the ptxas loops are per warp); the mbarrier of a load must be the
 same for every lane, and a load one thread issues may have lane-dependent operands. Not
-measured, so still gaps: multicast, cta_group::2, im2col/gather4 (op table),
-shared::cluster bulk copies; prefetch is a drop.
+measured: multicast and cta_group::2 TMA loads and shared::cluster bulk copies, translated
+only where one lane of each warp issues them (cluster.py); prefetch is a drop.
 Transaction bytes (P0-4): the KIR box x elem_bytes, including out-of-bounds fill; packed
-sub-byte formats count their packed bytes (launch.kir_desc), as the CuTe frontend.
+sub-byte formats count their packed global bytes (launch.kir_desc), as the CuTe frontend,
+also 16U4_ALIGN16B / 16U6_ALIGN16B whose shared-memory copy is wider, and also into each
+CTA of a multicast and (twice) on a cta_group::2 leader's mbarrier (measured on sm_100a:
+tests/ptx/test_gpu_tma_subbyte.py). Their footprints are in bytes too; the hardware traps
+on a dim-0 coordinate that is not a multiple of 32 (16U4_ALIGN8B) or 128 (the 16-byte
+aligned formats) elements, on any reduce and on a 16U4_ALIGN16B store: a KIR assert per
+issuing thread (_PACKED). A packed Triton or in-kernel descriptor is a gap.
 Coordinates: PTX lists them innermost first, KIR outermost first (all of shape, strides,
 box, coords reversed); i32, signed. mark_addr (translate.py) marks them like the offsets.
-cta_group::2, multicast and a cluster of several CTAs are M3 (gaps); im2col and gather4
-are refused by the op table.
+Clusters (cluster.py): a load's destination is the issuing CTA's shared memory; a TMA
+load's multicast mask is the tma_load's cta_mask and its pair leader's mbarrier (peer bit
+cleared, .cta_group::2) its leader; a shared::cluster bulk copy into another CTA is a
+complete_tx there; a multicast bulk copy is refused, as by the CuTe frontend. im2col and
+gather4 are refused by the op table.
 """
 
 import itertools
@@ -116,7 +125,7 @@ import re
 import struct
 from dataclasses import dataclass, field
 
-from . import expr as E, launch, ops
+from . import cluster, expr as E, launch, ops
 from .interp import Data, Translator
 
 PREFIXES = ("cp.async.bulk", "cp.reduce.async.bulk", "tensormap.")  # mem.py routes here
@@ -127,9 +136,23 @@ ISSUE_PTXAS = frozenset({"12.9.83", "13.3.27", "13.3.33", "13.0.88", "12.8.93"})
 # ... and the targets it was measured on (GB200); sm_103 once test_gpu_tma_issue.py passes
 # on GB300 (design D15, GPU test (c)).
 ISSUE_TARGETS = frozenset({"sm_100"})
+# The packed sub-byte CUtensorMap formats, as measured on sm_100a (GB200, driver 13000:
+# tests/ptx/test_gpu_tma_subbyte.py) -> (the multiple of the format's elements a dim-0 TMA
+# coordinate must be, the TMA kinds through such a descriptor). Any other coordinate or
+# kind traps (CUDA_ERROR_ILLEGAL_INSTRUCTION): 32 elements are the 16 global bytes every
+# format's dim-0 coordinate must be aligned to; the 16-byte-aligned formats need 128 (the
+# only box width their encoder accepts); none reduces, and 16U4_ALIGN16B does not store.
+# Trust item: a plain format traps too off that 16-byte grid (measured for UINT8 at
+# dim-0 coordinates 1, 3 and 17), which is not asserted (nor by either legacy frontend):
+# such a copy is modeled as performed, its footprint and bytes counted.
+_PACKED = {
+    "16U4_ALIGN8B": (32, ("load", "store")),
+    "16U4_ALIGN16B": (128, ("load",)),
+    "16U6_ALIGN16B": (128, ("load", "store")),
+}
 # tensormap.replace elemtype codes (ISA tensormap.replace: .u8 .u16 .u32 .s32 .u64 .s64
 # .f16 .f32 .f32.ftz .f64 .bf16 .tf32 .tf32.ftz) -> bytes; 13-15 (packed sub-byte) are
-# not in the M2 kernels.
+# not in the M3 kernels (refused).
 _ELEMTYPE_BYTES = {0: 1, 1: 2, 2: 4, 3: 4, 4: 8, 5: 8, 6: 2, 7: 4, 8: 4, 9: 8, 10: 2,
                    11: 4, 12: 4}  # fmt: skip
 _REDUCE_BITS = {"f16": 16, "bf16": 16, "f32": 32, "f64": 64, "u32": 32, "s32": 32,
@@ -153,6 +176,7 @@ class Desc:
     off: tuple = E.const(0, 64)
     ratio: tuple = (1, 1)  # dim 0 coordinate -> KIR units: x * num / den
     empty: bool = False  # no element inside its extents in any launch
+    packed: str | None = None  # its packed sub-byte CUtensorMap format (_PACKED)
     uses: set = field(default_factory=set)
     msg: list | None = None  # the hardware box when `box` is a block of boxes
 
@@ -238,12 +262,12 @@ class Tma:
             return self._replace(tr, i, mn)
         if mn.startswith("tensormap.cp_fenceproxy"):
             return self._cp_fenceproxy(tr, i, mn)
-        if (
-            "multicast" in mn
-            or "cta_group::2" in mn
-            or ("shared::cluster" in mn and tuple(tr.k.cluster) != (1, 1, 1))
-        ):
-            tr.fail(i, f"{mn} (gap: clusters, multicast and cta_group::2 are M3)")
+        if mn.startswith("cp.async.bulk.shared::cluster.shared"):  # into another CTA
+            return cluster.bulk_s2cluster(tr, i)
+        if "multicast" in mn and not mn.startswith("cp.async.bulk.tensor"):
+            tr.fail(i, f"{mn} (gap: a multicast bulk copy, as in the CuTe frontend)")
+        if ".global.mbarrier" in mn:  # a load: into the issuing CTA (cluster.py)
+            cluster.own_cta(tr, i, 0, "the copy destination")
         if mn.startswith("cp.async.bulk.tensor") and ".global.mbarrier" in mn:
             return self._tensor_load(tr, i)
         if mn.startswith(("cp.async.bulk.tensor", "cp.reduce.async.bulk.tensor")):
@@ -254,7 +278,7 @@ class Tma:
             return self._bulk_out(tr, i, "gstore")
         if mn.startswith("cp.reduce.async.bulk.global.shared"):
             return self._bulk_out(tr, i, "gatomic")
-        tr.fail(i, f"{mn} (gap: a shared::cluster bulk copy is M3)")
+        tr.fail(i, f"{mn} (gap: no TMA or bulk copy rule)")
 
     # ------------------------------------------------------------------ TMA
     def _tensor_load(self, tr: Translator, i) -> None:
@@ -267,12 +291,12 @@ class Tma:
                 "TMA load through an in-kernel descriptor (gap: not in the M2 kernels)",
             )
         coords = self._coords(tr, i, d, i.operands[1])
+        sym, off, extra = cluster.load_slot(tr, i)  # its cta_mask and leader
         lanes = self._lanes(tr, i, "TMA load") or _one_thread(tr)
-        sym, off = self.mem._smem(tr, i, i.operands[2])
         if d.msg is not None and not self._message(tr, i, d, d.msg, coords, (sym, off)):
             return  # a later message of a block: its first stands for it
         tr.barrier_event("tma_load", sym, off, "thread", lanes=lanes, desc=d.name,
-                         coords=coords)  # fmt: skip
+                         coords=coords, **extra)  # fmt: skip
         d.uses.add("tma_load")
         if self.footprint:
             self._footprint(tr, i, "gload", d, coords, None)
@@ -284,6 +308,10 @@ class Tma:
         ops_ = i.operands
         d = self._desc(tr, i, ops_[0])
         coords = self._coords(tr, i, d, ops_[0])
+        if d.packed and ("reduce" if reduce else "store") not in _PACKED[d.packed][1]:
+            tr.require(E.const(0, 1), f"TMA {'reduce' if reduce else 'store'} through "
+                       f"{d.name}, a {d.packed} descriptor: the hardware traps")  # fmt: skip
+            return
         if d.msg is not None:
             ev = "tma_reduce" if reduce else "tma_store"
             origin = self._threads_block(tr, d, d.msg, coords)
@@ -315,7 +343,9 @@ class Tma:
 
     def _coords(self, tr: Translator, i, d: Desc, op) -> list:
         """The coordinates in KIR order and units (i32): reversed, dim 0 (KIR last) times
-        num / den of the descriptor's dim0_ratio, asserted byte aligned when den > 1."""
+        num / den of the descriptor's dim0_ratio, asserted a whole number of KIR elements
+        when den > 1; for a packed sub-byte format asserted the multiple of its elements
+        the hardware takes (_PACKED; it traps on any other), which also makes it whole."""
         if op[3] is None or op[3][0] != "vec" or op[2]:
             tr.fail(i, "TMA tensor operand is not [descriptor, {coordinates}]", "error")
         cs = [E.resize(tr.as_int(tr.operand_value(c, 32), "a TMA coordinate"), 32)
@@ -327,12 +357,18 @@ class Tma:
                 "error",
             )
         num, den = d.ratio
+        if d.packed:  # a multiple of den too (kir_desc's den is 2, 4 or at most 32)
+            g = _PACKED[d.packed][0]
+            tr.require(E.cmp("eq", E.bin("srem", cs[-1], E.const(g, 32)), E.const(0, 32)),
+                       f"packed sub-byte TMA coordinate is not a multiple of {g} "
+                       f"{d.packed} elements (the hardware traps)")  # fmt: skip
         if num > 1:
             cs[-1] = E.bin("mul", cs[-1], E.const(num, 32))
         if den > 1:
             k = E.const(den, 32)
-            tr.require(E.cmp("eq", E.bin("srem", cs[-1], k), E.const(0, 32)),
-                       "packed sub-byte TMA coordinate is not byte aligned")  # fmt: skip
+            if not d.packed:
+                tr.require(E.cmp("eq", E.bin("srem", cs[-1], k), E.const(0, 32)),
+                           "packed sub-byte TMA coordinate is not byte aligned")  # fmt: skip
             cs[-1] = E.bin("sdiv", cs[-1], k)
         return cs
 
@@ -521,6 +557,11 @@ class Tma:
         # TTGIR: the tensordesc value and the kernel's own shape/stride params
         if self.names == "param":
             vals = [r["value"] for r in recs]
+            # e.g. fp4_padded (packed sub-byte host dtypes 13-15)
+            if any(v.get("host_dtype") in (13, 14, 15) for v in vals):
+                raise launch.LaunchError(
+                    "a packed sub-byte Triton descriptor (gap, design §5.1)"
+                )
             if len({(tuple(v["box"]), v["elem_size"]) for v in vals}) != 1:
                 raise launch.LaunchError("launches differ in the descriptor's box")
             rank = len(vals[0]["box"])
@@ -553,7 +594,10 @@ class Tma:
             else max(1, decs[0]["elem_bits"] // 8)
         )
         kds = [launch.kir_desc(d, eb) for d in decs]
-        if len({(tuple(kd["box"]), kd["dim0_ratio"]) for kd in kds}) != 1:
+        fmts = {
+            (tuple(kd["box"]), kd["dim0_ratio"], d["dtype"]) for kd, d in zip(kds, decs)
+        }
+        if len(fmts) != 1:
             raise launch.LaunchError(
                 "launches differ in the descriptor's box or format"
             )
@@ -566,7 +610,8 @@ class Tma:
         offs = [0 if base is None else _elem_off(r["tensormap"], base) for r in recs]
         off = E.const(0, 64) if not any(offs) else self._synthetic(f"{name}.off", offs)
         return Desc(name, "host", base, eb, kds[0]["box"], shape, strides, off,
-                    tuple(kds[0]["dim0_ratio"]), empty)  # fmt: skip
+                    tuple(kds[0]["dim0_ratio"]), empty,
+                    decs[0]["dtype"] if decs[0]["dtype"] in _PACKED else None)  # fmt: skip
 
     def _assign(self) -> dict:
         """The base of each descriptor whose address aliases several jit names: one
@@ -741,7 +786,13 @@ class Tma:
             ):
                 tr.fail(i, f"in-kernel descriptor with an {x} other than "
                            f"{1 if x == 'element_stride' else 0} (KIR boxes are dense)")  # fmt: skip
-        eb = _ELEMTYPE_BYTES.get(_const(tr, i, f[("elemtype", None)], "elemtype"))
+        code = _const(tr, i, f[("elemtype", None)], "elemtype")
+        eb = _ELEMTYPE_BYTES.get(code)
+        if eb is None:
+            tr.fail(
+                i,
+                f"in-kernel descriptor of elemtype {code} (13-15, packed sub-byte: gap)",
+            )
         p = _peel(f[("global_address", None)])
         if (
             p is None
@@ -750,7 +801,7 @@ class Tma:
         ):
             tr.fail(i, "in-kernel descriptor whose global address is no kernel tensor")
         base = p[0][2][3:]
-        if eb is None or eb != self.mem.tensors[base]["elem_bytes"]:
+        if eb != self.mem.tensors[base]["elem_bytes"]:
             tr.fail(
                 i,
                 f"in-kernel descriptor elemtype ({eb} bytes) differs from {base}'s elements",

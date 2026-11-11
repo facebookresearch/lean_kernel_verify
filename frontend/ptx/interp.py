@@ -21,6 +21,9 @@ Registers are mutable slots, not SSA values: `env` maps each register to
     descriptor: its value depends on where the buffer is).
     Data reaching a root (an event operand, a branch condition, an address, a predicate,
     a barrier field, a work anchor) is the slice soundness error, named by its origin.
+    WarpData is Data known to be the same in all lanes of each warp (a vote.sync of
+    data, and integer operations of it with values uniform per warp): a branch on it
+    keeps each warp together (Translator._inert).
 Nothing is emitted for a value until a root needs it (so dead integer code costs
 nothing): then each thread-uniform subexpression an instruction computed is bound by a
 `let` at that instruction's loc, before the root. Bindings are scoped like KIR
@@ -60,14 +63,16 @@ them (mem_event). The holes of the CuTe frontend are closed (design §5.4.1):
      per warp when the mask depends on runtime values).
 """
 
+import itertools
 import re
 from dataclasses import dataclass, field
 from typing import NoReturn, TYPE_CHECKING
 
 from . import expr as E, ops, parse, regions as R
 
-if TYPE_CHECKING:  # mem.py imports this module
+if TYPE_CHECKING:  # mem.py and tmem.py import this module
     from .mem import Memory
+    from .tmem import P1
 
 _LANES = tuple(range(32))
 
@@ -96,6 +101,11 @@ class Data:
     origin: str
 
 
+@dataclass(frozen=True)
+class WarpData(Data):
+    """Data that is the same in all lanes of each warp (module doc)."""
+
+
 @dataclass
 class Kernel:
     """State shared by the roles of one kernel (mem.Memory holds the memory model)."""
@@ -117,6 +127,7 @@ class Kernel:
     )  # expression -> (loc, line) of its instruction
     srclocs: dict = field(default_factory=dict)  # id(instr) -> (source path, line)
     elects: dict = field(default_factory=dict)  # id(elect.sync) -> its elect symbol
+    p1: "P1 | None" = None  # the P1 pass's events (translate.py, tmem.py), else None
 
 
 # An mbarrier event awaiting its array (mem.Memory.barriers): the KIR event (bar and idx
@@ -562,13 +573,16 @@ class Translator:
         del self.created[nc:]
 
     # ------------------------------------------------------------ regions
-    def run(self, seq: list, inherit: bool = True) -> None:
+    def run(self, seq: list, inherit: bool = True, stop=None) -> None:
         """Translate a region sequence of regions.py. Its work fields start as those the
         enclosing region defined so far (a branch arm: LLVM sinks a field's computation
         into the branch that uses it, e.g. TLX's off_h below `if start_m >= seqlen`), or
-        none (inherit False: a loop body, as TTGIR's blocks)."""
+        none (inherit False: a loop body, as TTGIR's blocks). `stop()` (_inert's trials)
+        ends it early, checked after each node."""
         self.work_scopes.append(dict(self.work_scopes[-1]) if inherit else {})
         for node in seq:
+            if stop is not None and stop():
+                break
             if isinstance(node, R.Block):
                 for i in node.instrs:
                     self.step(i)
@@ -650,16 +664,92 @@ class Translator:
         return E.not1(c) if neg else c
 
     def run_if(self, node: R.If) -> None:
+        assert node.branch.guard is not None, "regions.py: an If is a guarded bra"
+        if isinstance(self.env.get(node.branch.guard[0]), Data) and self._inert(node):
+            return
         c = self._cond(node)
         cu = self.uniform(c)
         if cu is not None and E.is_const(cu):
             self.run(node.then if cu[2] else node.else_)
             return
         if cu is None:
-            self.split_per_warp(c)
-            self._masked_if(node, c)
+            if not (
+                self.k.split and self.per_warp(c) is not None and self._inert(node, c)
+            ):
+                self.split_per_warp(c)
+                self._masked_if(node, c)
         else:
             self._uniform_if(node, cu)
+
+    def _inert(self, node: R.If, c=None) -> bool:
+        """A branch whose arms emit nothing controls no event, so its condition is no root
+        (design §5.5: control dependence; the CuTe frontend's slicer drops such an `if`):
+        on data (c None; e.g. a 2-CTA CuTe kernel's `if tmem_addr != 0: trap()`, trap
+        not being modeled) the registers its arms set differently are Data at the join;
+        on the warp (c) it splits no role (a 2-CTA CuTe kernel's `if warp == 1:` of
+        shared stores only), its arms run under the mask and merge by select; if one arm
+        emits nothing and the other splits the role at a branch on the warp inside it,
+        that split is the role's (LLVM merged `if warp == 0: init` into the else arm,
+        which the CuTe frontend splits at alone). Else False, with nothing changed (also
+        the kernel's binding origins, collective checks and lets hoisted before the
+        loop: the snapshot keeps the current statement list only): the branch is
+        translated as before. On the warp, arms that both may emit (_effects) are not
+        tried, and a trial ends at the first node that emits: it would translate whole
+        roles only to fail. On data, only arms that set registers alone are tried
+        (_register_only), as the trial runs them under the enclosing mask: the memory
+        and P1 models keep state outside the snapshot, and their rules (the H3 and
+        .aligned checks among them) read the mask; an arm the trial refuses leaves the
+        refusal to the branch condition (as before the trials)."""
+        if not self._tried(node, c):
+            return False
+        snap = self.snapshot()
+        base = (snap[0], snap[1], snap[8])  # statements, barrier uses, work events
+
+        def emitted() -> bool:  # an arm that emits ends its trial
+            now = (len(self.stmts), len(self.barriers), self.work_events)
+            return self.pending is not None or now != base
+
+        checked, nkeys = dict(self._uniform_checked), len(self.k.origin)
+        hoisted = self.hoist[-1][0] if self.hoist else []
+        nhoisted = len(hoisted)
+        env0, saved, arms = self.env, self.mask, []
+        for seq, m in ((node.then, c), (node.else_, None if c is None else E.not1(c))):
+            self.env = dict(env0)
+            self.mask = saved if m is None else E.and1(saved, m)
+            try:
+                self.run(seq, stop=emitted)
+                self.flush()
+                arms.append(None if emitted() else self.env)
+            except (Unsupported, SplitWarps) as e:
+                if c is None and isinstance(e, SplitWarps):
+                    raise
+                arms.append(e)
+            finally:
+                self.mask = saved
+            self.restore(snap)
+            del hoisted[nhoisted:]
+        if all(isinstance(a, dict) for a in arms):
+            self.env = dict(env0)
+            for r in self._live(node):
+                x, y = arms[0].get(r), arms[1].get(r)
+                self.env[r] = (self._select(c, x, y, r) if c is not None else x if x is y
+                               else Data(f"{r} set under a data condition at {self.loc(node.branch)}"))  # fmt: skip
+            return True
+        self._uniform_checked = checked
+        for x in list(itertools.islice(self.k.origin, nkeys, None)):
+            del self.k.origin[x]
+        split = [a for a in arms if isinstance(a, SplitWarps)]
+        if len(split) == 1 and any(isinstance(a, dict) for a in arms):
+            raise split[0]
+        return False
+
+    def _tried(self, node: R.If, c) -> bool:
+        """Whether _inert tries the arms of node (c None: its condition is data)."""
+        if c is not None:
+            return not (_effects(node.then) and _effects(node.else_))
+        guard = node.branch.guard  # never None (regions.py: an If is a guarded bra)
+        warp = guard is not None and isinstance(self.env.get(guard[0]), WarpData)
+        return all(_register_only(arm, warp) for arm in (node.then, node.else_))
 
     def _live(self, node: R.If):
         """The registers to merge at the join of an If. A join CONTINUE (BREAK) is the
@@ -759,12 +849,14 @@ class Translator:
         while True:
             snap = self.snapshot()
             try:
-                body, slots, go = self._loop_once(
+                body, slots, go, exits = self._loop_once(
                     node, carried, kinds, caps, seeds, counted
                 )
                 break
             except _Widen:
                 self.restore(snap)
+        inside = set(self.created[snap[5] :])  # the names the loop made, its `for` var
+        inside |= {counted[5]} if counted is not None else set()
         if counted is None:
             cond = self.json(E.cmp("ne", self.read(go), E.const(0, 32)))
             self.stmts.append({"op": "while", "cond": cond, "body": body,
@@ -774,12 +866,20 @@ class Translator:
             self.stmts.append({"op": "for", "var": var, "lb": _c32(lb), "ub": _c32(ub),
                                "step": _c32(step), "body": body, "loc": self.loc(head)})  # fmt: skip
             self.env[reg] = E.const(lb + -(-(ub - lb) // step) * step, 32)
-        for r, s in zip(carried, slots):
+        for k, (r, s) in enumerate(zip(carried, slots)):
             self.env[r] = (
                 self.read(s)
                 if s is not None
                 else Data(f"{r} after the loop at {self.loc(head)}")
             )
+            # P1 pass (tmem.py: TMEM addresses must be warp-uniform): a register read
+            # after the loop only that every edge leaves at one loop-invariant value
+            # (LLVM rematerializes `mov r, %tid.x` in the loop) is that value, not its
+            # slot's (whose entry value is a placeholder, so it is a per-thread family).
+            v = exits.get(k)
+            if (self.k.p1 is not None and isinstance(v, tuple) and not E.unsafe(v)
+                    and E.free_vars(v).isdisjoint(inside)):  # fmt: skip
+                self.env[r] = v
 
     def _counted(self, node: R.Loop, carried: list):
         """(register, lb, ub, step, latch If, for variable) if the loop is the rotated
@@ -866,6 +966,7 @@ class Translator:
             slots.append(s)
             env[r] = self.read(s)
         go = None
+        exits: dict = {}  # P1: the value of each carried register at every edge, or None
         if counted is None:
             go = self.new_slot(E.const(1, 32), "u", "go")
             self.stmts += self.assign(go, E.const(1, 32))
@@ -884,6 +985,7 @@ class Translator:
                 counted[4] if counted else None,
                 live,
                 seeds,
+                exits,
             ]  # fmt: skip
         )
         try:
@@ -893,7 +995,7 @@ class Translator:
             self.hoist.pop()
             self.pop_scope(mark)
         body, self.stmts = self.stmts, saved
-        return body, slots, go
+        return body, slots, go, exits
 
     def _thread_part(self, v, base):
         """The thread-varying terms of a loop-carried value's offset from its base
@@ -920,8 +1022,9 @@ class Translator:
                 "a loop exits or continues under a thread-varying condition "
                 "(divergent loop)",
             )
-        carried, slots, go, kinds, caps, _latch, live, seeds = self.loops[-1]
+        carried, slots, go, kinds, caps, _latch, live, seeds, exits = self.loops[-1]
         values = [self.env.get(r) for r in carried]
+        _exit_values(exits, carried, live, values)  # the P1 pass reads them (run_loop)
         widened = False
         for k, (s, v) in enumerate(zip(slots, values)):
             if s is None:
@@ -1352,7 +1455,7 @@ class Translator:
         stmt: dict = {"op": "event", "ev": ev, "bar": None, "idx": None}
         per = []  # `lanes`: (field, its expressions, a list?) of each thread's own
         for key, v in fields.items():
-            if isinstance(v, str):  # a name (a tma_load's desc), as the CuTe frontend's
+            if isinstance(v, (str, bool)):  # a name (desc) or a flag (leader)
                 stmt[key] = v
                 continue
             xs = v if isinstance(v, list) else [v]
@@ -1411,6 +1514,8 @@ class Translator:
         act = self.active(var)
         if act == []:
             return None
+        if self.k.p1 is not None:  # P1 pass: split by issuing warps (tmem.py)
+            self.k.p1.issued(self, stmt["ev"], var, act)
         if per:
 
             def build(vals, j):
@@ -1532,6 +1637,8 @@ class Translator:
     # ---------------------------------------------------------- instructions
     def execute(self, i, cls: str) -> None:
         mn = ops.mnemonic(i.opcode)
+        if self.k.p1 is not None:  # P1 pass: TMEM and named-barrier events (tmem.py)
+            self.k.p1.execute(self, i, mn)
         if cls == "drop":
             if mn == "ld.shared" and i.opcode.endswith(".b128"):  # a CLC response
                 self.k.mem.execute(self, i, mn)  # (sync.py)
@@ -1565,9 +1672,12 @@ class Translator:
                 v = E.resize(v, w, False)
         if not isinstance(v, Data) and E.reserved(v) and _transformed(v):
             # Bit operations on an address (a tcgen05 smem descriptor): the value depends
-            # on where the buffer is, which the model does not know.
+            # on where the buffer is, which the model does not know; but the peer-bit
+            # mask of a CTA pair's barrier names the pair's even CTA (cluster.py).
+            from .cluster import peer  # cluster.py imports this module
+
             op = self.cur.opcode if self.cur else "?"
-            v = Data(f"an address transformed by {op} at {self.loc()}")
+            v = peer(self, v) or Data(f"an address transformed by {op} at {self.loc()}")
         if not isinstance(v, Data):
             v = self.scalarize(v)
             if v[0] not in ("const", "var", "pid", "nprog"):
@@ -1674,7 +1784,7 @@ class Translator:
             c = self.operand(i, 3, 1)
             a, b = self.operand(i, 1, w), self.operand(i, 2, w)
             if any(isinstance(x, Data) for x in (a, b, c)):
-                return [Data(f"selp of data at {self.loc(i)}")]
+                return [self._data(f"selp of data at {self.loc(i)}", (a, b, c))]
             return [E.select(c, a, b)]
         n = len(i.operands)
         if mn in ("mul.wide", "mad.wide"):
@@ -1692,8 +1802,20 @@ class Translator:
             args = [self.operand(i, k, w, signed) for k in range(1, n)]
         data = next((a for a in args if isinstance(a, Data)), None)
         if data is not None:
-            return [Data(data.origin)] * len(_dest_regs(i))
+            return [self._data(data.origin, args)] * len(_dest_regs(i))
         return [self._arith(i, mn, base, args, w, signed)]
+
+    def _data(self, origin: str, args) -> Data:
+        """The Data an integer instruction computes from `args` (None: no operand):
+        WarpData if every Data among them is and every other is uniform per warp."""
+        for a in args:
+            if isinstance(a, Data) and not isinstance(a, WarpData):
+                return Data(origin)
+        for a in args:
+            if not (a is None or isinstance(a, Data) or not E.thread_varying(a)
+                    or self.per_warp(a) is not None):  # fmt: skip
+                return Data(origin)
+        return WarpData(origin)
 
     def _arith(self, i, mn, base, args, w, signed):  # noqa: C901 (one case per opcode)
         a = args[0]
@@ -1812,7 +1934,7 @@ class Translator:
         c = self.operand(i, 3, 1) if boolop else None
         ndst = len(_dest_regs(i))
         if any(isinstance(x, Data) for x in (a, b, c)):
-            return [Data(f"setp of data at {self.loc(i)}")] * ndst
+            return [self._data(f"setp of data at {self.loc(i)}", (a, b, c))] * ndst
         op = _CMP.get((cmpop, kind == "s"))
         if (op is None or (len(i.operands) > 3) != (boolop is not None)
                 or len(mods) != 1 + (boolop is not None)):  # fmt: skip
@@ -1904,8 +2026,8 @@ class Translator:
         uni, from the predicate at each lane (frontend/cute/ops.py _ballot)."""
         self._full_mask(i, 2, f"vote.{mode}.sync")
         p = self.operand(i, 1, 1)
-        if isinstance(p, Data):
-            self.write(i.operands[0][1], p)
+        if isinstance(p, Data):  # one result for the whole warp (ISA: vote.sync)
+            self.write(i.operands[0][1], WarpData(p.origin))
             return
         if _has_elect(p):
             self.fail(
@@ -1953,6 +2075,72 @@ def _transformed(e) -> bool:
             r = True
         _TRANSFORMED[e] = r
     return r
+
+
+def _exit_values(exits: dict, carried: list, live, values: list) -> None:
+    """exits[k]: the value every edge of the loop so far leaves carried[k] at, for a
+    register not live at its header (read after the loop only); None once two differ."""
+    for k, r in enumerate(carried):
+        if r not in live:
+            exits[k] = values[k] if exits.get(k, values[k]) is values[k] else None
+
+
+def _effects(seq) -> bool:
+    """A region sequence may emit (Translator._inert): an event instruction, a wait, a
+    loop, a loop edge or an instruction without an op table row, in it or a nested If."""
+    for n in seq:
+        if isinstance(n, R.If):
+            if _effects(n.then) or _effects(n.else_):
+                return True
+        elif not isinstance(n, R.Block):
+            return True  # Loop, Wait, CONTINUE, BREAK
+        else:
+            for i in n.instrs:
+                try:
+                    if ops.classify(i)[0] == "event":
+                        return True
+                except ops.UnknownInstruction:
+                    return True
+    return False
+
+
+_TMEM_REGISTERS = ("tcgen05.ld.", "tcgen05.st.", "tcgen05.wait::")  # no P0 event
+
+
+def _register_only(seq, warp: bool) -> bool:
+    """A region sequence that only sets registers (Translator._inert, on data): no loop,
+    wait or loop edge, nested Ifs alike; event rows only tcgen05.ld/st/wait (no P0
+    event; in P1 an event, which ends the trial); no st.shared (it may zero a tensormap
+    staging buffer, tma.py) or ld.shared.b128 (a CLC response, sync.py); a warp
+    collective or a .sync.aligned instruction (setmaxnreg is exempt, design §5.4.1) only
+    if `warp`, the branch condition being the same in all lanes of each warp."""
+    for n in seq:
+        if isinstance(n, R.If):
+            if not (_register_only(n.then, warp) and _register_only(n.else_, warp)):
+                return False
+            continue
+        if not isinstance(n, R.Block):
+            return False  # Loop, Wait, CONTINUE, BREAK
+        for i in n.instrs:
+            try:
+                cls = ops.classify(i)[0]
+            except ops.UnknownInstruction:
+                return False
+            mn = ops.mnemonic(i.opcode)
+            if cls == "event":
+                ok = mn.startswith(_TMEM_REGISTERS)
+            else:
+                ok = (
+                    cls != "refuse"
+                    and mn != "st.shared"
+                    and not (mn == "ld.shared" and i.opcode.endswith(".b128"))
+                )
+            warpwide = mn.split(".")[0] in ("elect", "shfl", "vote", "redux") or (
+                ".aligned" in i.opcode and not mn.startswith("setmaxnreg")
+            )
+            if not ok or (warpwide and not warp):
+                return False
+    return True
 
 
 def _slot_vars(slot) -> tuple:

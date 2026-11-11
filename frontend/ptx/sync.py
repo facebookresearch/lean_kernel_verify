@@ -26,8 +26,9 @@ tcgen05.ld's registers are Data. tcgen05.commit[.mbarrier::arrive::one] is a
 `commit_arrive` once per issuing thread (ISA: the mbarrier tracks the completion of the
 executing thread's prior async tcgen05 ops; the CuTe frontend's rule; the TTGIR
 frontend's one per tc_gen5_mma barrier or tc_gen5_commit is the same count where one
-thread issues it). The P1 pass (M3) adds its tmem events in _tcgen05; nothing here hides
-what it needs. cta_group::2 (a CTA pair) and a multicast commit are gaps (M3, clusters).
+thread issues it). The P1 pass adds its tmem events before these rules run (tmem.py,
+from interp.Translator.execute); nothing here hides what it needs. cta_group::2 needs a
+cluster of CTA pairs, a multicast commit has the commit_arrive's cta_mask (cluster.py).
 
 CLC (the TTGIR frontend's model, frontend/ttgir/to_kir.py `_clc_query`/`_with_clc`;
 design §5.6; the Triton family only, CuTe CLC is M5):
@@ -66,14 +67,14 @@ stages into copies) keeps the unknown interval of its expression, as without the
 analysis, so its run stays whole as the CuTe frontend's dynamic index over the stages
 keeps it.
 
-Cluster scope (M3): barrier.cluster.*, mbarrier.arrive(.expect_tx).shared::cluster (a
-remote arrive), mbarrier.complete_tx: gaps.
+Cluster scope: barrier.cluster.*, mbarrier.arrive(.expect_tx).shared::cluster (a remote
+arrive) and mbarrier.complete_tx go to cluster.py.
 """
 
 import collections
 from dataclasses import dataclass
 
-from . import expr as E, regions as R
+from . import cluster, expr as E, regions as R
 from .interp import Data, Translator, Unsupported
 
 PREFIXES = (
@@ -105,7 +106,7 @@ def execute(tr: Translator, i, mn: str) -> None:
     elif mn == "ld.shared":
         _response(tr, i)
     else:
-        tr.fail(i, f"{mn} (gap: cluster-scope barriers are M3)")
+        cluster.execute(tr, i, mn)
 
 
 # ------------------------------------------------------------------- tcgen05
@@ -113,12 +114,11 @@ def execute(tr: Translator, i, mn: str) -> None:
 
 def _tcgen05(tr: Translator, i, mn: str) -> None:
     if "cta_group::2" in mn:
-        tr.fail(i, f"{mn} (gap: cta_group::2, a CTA pair, is M3)")
+        cluster.pair(tr, i, mn)
     if mn.startswith("tcgen05.commit"):
-        if "multicast" in mn:
-            tr.fail(i, f"{mn} (gap: a multicast commit is M3)")
         sym, off = tr.k.mem._smem(tr, i, i.operands[0])
-        tr.barrier_event("commit_arrive", sym, off, "thread")
+        fields = cluster.commit_fields(tr, i, mn)  # a multicast commit's cta_mask
+        tr.barrier_event("commit_arrive", sym, off, "thread", **fields)
         return
     if ".sync.aligned" in mn:
         tr.aligned(mn)

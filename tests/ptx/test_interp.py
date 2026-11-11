@@ -9,7 +9,8 @@ expr.py), through translate() on hand-written kernels.
     python3 -I tests/ptx/test_interp.py      (or the buck target :test_interp)
 
 Covers: the PTX integer expansions against brute force (mul.hi, bfe, bfi, prmt, lop3,
-shf, popc, clz, brev, cvt, div_exact), the test of one bit of a packed predicate mask;
+shf, popc, clz, brev, cvt, div_exact), the test of one bit of a packed predicate mask,
+the constant added to a shifted value LLVM shrank taken back to the closest to 0;
 per-thread events (Triton: one event over the threads, a replicated load over one thread
 per class; CuTe: a thread loop), a uniform predicate as a KIR `if`, a lane-varying one as
 a mask; elect.sync and holes H1-H3 (an elect-guarded event issued once per warp, the
@@ -209,6 +210,29 @@ class PackedPredicates(unittest.TestCase):
         self.assertIs(E.bin("or", x, c32(64)), E.bin("add", z, c32(96)))
         self.assertEqual(E.bin("or", x, c32(32))[2], "or")  # overlapping bits
         self.assertEqual(E.bin("or", x, c32(128))[2], "or")  # not below the zeros
+
+
+class ShrunkConstants(unittest.TestCase):
+    def test_shift_takes_the_constant_closest_to_zero(self):
+        # LLVM writes (n - 2 - i) << 7 as (n + 0x1FFFFFE - i) << 7 (bf16_fwd_2cta PTX
+        # line 315): the same value, with the constant whose wrap P0-1 would report
+        n, i, k = E.var("n", 32), E.var("i", 32), c32(7)
+        got = E.bin("shl", E.bin("sub", E.bin("add", n, c32(0x1FFFFFE)), i), k)
+        self.assertIs(got, E.bin("shl", E.bin("sub", E.bin("add", n, c32(-2)), i), k))
+        self.assertIs(  # in either operand, also of a sub
+            E.bin("shl", E.bin("sub", i, E.bin("add", n, c32(0x1000001))), k),
+            E.bin("shl", E.bin("sub", i, E.bin("add", n, c32(-0xFFFFFF))), k),
+        )
+        for c in (0xFFFFFF, -0x1000000, 5):  # already the closest: unchanged
+            e = E.bin("shl", E.bin("add", n, c32(c)), k)
+            self.assertIs(e[3][4], c32(c))
+        for a in (0, 1, 0x7FFFFFFF, 0xFFFFFFFF, 0x12345678):
+            for c in (0x1FFFFFE, 0x1000000, -0x7000000):
+                got = E.bin("shl", E.bin("add", n, c32(c)), k)
+                self.assertEqual(
+                    E.subst(got, {"n": c32(a)})[2] & 0xFFFFFFFF,
+                    ((a + c) << 7) & 0xFFFFFFFF,
+                )
 
 
 class LoopInvariants(unittest.TestCase):

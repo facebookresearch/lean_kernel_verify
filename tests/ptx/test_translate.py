@@ -237,7 +237,7 @@ class Contract(unittest.TestCase):
         self.assertIn("no op table row", f.refusals[0]["msg"])
         f = run("    barrier.cluster.arrive.aligned;\n    ret;\n")
         self.assertEqual(f.refusals[0]["kind"], "gap")
-        self.assertIn("are M3", f.refusals[0]["msg"])
+        self.assertIn("not in v1", f.refusals[0]["msg"])
         f = run(
             "    mov.u32 %r1, %tid.x;\n    setp.eq.s32 %p1, %r1, 0;\n    @%p1 bra A;\n    ret;\nA:\n    ret;\n"
         )

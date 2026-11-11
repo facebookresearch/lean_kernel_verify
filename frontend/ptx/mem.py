@@ -68,7 +68,7 @@ import math
 import re
 from pathlib import Path
 
-from . import expr as E, ops, sync, tma
+from . import cluster, expr as E, ops, sync, tma
 from .interp import Data, Translator, Unsupported
 
 # Mnemonics of global loads and stores (a generic one by its address).
@@ -185,13 +185,8 @@ class Memory:
             return sync.execute(tr, i, mn)
         if mn == "cvta.param":  # tma.py: generic addressing of a descriptor parameter
             return self.tma.cvta_param(tr, i)
-        if mn.startswith(
-            "mapa"
-        ):  # tma.py: only a bulk copy's destination (data) so far
-            tr.env[i.operands[0][1]] = Data(
-                f"shared::cluster address (mapa) at {tr.loc(i)}"
-            )
-            return
+        if mn.startswith("mapa"):  # cluster.py: a peer CTA's shared memory
+            return cluster.mapa(tr, i)
         if mn.startswith(
             tma.PREFIXES
         ):  # tma.py: TMA, bulk copies, in-kernel tensormaps
@@ -490,7 +485,8 @@ class Memory:
             arrays = _split(arrays, uses, _profiles(translators))
         names = self._names(arrays, inits)
         for u in uses:
-            _resolve(u, arrays, names)
+            if u.event["bar"] is None:  # (cluster.py's cluster barrier has its own)
+                _resolve(u, arrays, names)
         for tr in translators:
             arrive = [u for u in tr.barriers if u.event["ev"] == "arrive"]
             # Lean multiplies every arrive of the role by threads_per_issue, so the gcd
@@ -509,7 +505,7 @@ class Memory:
         return [
             {"name": names[(s, a)], "count": c, "num": {"e": "const", "w": 32, "v": n}}
             for s, a, n, c, _k in arrays
-        ]
+        ] + cluster.barriers(translators)
 
     def _names(self, arrays, inits) -> dict:
         out, seen = {}, {}

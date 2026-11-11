@@ -232,7 +232,7 @@ def bin(op: str, a, b):
     return _mk("bin", w, op, a, b)
 
 
-def _fold_ptx(op: str, w: int, a, b):
+def _fold_ptx(op: str, w: int, a, b):  # noqa: C901 (one case per identity)
     """Identities that keep LLVM's address arithmetic readable and affine (it writes
     tid & 127 for a tid known to be below 128, x + x for 2x, or for a disjoint add);
     each holds for every value of the operands."""
@@ -262,6 +262,33 @@ def _fold_ptx(op: str, w: int, a, b):
                 and y[0] == "bin" and y[2] == "urem" and y[3] is x[3][3] and y[4] is x[4]
             ):  # fmt: skip
                 return y[3]
+    if op == "shl" and is_const(b) and 0 < b[2] < w:
+        # x << k reads the low w - k bits of x, and LLVM keeps only those of a constant
+        # added to x (demanded bits: (n - 2) << 7 becomes (n + 0x1FFFFFE) << 7), which
+        # then wraps where the source's does not; the constant closest to 0 with the same
+        # low bits gives the same value (design §5.8, class (d) of §8)
+        x = _closest_const(a, w - b[2], set())
+        if x is not None:
+            return bin("shl", x, b)
+    return None
+
+
+def _closest_const(e, bits: int, seen: set):
+    """e, an add/sub tree, with its first constant operand whose value is not the one
+    closest to 0 among those of the same low `bits` bits replaced by that one (the same
+    value modulo 2**bits); None if it has no such constant."""
+    if e[0] != "bin" or e[2] not in ("add", "sub") or e in seen:
+        return None
+    seen.add(e)
+    for k in (3, 4):
+        x = e[k]
+        if is_const(x):
+            c = _wrap(x[2], bits)
+            y = None if c == x[2] else const(c, width(e))
+        else:
+            y = _closest_const(x, bits, seen)
+        if y is not None:
+            return bin(e[2], *((y, e[4]) if k == 3 else (e[3], y)))
     return None
 
 

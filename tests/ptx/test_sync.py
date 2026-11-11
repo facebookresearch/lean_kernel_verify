@@ -10,12 +10,14 @@ named-barrier and loop rules M2 kernels need) through translate() on hand-writte
 
 tcgen05: alloc/dealloc/relinquish/ld/st/wait/cp/shift/mma emit nothing in P0, ld's
 registers are Data, a .sync.aligned form under a lane condition is refused, commit is a
-commit_arrive per issuing thread, a multicast commit and cta_group::2 are gaps. CLC: the
+commit_arrive per issuing thread, a multicast commit and cta_group::2 need a cluster
+(test_cluster.py). CLC: the
 try_cancel/query/get_first_ctaid sequence of Triton's CLC (evaluated over a schedule),
 the role prologue, refusals of other response uses (a response read elsewhere than the
 try_cancel's address or before a wait on its mbarrier, an unpredicated get_first_ctaid)
 and of CuTe CLC. Named barriers,
-fences and griddepcontrol emit nothing; the cluster-scope forms are gaps; relaxed arrive
+fences and griddepcontrol emit nothing; the cluster-scope forms are gaps in the Triton
+family (test_cluster.py: the CuTe family); relaxed arrive
 and inval are refused; parts of a CuTe role that emit nothing are merged. Pipelines: a
 wait in a loop with stage and phase slots, the LSR form of `fulls[blk % 2]`, a barrier
 index computed after a loop from registers the loop defines, an smem descriptor (bit
@@ -114,7 +116,7 @@ class Tcgen05(unittest.TestCase):
     @%p12 mbarrier.init.shared::cta.b64 [%r10], 1;
     @%p12 tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64 [%r10], %rs1;
 """)
-        self.assertIn("multicast commit is M3", refusal(f))
+        self.assertIn("multicast tcgen05.commit outside a cluster", refusal(f))
         f = sync(
             "    @%p12 tcgen05.mma.cta_group::2.kind::f16 [%r20], %rd5, %rd6, %r24, %p14;"
         )
@@ -273,14 +275,14 @@ class Barriers(unittest.TestCase):
     def test_gaps_and_refused_forms(self):
         init = "    @%p12 mbarrier.init.shared::cta.b64 [%r10], 1;\n"
         for stmt, why in [
-            ("barrier.cluster.arrive.aligned;", "cluster-scope barriers are M3"),
+            ("barrier.cluster.arrive.aligned;", "Triton family is not in v1"),
             (
                 "@%p12 mbarrier.arrive.shared::cluster.b64 _, [%r10];",
-                "cluster-scope barriers are M3",
+                "Triton family is not in v1",
             ),
             (
                 "@%p12 mbarrier.complete_tx.shared::cta.b64 [%r10], 16;",
-                "cluster-scope barriers are M3",
+                "Triton family is not in v1",
             ),
             (
                 "@%p12 mbarrier.arrive.relaxed.cta.shared::cta.b64 _, [%r10];",

@@ -13,13 +13,15 @@ reads, source paths as @SRC@): frontend/ttgir/to_kir.py translate and
 frontend/cute/to_kir.py run produce KIR that frontend/kir.py accepts, with `ir` "ptx", the
 legacy names (roles, barriers, tensors, params, inputs), every launch's params and grid,
 and the families' locations. Also the PTX write set the CuTe stale-data checks use for a
-refused variant (translate.writes; a call or a loaded pointer leaves it unknown), and
-the switch's values. CuTe assembly (frontend/cute/to_kir.py): reroll (decision D8: LLVM's
-unrolled blocks back into a `for`, the same trace; runs it must keep), the jit_params
-naming of pointers and descriptor bases, and the KIR desc tensors of Facts.descs (a
-segmented base's segments on the walking dim; a bulk descriptor's extent). TTGIR assembly
-(frontend/ttgir/to_kir.py build_ptx): host descriptor blocks (equal in every launch), the
-KIR desc tensors of Facts.descs (annotations, role) and the CLC tables.
+refused variant (translate.writes; a call or a loaded pointer leaves it unknown), the
+P1 pass of the CuTe assembly (to_kir step 6, translate_p1_ptx: checked, refused, skipped
+by --no-p1) and the switch's values. CuTe assembly (frontend/cute/to_kir.py): reroll
+(decision D8: LLVM's unrolled blocks back into a `for`, the same trace; runs it must
+keep), the jit_params naming of pointers and descriptor bases, and the KIR desc tensors
+of Facts.descs (a segmented base's segments on the walking dim; a bulk descriptor's
+extent). TTGIR assembly (frontend/ttgir/to_kir.py build_ptx): host descriptor blocks
+(equal in every launch), the KIR desc tensors of Facts.descs (annotations, role) and the
+CLC tables.
 """
 
 import json
@@ -166,6 +168,69 @@ class CuteProbe(unittest.TestCase):
         self.assertEqual(
             T.writes(text, fn.name, T.param_table(records, "cute", fn, ["m"])), ["m"]
         )
+
+
+class CuteP1(unittest.TestCase):
+    """to_kir step 6 under LKV_FRONTEND=ptx (translate_p1_ptx): the probe with a TMEM
+    allocation by warp 0 and a tcgen05.ld of every warp's lane quarter (or one in a shape
+    the P1 pass refuses), the entries legacy writes for each outcome."""
+
+    tmp: Path
+    setUp, run_kir = CuteProbe.setUp, CuteProbe.run_kir
+
+    TMEM = """
+    shr.u32 %r2, %r1, 5;
+    setp.eq.s32 %p1, %r2, 0;
+    mov.u32 %r3, tmem_holder;
+    mov.b32 %r4, 512;
+    @%p1 tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [%r3], %r4;
+    shl.b32 %r5, %r2, 21;
+    tcgen05.ld.sync.aligned.SHAPE.x1.b32 {%r6}, [%r5];
+    tcgen05.wait::ld.sync.aligned;"""
+
+    def with_tmem(self, shape: str) -> None:
+        ptx = self.tmp / "probe_cute.ptx"
+        text = ptx.read_text().replace("%r<2>;", "%r<7>;\n\t.reg .pred \t%p<2>;")
+        text = text.replace(
+            ".address_size 64",
+            ".address_size 64\n\n.shared .align 16 .b8 tmem_holder[16];",
+        )
+        text = text.replace("%r1, %tid.x;", "%r1, %tid.x;" + self.TMEM.replace("SHAPE", shape))  # fmt: skip
+        ptx.write_text(text)
+
+    def test_checked(self):
+        self.with_tmem("32x32b")
+        variant = self.run_kir()[0]
+        p1 = variant["p1"]
+        self.assertEqual((p1["status"], p1["roles"]), ("checked", [["warps0_3", 4, 1]]))
+        k1 = json.loads(Path(p1["kir"]).read_text())
+        self.assertEqual(kir.validate(k1), [])
+        self.assertEqual(k1["tmem"], {"cols": 512, "base": "zero"})
+        self.assertEqual([e["ev"] for e in events(k1["roles"][0]["body"])],
+                         ["tmem", "tmem_wait", "gload", "gstore"])  # fmt: skip
+        k = json.loads(Path(variant["kir"]).read_text())  # P0: unchanged by the P1 pass
+        self.assertNotIn("tmem", k)
+        self.assertEqual(
+            [e["ev"] for e in events(k["roles"][0]["body"])], ["gload", "gstore"]
+        )
+
+    def test_refused(self):
+        self.with_tmem("16x64b")  # not translated by the P1 pass (R5)
+        variant = self.run_kir()[0]
+        self.assertEqual(variant["p1"]["status"], "refused")
+        self.assertIn("R5", variant["p1"]["error"])
+        self.assertTrue(Path(variant["kir"]).exists())
+        self.assertEqual(list((self.tmp / "kir").glob("*.p1.json")), [])
+
+    def test_no_p1(self):
+        self.with_tmem("32x32b")
+        with mock.patch.dict(os.environ, PTX_MODE):
+            cute_to_kir.run(
+                SKILL / "tests/e2e/cases/probe_cute.json", self.tmp, p1=False
+            )
+        variant = json.loads((self.tmp / "kir/report.json").read_text())[0]
+        self.assertNotIn("p1", variant)
+        self.assertTrue(Path(variant["kir"]).exists())
 
 
 def c(v, w=32):
