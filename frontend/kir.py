@@ -81,7 +81,7 @@ BIN_OPS = (
     "and", "or", "xor", "smin", "smax", "umin", "umax",
 )  # fmt: skip
 CMP_OPS = ("eq", "ne", "slt", "sle", "sgt", "sge", "ult", "ule", "ugt", "uge")
-IRS = ("ttgir", "cute-mlir")
+IRS = ("ttgir", "cute-mlir", "ptx")
 TARGETS = ("sm_100", "sm_103")
 TENSOR_KINDS = ("global", "desc")
 TENSOR_ROLES = ("input", "output", "workspace")

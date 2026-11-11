@@ -88,7 +88,8 @@ python3 -I $S/scripts/lkv.py check K.kir.json... --out DIR   # Layer 2 alone on 
 - The frontend is CuTe if the case has a `builder`, else TTGIR. `run` options:
   `--inputs a,b`, `--target sm_103` (TTGIR only), `--jobs N` (default min(8,
   CPUs)), `--timeout S` (per Lean file, default 3600), `--src DIR` (default: the
-  case's `src_root` / `source.src`).
+  case's `src_root` / `source.src`). `LKV_FRONTEND=ptx` previews a PTX translation
+  (frontend docs, "PTX translation"); the default is `legacy`.
 - **Check a fix:** put base and fix in two source directories, run the same cases
   with each `--src`, and compare FAIL locations. Done when every confirmed
   root's FAIL is gone and no new FAIL appears; inputs the fixed host now rejects

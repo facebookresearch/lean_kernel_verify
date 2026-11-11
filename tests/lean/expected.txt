@@ -7,6 +7,10 @@ pipeline_ok               two_tiles_k3     PASS PASS PASS PASS PASS
 pipeline_ok               one_tile_k1      PASS PASS PASS PASS PASS
 pipeline_ok               zero_k           PASS PASS PASS PASS PASS
 pipeline_ok               five_tiles_k4    PASS PASS PASS PASS PASS
+pipeline_ok_ptx           two_tiles_k3     PASS PASS PASS PASS PASS
+pipeline_ok_ptx           one_tile_k1      PASS PASS PASS PASS PASS
+pipeline_ok_ptx           zero_k           PASS PASS PASS PASS PASS
+pipeline_ok_ptx           five_tiles_k4    PASS PASS PASS PASS PASS
 zero_trip_missing_arrive  n_k_2            PASS PASS PASS PASS PASS
 zero_trip_missing_arrive  n_k_0            PASS FAIL PASS PASS PASS
 stale_tail_parity         k_even           PASS PASS PASS PASS PASS

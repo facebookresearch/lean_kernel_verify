@@ -13,12 +13,18 @@ translate the kept ops with the op table (op_table, references/ir_ops.md) and wr
 compiled to that specialization. Every unsupported construct on the kept slice and every
 dropped op whose result reaches the slice is a hard error naming the op and its loc, of
 kind "gap" (refused by design) or "error" (the case or LKV must be fixed; `KirError`).
+
+Migration switch (design §8, removed when the PTX frontend becomes the only one):
+LKV_FRONTEND=ptx translates each specialization's PTX instead (build_ptx: the PTX core's
+Facts, frontend/ptx/translate.py, with this file's naming, tensors, inputs and checks;
+KIR `ir` "ptx"); unset or "legacy" is the TTGIR translation above, unchanged.
 """
 
 import argparse
 import itertools
 import json
 import math
+import os
 import re
 import sys
 from pathlib import Path
@@ -1375,52 +1381,16 @@ def build(ttgir: str, dump: dict, key: str, case: dict) -> dict:
         )
     tr = Translator(module, case, case.get("work", {}))
     roles = tr.roles()
-    for role in roles:
-        for ev in events_of(role["body"]):
-            if not ev["loc"].startswith(REPO_PREFIX):
-                raise KirError(
-                    f"{ev['ev']} in role {role['name']} has location {ev['loc']!r}, not a line of the "
-                    "exported sources (did a compiler switch such as USE_IR_LOC rewrite the locations?)",
-                    kind="error",
-                )
-    if tr.work_fields and not tr.work_events:
-        raise KirError(
-            f"no block defines all work fields {tr.work_fields}", kind="error"
-        )
-    # Metadata contents are the values at launch time; a launch that also writes them
-    # (directly, or through storage they share, checked per input in _input) breaks that.
-    rewritten = tr.metadata & tr.written
-    if rewritten:
-        raise KirError(
-            f"metadata tensor(s) {sorted(rewritten)} are written by {dump['kernel']} itself, "
-            "so their contents during the launch are not the recorded ones"
-        )
+    _check_roles(dump, roles, tr.work_fields, tr.work_events, tr.metadata, tr.written)
     args = {v.name: v for v in module.args}
-    launches = [
-        (inp, la)
-        for inp in dump["inputs"]
-        for la in inp["launches"]
-        if la["spec"] == key
-    ]
-    if not launches:
-        raise KirError(f"no input launched spec {key}", kind="error")
-    spec = dump["specs"][key]
+    launches = _launches(dump, key)
     snap0 = launches[0][1]["args"]
 
     tensor_args = {
         n for n, v in args.items() if K.ptr_pointee(v.type) or K.tensordesc_type(v.type)
     }
     annotations = _annotations(case, [inp["name"] for inp, _ in launches], key)
-    for key_ in ("tensors", "intended_writes"):
-        named = set(case.get(key_, {})).union(
-            *(i.get(key_, {}).keys() for i in case["inputs"])
-        )
-        if named - tensor_args:
-            raise KirError(
-                f"case `{key_}` names {sorted(named - tensor_args)} that are not "
-                f"pointer/descriptor arguments of {dump['kernel']}",
-                kind="error",
-            )
+    _check_case_names(case, tensor_args, dump["kernel"])
     # Segment offsets (cu_seqlens) are metadata of the specs even where the kernel itself
     # never reads them (e.g. output offsets recomputed in the kernel).
     for ann in annotations.values():
@@ -1515,16 +1485,146 @@ def build(ttgir: str, dump: dict, key: str, case: dict) -> dict:
                 for f in ("shape", "stride")
             ]
 
+    barriers = [
+        {"name": b, "count": K.const(c["count"], 32), "num": K.const(c["num"], 32)}
+        for b, c in tr.barriers.items()
+    ]
+    return _document(dump, key, case, "ttgir", target["name"], params, tensors,
+                     barriers, roles, launches, tr.written, tr.desc_bases, tr.uses_clc)  # fmt: skip
+
+
+def build_ptx(where: Path, dump: dict, key: str, case: dict) -> dict:
+    """The KIR of a specialization from its PTX (LKV_FRONTEND=ptx, design §5.11): the PTX
+    core's Facts (frontend/ptx/translate.py) assembled as build() assembles the
+    Translator's, with the same names, tensors, params, inputs and checks. Host and
+    in-kernel TMA descriptors and CLC are not in M1: the core refuses them (gap)."""
+    # Imported here: the legacy translation must not depend on the new core while both run.
+    from ..ptx import anchors, parse as ptx_parse, translate as T
+
+    launches = _launches(dump, key)
+    spec = dump["specs"][key]
+    snap0 = launches[0][1]["args"]
+    annotations = _annotations(case, [inp["name"] for inp, _ in launches], key)
+    records = [la["launch"] for _, la in launches]
+    text = (where / spec["ptx"]).read_text()
+    try:
+        fn = ptx_parse.parse(text).function(records[0]["entry"])
+    except (ptx_parse.PtxSyntaxError, KeyError) as e:
+        raise KirError(f"{spec['ptx']}: {type(e).__name__}: {e}", kind="error") from e
+    work = case.get("work", {})
+    try:
+        sites, _notes = anchors.resolve(
+            work, "ttgir", fn, [dump["src_root"]], "file_line"
+        )
+    except anchors.AnchorError as e:
+        raise KirError(f"case `work`: {e}", kind="error") from e
+    per = sorted(
+        {a["segments"]["per"] for a in annotations.values() if a.get("segments")}
+    )
+    pol = T.policy("ttgir", src_root=dump["src_root"], params=T.param_table(records, "ttgir", fn),
+                   tensors={n: {"elem_bytes": a["elem_bytes"]} for n, a in snap0.items()
+                            if a["kind"] == "tensor"},
+                   work={"fields": list(work), "mode": "gate", "per": per, "sites": sites})  # fmt: skip
+    facts = T.translate(text, fn.name, records, pol)
+    if facts.refusals:
+        raise KirError(facts.refusals[0]["msg"], kind=facts.refusals[0]["kind"])
+    roles = [{k: r[k] for k in ("name", "warps", "threads_per_issue", "body")}
+             for r in facts.roles]  # fmt: skip
+    metadata = {n for n, t in facts.tensors.items() if t["metadata"]}
+    written = set(facts.written)
+    _check_roles(dump, roles, work, facts.work_events, metadata, written)
+    _check_case_names(case, {n for n, a in snap0.items() if a["kind"] in ("tensor", "desc")},
+                      dump["kernel"])  # fmt: skip
+    elem_bytes = {n: t["elem_bytes"] for n, t in facts.tensors.items()}
+    for ann in annotations.values():  # segment offsets are metadata (as in build)
+        seg = ann.get("segments")
+        if seg:
+            elem_bytes.setdefault(seg["offsets"], snap0[seg["offsets"]]["elem_bytes"])
+            metadata.add(seg["offsets"])
+    params = [{"name": n, "type": f"i{w}"} for n, w in facts.params.items()]
+    tensors = []
+    for name, eb in elem_bytes.items():
+        rank = len(snap0[name]["shape"])
+        if name in metadata and rank != 1:
+            raise KirError(
+                f"metadata tensor {name} must be 1-D (shape {snap0[name]['shape']})"
+            )
+        ann = annotations.get(name, {})
+        tensors.append({"name": name, "kind": "global", "elem_bytes": eb,
+                        "shape": [K.var(f"{name}.shape.{i}", 64) for i in range(rank)],
+                        "strides": [K.var(f"{name}.stride.{i}", 64) for i in range(rank)],
+                        "role": ann.get("role", "output" if name in written else "input"),
+                        "segments": ann.get("segments"), "metadata": name in metadata})  # fmt: skip
+        params += [{"name": f"{name}.{f}.{i}", "type": "i64"}
+                   for i in range(rank) for f in ("shape", "stride")]  # fmt: skip
+    return _document(dump, key, case, "ptx", facts.target, params, tensors, facts.barriers,
+                     roles, launches, written, {}, False)  # fmt: skip
+
+
+def _launches(dump: dict, key: str) -> list:
+    """(input, launch) of every launch of the specialization."""
+    launches = [
+        (inp, la)
+        for inp in dump["inputs"]
+        for la in inp["launches"]
+        if la["spec"] == key
+    ]
+    if not launches:
+        raise KirError(f"no input launched spec {key}", kind="error")
+    return launches
+
+
+def _check_roles(
+    dump: dict, roles: list, work_fields, work_events: int, metadata: set, written: set
+) -> None:
+    for role in roles:
+        for ev in events_of(role["body"]):
+            if not ev["loc"].startswith(REPO_PREFIX):
+                raise KirError(
+                    f"{ev['ev']} in role {role['name']} has location {ev['loc']!r}, not a line of the "
+                    "exported sources (did a compiler switch such as USE_IR_LOC rewrite the locations?)",
+                    kind="error",
+                )
+    if work_fields and not work_events:
+        raise KirError(f"no block defines all work fields {work_fields}", kind="error")
+    # Metadata contents are the values at launch time; a launch that also writes them
+    # (directly, or through storage they share, checked per input in _input) breaks that.
+    rewritten = metadata & written
+    if rewritten:
+        raise KirError(
+            f"metadata tensor(s) {sorted(rewritten)} are written by {dump['kernel']} itself, "
+            "so their contents during the launch are not the recorded ones"
+        )
+
+
+def _check_case_names(case: dict, tensor_args: set, kernel: str) -> None:
+    for key_ in ("tensors", "intended_writes"):
+        named = set(case.get(key_, {})).union(
+            *(i.get(key_, {}).keys() for i in case["inputs"])
+        )
+        if named - tensor_args:
+            raise KirError(
+                f"case `{key_}` names {sorted(named - tensor_args)} that are not "
+                f"pointer/descriptor arguments of {kernel}",
+                kind="error",
+            )
+
+
+def _document(dump: dict, key: str, case: dict, ir: str, target: str, params: list,
+              tensors: list, barriers: list, roles: list, launches: list, written: set,
+              desc_bases: dict, uses_clc: bool) -> dict:  # fmt: skip
+    """The KIR document: the inputs of every launch (one per CLC schedule with CLC)."""
+    spec = dump["specs"][key]
     inputs = []
     for inp, launch in launches:
         same = [la for la in inp["launches"] if la["spec"] == key]
         name = inp["name"] if len(same) == 1 else f"{inp['name']}#{same.index(launch)}"
         base = _input(
-            name, inp, launch, params, tensors, spec, case, tr.written, tr.desc_bases
+            name, inp, launch, params, tensors, spec, case, written, desc_bases
         )
-        if tr.uses_clc:
+        if uses_clc:
             resident = dump["num_sms"] * max(
-                1, target["max_shared_mem"] // max(1, spec["shared_bytes"])
+                1, dump["target"]["max_shared_mem"] // max(1, spec["shared_bytes"])
             )
             inputs += [
                 _with_clc(base, sched, resident)
@@ -1533,10 +1633,6 @@ def build(ttgir: str, dump: dict, key: str, case: dict) -> dict:
         else:
             inputs.append(base)
 
-    barriers = [
-        {"name": b, "count": K.const(c["count"], 32), "num": K.const(c["num"], 32)}
-        for b, c in tr.barriers.items()
-    ]
     elision = case.get("elision_flags", [])
     unknown = sorted(set(elision) - set(inputs[0]["flags"]))
     if unknown:
@@ -1549,8 +1645,8 @@ def build(ttgir: str, dump: dict, key: str, case: dict) -> dict:
         "kir_version": 1,
         "kernel": dump["kernel"],
         "source": case.get("source", ""),
-        "ir": "ttgir",
-        "target": target["name"],
+        "ir": ir,
+        "target": target,
         "compiler": {
             "name": dump["compiler"]["name"],
             "version": dump["compiler"]["version"],
@@ -1820,17 +1916,29 @@ def _with_clc(inp: dict, schedule: str, resident: int) -> dict:
     return out
 
 
+def frontend() -> str:
+    """The Layer-1 translation LKV_FRONTEND selects: "legacy" (unset) or "ptx"."""
+    name = os.environ.get("LKV_FRONTEND") or "legacy"
+    if name not in ("legacy", "ptx"):
+        raise SystemExit(f"LKV_FRONTEND={name!r}: expected legacy or ptx")
+    return name
+
+
 def translate(dump_path: Path, case: dict) -> dict:
     """KIR (or the error that stopped extraction) for every specialization of a dump.
 
     Writes <spec>.kir.json next to dump.json for each specialization that translates.
     """
     dump = json.loads(dump_path.read_text())
+    ptx = frontend() == "ptx"
     results: dict[str, dict | Exception] = {}
     for key, spec in dump["specs"].items():
-        ttgir = (dump_path.parent / spec["ttgir"]).read_text()
         try:
-            kir = build(ttgir, dump, key, case)
+            if ptx:
+                kir = build_ptx(dump_path.parent, dump, key, case)
+            else:
+                ttgir = (dump_path.parent / spec["ttgir"]).read_text()
+                kir = build(ttgir, dump, key, case)
             violations = kir_contract.validate(kir)
             if violations:
                 raise KirError(
@@ -1871,6 +1979,8 @@ def main() -> None:
     ap.add_argument("--dump", required=True, type=Path)
     ap.add_argument("--case", required=True, type=Path)
     args = ap.parse_args()
+    if frontend() == "ptx":  # shows in lkv.py's logs/to_kir.log that the switch arrived
+        print("[to_kir] LKV_FRONTEND=ptx: translating the PTX", file=sys.stderr)
     results = translate(args.dump, json.loads(args.case.read_text()))
     for key, r in results.items():
         if isinstance(r, Exception):

@@ -355,6 +355,19 @@ checks on the same trace.
 * Event locations: every event's `loc` is a line of the exported sources.
 * Case: `elision_flags` are boolean constexprs of the kernel.
 
+## PTX translation (preview)
+
+`LKV_FRONTEND=ptx` in the environment of `lkv.py run` (or of `to_kir`) makes `to_kir`
+translate the PTX `dump` writes next to each TTGIR (`<spec>.ptx`) instead of the TTGIR.
+The shared PTX core (`frontend/ptx/`) gives the roles, events and barriers, and `to_kir`
+assembles them as above: the same names, tensors, params, inputs, checks and
+`[to_kir] ... FAILED` lines; the KIR has `ir` `"ptx"` (`kir.md`), and `logs/to_kir.log`
+shows `[to_kir] LKV_FRONTEND=ptx: translating the PTX`. Locations are the innermost
+`.loc` frame under `src_root`. The preview covers global loads and stores, metadata
+loads, mbarriers and their waits, and `work`; TMA, tcgen05, cluster and CLC
+instructions are refused as gaps (`not in M1`). Unset or `legacy` is the TTGIR
+translation and the default; any other value is an error.
+
 ## Limitations
 
 * A verdict covers the case inputs and the analyzed specializations only. Variants the

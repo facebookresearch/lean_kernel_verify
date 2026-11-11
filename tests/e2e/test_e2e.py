@@ -21,7 +21,9 @@
   ERRORs always count, its FAIL and UNDECIDED only with --p1-strict; inputs the host
   rejects count as none; an export's revision marker names the analyzed revision;
   --target reaches the TTGIR dump and is refused for CuTe cases (exit status 2, never 1);
-  the report renders the frontend's environment record.
+  the report renders the frontend's environment record, and there marks the source lines
+  of the CuTe DSL 4.4.2 PTX translation (LKV_FRONTEND=ptx) best effort (report.json
+  `loc_quality`; a legacy report has no such key).
 * lean_fixtures: `lkv.py check` on tests/lean/*.kir.json gives the verdicts of
   tests/lean/expected.txt, and lkv files every text of tests/lean/expected_messages.txt
   under the right kind: a `note: ` text among the notes and never among the
@@ -52,6 +54,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.dont_write_bytecode = True  # keep the skill tree free of __pycache__
 HERE = Path(__file__).resolve().parent
@@ -477,6 +480,52 @@ class Unit(unittest.TestCase):
         )
         # `check` runs no frontend: no environment section.
         self.assertNotIn("## Environment", lkv_py.markdown(self.report(LEAN_OUT, 1)))
+
+    def test_cute_ptx_locations_are_best_effort(self):
+        # The CuTe binary stands in as its to_kir alone, on the recorded DSL 4.4.2
+        # probe_cute dump of tests/ptx (the legacy translation finds no stage there).
+        fixtures, kernels = SKILL / "tests/ptx/fixtures", HERE / "kernels"
+
+        def buck_run(target, args, log_path):
+            to_kir = SKILL / "frontend/cute/to_kir.py"
+            out = args[args.index("--out") + 1]
+            cmd = [sys.executable, "-I", str(to_kir), str(args[1]), "--out", str(out)]
+            with open(log_path, "w") as f:
+                return subprocess.run(cmd, stdout=f, stderr=f).returncode
+
+        real, lkv_py.buck_run = lkv_py.buck_run, buck_run
+        self.addCleanup(setattr, lkv_py, "buck_run", real)
+        self.addCleanup(lkv_py.P1_NOT_CHECKED.clear)
+        self.addCleanup(lkv_py.LOC_QUALITY.clear)
+        line = "- source locations are best effort in `host__02200b3bc0acee10`: "
+        with tempfile.TemporaryDirectory() as d:
+            fe = Path(d)
+            text = (fixtures / "probe_cute.ptx").read_text()
+            (fe / "probe_cute.ptx").write_text(text.replace("@SRC@", str(kernels)))
+            text = (fixtures / "probe_cute.dump.json").read_text()
+            dump = json.loads(text.replace("@SRC@", str(kernels)))
+            for c in dump["compiles"]:
+                c["ptx"]["file"] = str(fe / "probe_cute.ptx")
+            (fe / "dump.json").write_text(json.dumps(dump))
+            for mode, want in (
+                ("legacy", {}),
+                ("ptx", {"host__02200b3bc0acee10": "line_only"}),
+            ):
+                lkv_py.LOC_QUALITY.clear()
+                with mock.patch.dict(os.environ, {"LKV_FRONTEND": mode}):
+                    case = HERE / "cases/probe_cute.json"
+                    lkv_py.run_cute(case, {}, kernels, fe, fe, [])
+                self.assertEqual(lkv_py.LOC_QUALITY, want)
+                with mock.patch.object(lkv_py, "log"):  # quiet
+                    lkv_py.write_report(self.report(PASSING, 0, env=ENV), fe)
+                report = json.loads((fe / "report.json").read_text())
+                md = env_section((fe / "report.md").read_text())
+                if want:
+                    self.assertEqual(report["loc_quality"], want)
+                    self.assertIn(line, md)
+                else:  # the legacy report: no key, no line
+                    self.assertNotIn("loc_quality", report)
+                    self.assertNotIn("best effort", md)
 
     def test_notes_and_host_rejected_inputs_keep_exit_status_0(self):
         rejected = [{"input": "b", "error": "the host rejected input b: ValueError"}]

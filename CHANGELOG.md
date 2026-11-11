@@ -18,3 +18,10 @@ First public release.
   README's Status section).
 - Tests: the Lean layer's KIR fixtures (`tests/lean`), the frontends' tests and the
   end-to-end tests of `lkv.py`.
+- KIR `ir` accepts `"ptx"` (KIR translated from PTX; references/kir.md change 12).
+- Preview: `LKV_FRONTEND=ptx` makes both frontends translate the kernel's PTX
+  (`frontend/ptx/`) instead of their IR, into KIR with `ir` `"ptx"`, for kernels whose
+  global accesses are plain loads and stores (no TMA, tcgen05, clusters or CLC yet, no
+  P1 pass); the default, `legacy`, is the translation above. With CuTe DSL 4.4.2 its
+  source locations are best effort, as report.json `loc_quality` and report.md say
+  (references/frontend_ttgir.md and frontend_cute.md, "PTX translation").

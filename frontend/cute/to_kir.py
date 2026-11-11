@@ -35,6 +35,14 @@ reads. So is a host read, before a launch of the variant, of data an earlier lau
 write (the host may branch or size the launch differently), and a dump made with a CuTe
 DSL other than the ones the op table was checked against (ops.DSL_NATIVE).
 
+Migration switch (design §8, removed when the PTX frontend becomes the only one):
+LKV_FRONTEND=ptx translates each variant's PTX instead of steps 1-4 (translate_ptx: the
+PTX core's Facts, frontend/ptx/translate.py, assembled by PtxVariant with Variant's
+tensors, inputs, checks and report; KIR `ir` "ptx"; the P1 pass is not in M1 of the PTX
+frontend); unset or "legacy" is the translation above, unchanged. Under DSL 4.4.2 only
+the PTX's line numbers are trusted (PTX_LOCS), so a translated variant's report.json
+entry has "loc_quality": "line_only" (lkv.py marks the report's lines best effort).
+
 Standalone (no CuTe DSL needed): python3 -I to_kir.py CASE.json [--out DIR]
 """
 
@@ -42,8 +50,11 @@ import argparse
 import importlib.util
 import json
 import math
+import os
 import sys
+import types
 from pathlib import Path
+from typing import cast
 
 if __package__ in (None, ""):  # python3 -I path/to/to_kir.py
     sys.dont_write_bytecode = True  # keep the source tree free of __pycache__
@@ -493,19 +504,40 @@ class Variant:
                     )
 
     def kir(self, launch: dict, roles: list, barriers: list, inputs: list) -> dict:
+        roles = [
+            {
+                "name": f"warps{tr.w0}_{tr.w0 + tr.nw - 1}",
+                "warps": tr.nw,
+                "threads_per_issue": tr.tpi,
+                "body": tr.stmts,
+            }
+            for tr in roles
+        ]
+        obj = self.document(
+            "cute-mlir",
+            "sm_100",  # dump.py compiles with CUTE_DSL_ARCH=sm_100a
+            [E.to_json(g) for g in launch["cfg"].get("grid")],
+            barriers,
+            roles,
+            inputs,
+        )
+        mark_addr(obj)
+        return obj
+
+    def document(self, ir, target, grid, barriers, roles, inputs) -> dict:
         elision = self.notes.get("elision_flags", [])
         unknown = sorted(set(elision) - set(self.rec["flags"]))
         if unknown:
             raise Unsupported("case", "kernels", f"{self.cls}: elision_flags {unknown} are not flags of the variant "
                                                  f"({sorted(self.rec['flags'])})", kind="error")  # fmt: skip
-        obj = {
+        return {
             "kir_version": 1,
             "kernel": self.cls,
             "source": self.rec["callable"].rsplit(".", 1)[0].replace(".", "/") + ".py",
-            "ir": "cute-mlir",
-            "target": "sm_100",  # dump.py compiles with CUTE_DSL_ARCH=sm_100a
+            "ir": ir,
+            "target": target,
             "compiler": {"name": "nvidia-cutlass-dsl", "version": self.dsl_version},
-            "grid": [E.to_json(g) for g in launch["cfg"].get("grid")],
+            "grid": grid,
             "params": [
                 {"name": n, "type": f"i{w}"} for n, w in sorted(self.params.items())
             ],
@@ -514,23 +546,209 @@ class Variant:
             ),
             "tensors": self.tensors(),
             "barriers": barriers,
-            "roles": [
-                {
-                    "name": f"warps{tr.w0}_{tr.w0 + tr.nw - 1}",
-                    "warps": tr.nw,
-                    "threads_per_issue": tr.tpi,
-                    "body": tr.stmts,
-                }
-                for tr in roles
-            ],
+            "roles": roles,
             "case": {
                 "name": self.case["name"],
                 "inputs": inputs,
                 **({"elision_flags": elision} if elision else {}),
             },
         }
-        mark_addr(obj)
-        return obj
+
+
+# Location policy of the PTX frontend per DSL (design §5.2.3): 4.4.2's .loc file numbers are
+# unreliable, only lines are trusted (decision D1); 4.6.1 has a true file table, and the
+# instructions of an inline asm block take the block's start loc.
+PTX_LOCS = {
+    "4.4.2": {"loc_mode": "line_only", "asm_locs": False},
+    "4.6.1": {"loc_mode": "file_line", "asm_locs": True},
+}
+
+
+class PtxVariant(Variant):
+    """A variant translated from its PTX (LKV_FRONTEND=ptx, design §5.11): the PTX core's
+    Facts in Variant's assembly (segment offsets, metadata checks, tensors, inputs). The
+    host arguments are the launch's: every tensor argument has `<t>_shape<i>` and
+    `<t>_stride<i>` params, whether the DSL made the leaf static or dynamic (the values
+    are the launch's either way); the scalar params are the kernel-parameter bytes the PTX
+    reads (param<i>, param<i>_<off>) with each launch's LaunchRecord values; each input
+    has its launch's grid."""
+
+    def __init__(self, case: dict, dump: dict, rec: dict, first_args: list):
+        self.case, self.rec = case, rec
+        self.dsl_version = dump["dsl"]["version"]
+        self.cls = rec["callable"].rsplit(".", 1)[-1]
+        self.notes = case.get("kernels", {}).get(self.cls, {})
+        self.params = {}
+        # host_args and k.tensors in Variant's form, so that its assembly and
+        # _check_provenance read them as they read the legacy translation's (of k only
+        # tensors, descs and cluster: nothing is translated with it)
+        self.host_args = []
+        k = types.SimpleNamespace(tensors={}, descs={}, cluster=(1, 1, 1))
+        self.k = cast(Kernel, k)
+        for name, a in _named_args(rec, first_args):
+            if a["kind"] != "tensor":  # scalars come from the LaunchRecords
+                self.host_args.append((name, "data", None))
+                continue
+            if a["dtype"] not in TORCH_BITS:
+                raise Unsupported(
+                    "cuda.launch_ex", "host", f"{name}: torch dtype {a['dtype']}"
+                )
+            rank = len(a["shape"])
+            dims = {f: [self._param(f"{name}_{f}{i}", 64) for i in range(rank)]
+                    for f in ("shape", "stride")}  # fmt: skip
+            self.k.tensors[name] = {"elem_bytes": TORCH_BITS[a["dtype"]] // 8, "pack": 1,
+                                    "shape": dims["shape"], "strides": dims["stride"],
+                                    "uses": set(), "metadata": False}  # fmt: skip
+            self.host_args.append((name, "tensor", None))
+
+    def _tensor_params(self, name, info, a, params) -> None:
+        for i, (n, s) in enumerate(zip(a["shape"], a["stride"])):
+            params[f"{name}_shape{i}"], params[f"{name}_stride{i}"] = n, s
+
+    def assemble(self, facts, table: list, launches: list, records: list) -> dict:
+        """The KIR: Facts' roles and barriers, the tensors they touch, every launch an
+        input with its record's scalar values and grid."""
+        for name, t in facts.tensors.items():
+            self.k.tensors[name].update(uses=set(t["uses"]), metadata=t["metadata"])
+        self.params.update(facts.params)
+        self.k.cluster = facts.cluster
+        self.mark_segment_offsets()
+        self.check_metadata_writes(launches)
+        inputs = self.inputs(launches)
+        for inp, record in zip(inputs, records):
+            inp["params"].update(_record_values(table, record, facts.params))
+            inp["grid"] = record["grid"]
+        roles = [{k: r[k] for k in ("name", "warps", "threads_per_issue", "body")}
+                 for r in facts.roles]  # fmt: skip
+        grid = [E.to_json(E.const(g, 32)) for g in records[0]["grid"]]
+        return self.document("ptx", facts.target, grid, facts.barriers, roles, inputs)
+
+
+def _named_args(rec: dict, args: list) -> list:
+    """(leaf name, argument) of a launch's arguments in _flatten order: the launch passes
+    the jit function's parameters in order (host_patches records them positionally), each
+    a value per leaf of its compile-time parameter; constexpr parameters and a stream
+    take no host argument."""
+    out = []
+    for p, a in zip(rec["params"], args):
+        values = _flatten([a])
+        if p["constexpr"] or not values:
+            continue
+        if len(values) != len(p["leaves"]):
+            raise Unsupported("cuda.launch_ex", "host", f"argument {p['name']}: {len(values)} launch values "
+                                                        f"for the leaves {p['leaves']}")  # fmt: skip
+        out += zip(p["leaves"], values)
+    if len(out) != len(_flatten(args)):
+        raise Unsupported("cuda.launch_ex", "host", f"{len(_flatten(args))} launch values for the "
+                                                    f"arguments {[n for n, _ in out]}")  # fmt: skip
+    return out
+
+
+def _record_values(table: list, record: dict, widths: dict) -> dict:
+    """The KIR scalar params (param<i>, param<i>_<off>) of one launch: its LaunchRecord's
+    parameter bytes, as signed integers of the param's width."""
+    out = {}
+    for k, p in enumerate(table):
+        rp = record["params"][k]
+        fields = {f["off"]: f["value"] for f in rp.get("fields") or ()}
+        found = [(p["name"], rp.get("value"))] if p["kind"] == "scalar" else []
+        found += [(f["name"], fields[off]) for off, f in p["fields"].items()]
+        for name, v in found:
+            if name in widths:
+                w = widths[name]
+                out[name] = v - (1 << w) if v >= 1 << (w - 1) else v
+    return out
+
+
+def _ptx(module: str):
+    """A module of frontend/ptx, this package's sibling (a top-level package when this
+    file runs standalone)."""
+    parent = (__package__ or "").rpartition(".")[0]
+    return importlib.import_module(
+        f"{parent}.ptx.{module}" if parent else f"ptx.{module}"
+    )
+
+
+def translate_ptx(case: dict, dump: dict, recs: list, launches: list, las: list):
+    """(PtxVariant, KIR) of the variant compiled by `recs` (one initial-MLIR digest) from
+    its PTX and the LaunchRecords of its launches `las` (named in `launches`)."""
+    T, anchors = _ptx("translate"), _ptx("anchors")
+    locs = PTX_LOCS.get(dump["dsl"]["version"])
+    if locs is None:
+        raise Unsupported("dump", "dsl", f"CuTe DSL {dump['dsl']['version']}: the PTX frontend knows the "
+                                         f"locations of {sorted(PTX_LOCS)}", kind="error")  # fmt: skip
+    v, text, fn, records, table = _ptx_variant(case, dump, recs, launches, las)
+    work = v.notes.get("work", {})
+    try:
+        sites, _notes = anchors.resolve(
+            work, "cute", fn, [dump["source"]["src"]], locs["loc_mode"]
+        )
+    except anchors.AnchorError as e:
+        raise Unsupported("case", "work", str(e), kind="error") from e
+    notes = v.notes.get("tensors", {})
+    per = sorted({t["segments"]["per"] for t in notes.values() if t.get("segments")})
+    pol = T.policy("cute", src_root=dump["source"]["src"], params=table, **locs,
+                   tensors={n: {"elem_bytes": t["elem_bytes"]} for n, t in v.k.tensors.items()},
+                   max_iters=int(case.get("max_iters", 4096)),
+                   work={"fields": list(work), "mode": "each", "per": per, "sites": sites})  # fmt: skip
+    facts = T.translate(text, fn.name, records, pol)
+    if facts.refusals:
+        where = Path(recs[0]["ptx"]["file"]).name
+        refusal = facts.refusals[0]
+        raise Unsupported("PTX", where, refusal["msg"], kind=refusal["kind"])
+    return v, v.assemble(facts, table, launches, records)
+
+
+def ptx_writer(case: dict, dump: dict, recs: list, launches: list, las: list):
+    """A PtxVariant whose written tensors are the PTX write set (translate.writes) of a
+    variant translate_ptx refused, for _check_provenance; None if the PTX does not bound
+    them (then every argument of its launches may be written, as for the legacy
+    translation's refusals)."""
+    try:
+        v, text, fn, records, table = _ptx_variant(case, dump, recs, launches, las)
+    except Unsupported:
+        return None
+    written = _ptx("translate").writes(text, fn.name, table)
+    if written is None:
+        return None
+    for name in written:
+        v.k.tensors[name]["uses"].add("gstore")
+    return v
+
+
+def _p1_ptx(rec: dict) -> dict:
+    """The P1 entry of a variant translate_ptx translated: no P1 pass in M1, so a kernel
+    without tcgen05 has nothing for P1-1 to check (what the legacy pass finds), any other
+    is not checked."""
+    if "tcgen05." in Path(rec["ptx"]["file"]).read_text():
+        return {"status": "refused", "error": "P1-1 is not in M1 of the PTX frontend"}
+    return {"status": "not_applicable",
+            "error": "the kernel allocates and accesses no tensor memory"}  # fmt: skip
+
+
+def _ptx_variant(case: dict, dump: dict, recs: list, launches: list, las: list):
+    """(PtxVariant, PTX text, parsed entry, LaunchRecord per launch, param_table)."""
+    T, parse = _ptx("translate"), _ptx("parse")
+    rec = recs[0]
+    if len({c.get("ptx", {}).get("sha256") for c in recs}) != 1 or "ptx" not in rec:
+        raise Unsupported("dump", "ptx", f"no single PTX for the variant ({rec.get('ptx_error', 'differing PTX')})",
+                          kind="error")  # fmt: skip
+    records = []
+    for (name, _args), la in zip(launches, las):
+        got = la.get("launch_records", [])
+        if la.get("capture_error") or len(got) != 1:
+            raise Unsupported("cuda.launch_ex", "host", f"input {name}: "
+                              f"{la.get('capture_error') or f'{len(got)} launch records'}", kind="error")  # fmt: skip
+        records.append(got[0])
+    text = Path(rec["ptx"]["file"]).read_text()
+    try:
+        fn = parse.parse(text).function(records[0]["entry"])
+    except (parse.PtxSyntaxError, KeyError) as e:
+        raise Unsupported("PTX", Path(rec["ptx"]["file"]).name, f"{type(e).__name__}: {e}",
+                          kind="error") from e  # fmt: skip
+    v = PtxVariant(case, dump, rec, launches[0][1])
+    leaves = [x for p in rec["params"] if not p["constexpr"] for x in p["leaves"]]
+    return v, text, fn, records, T.param_table(records, "cute", fn, leaves)
 
 
 def _byte_span(a: dict):
@@ -867,6 +1085,14 @@ def _load_dump(out: Path) -> dict:
     return dump
 
 
+def frontend() -> str:
+    """The Layer-1 translation LKV_FRONTEND selects: "legacy" (unset) or "ptx"."""
+    name = os.environ.get("LKV_FRONTEND") or "legacy"
+    if name not in ("legacy", "ptx"):
+        raise SystemExit(f"LKV_FRONTEND={name!r}: expected legacy or ptx")
+    return name
+
+
 def run(case_path: Path, out: Path, p1: bool = True) -> list:
     case = json.loads(Path(case_path).read_text())
     dump = _load_dump(out)
@@ -877,14 +1103,18 @@ def run(case_path: Path, out: Path, p1: bool = True) -> list:
     by_digest: dict = {}
     for c in dump["compiles"]:
         by_digest.setdefault(c["digest"], []).append(c)
-    report, results = [], {}
+    ptx = frontend() == "ptx"
+    if ptx:  # shows in lkv.py's logs/frontend.log that the switch arrived
+        print("[to_kir] LKV_FRONTEND=ptx: translating the PTX", file=sys.stderr)
+    report, results, writers = [], {}, {}
     for digest, recs in by_digest.items():
         rec = recs[0]
         cls = rec["callable"].rsplit(".", 1)[-1]
         indices = {c["index"] for c in recs}
-        launches = []
+        launches, las = [], []
         for inp in dump["inputs"]:
             mine = [la for la in inp["launches"] if la["compile"] in indices]
+            las += mine
             for j, la in enumerate(mine):
                 launches.append(
                     (
@@ -901,7 +1131,7 @@ def run(case_path: Path, out: Path, p1: bool = True) -> list:
         report.append(entry)
         # "kind" of a variant that gets no KIR: "gap", a construct the frontend refuses by
         # design (not an error), or "error", a failure the case, the DSL or LKV must fix.
-        if "stage" not in rec:
+        if "stage" not in rec and not ptx:
             entry["error"] = f"no analyzed stage: {rec.get('stage_error', '?')}"
             entry["kind"] = "error"
             continue
@@ -910,13 +1140,23 @@ def run(case_path: Path, out: Path, p1: bool = True) -> list:
             entry["kind"] = "gap"
             continue
         try:
-            variant, obj = translate(case, dump, rec, launches)
+            if ptx:
+                variant, obj = translate_ptx(case, dump, recs, launches, las)
+            else:
+                variant, obj = translate(case, dump, rec, launches)
         except Unsupported as e:
             entry["error"] = str(e)
             entry["kind"] = e.kind
+            if ptx:
+                writers[digest] = ptx_writer(case, dump, recs, launches, las)
             continue
         results[digest] = (variant, obj, entry)
-        if p1:
+        if ptx and PTX_LOCS[entry["dsl"]]["loc_mode"] == "line_only":
+            # lkv.py marks the report's source lines best effort
+            entry["loc_quality"] = "line_only"
+        if p1 and ptx:
+            entry["p1"] = _p1_ptx(rec)
+        elif p1:
             try:
                 obj1 = translate_p1(case, dump, rec, launches)
                 entry["p1"] = (
@@ -941,7 +1181,7 @@ def run(case_path: Path, out: Path, p1: bool = True) -> list:
         if "host_error" in inp:
             report.append({"kernel": "(host)", "digest": "-", "inputs": [inp["name"]], "dsl": dump["dsl"]["version"],
                            "error": f"the host rejected input {inp['name']}: {inp['host_error']}"})  # fmt: skip
-    _check_provenance(dump, by_digest, results)
+    _check_provenance(dump, by_digest, results, writers)
     written = []
     for digest, (_variant, obj, entry) in results.items():
         path = kir_dir / f"{entry['kernel']}__{digest}.json"
@@ -976,26 +1216,30 @@ def run(case_path: Path, out: Path, p1: bool = True) -> list:
     return written + [str(kir_dir / "report.json")]
 
 
-def _check_provenance(dump: dict, by_digest: dict, results: dict) -> None:
+def _check_provenance(
+    dump: dict, by_digest: dict, results: dict, writers: dict | None = None
+) -> None:
     """Every launch is skipped, so data an earlier launch of the run may write keeps its
     CPU contents (the inputs run in one process, so a launch of one input may write what a
     later input reads, e.g. through a module-level cache). A translated variant must not
     read such data as metadata, nor may the host read it before one of the variant's
     launches; data reaches a launch argument or a host read directly or through host
     computation (its "sources", ttgir.host_reads). Launch indices are run-wide; a host
-    read in an earlier input counts too (it may have filled a cache)."""
+    read in an earlier input counts too (it may have filled a cache). A variant without
+    a translation writes what `writers` gives for its digest (ptx_writer), else
+    anything it may address (_writes)."""
     digest_of = {c["index"]: c["digest"] for c in dump["compiles"]}
     writes = []  # per launch of the run: storage blocks it may write -> its kernel
     for inp in dump["inputs"]:
         for la in inp["launches"]:
-            pres = results.get(digest_of[la["compile"]])
-            kernel = by_digest[digest_of[la["compile"]]][0]["callable"]
-            writes.append(
-                dict.fromkeys(
-                    _writes(pres[0] if pres and "error" not in pres[2] else None, la),
-                    kernel,
-                )
-            )
+            digest = digest_of[la["compile"]]
+            pres = results.get(digest)
+            kernel = by_digest[digest][0]["callable"]
+            if pres and "error" not in pres[2]:
+                variant = pres[0]
+            else:
+                variant = (writers or {}).get(digest)
+            writes.append(dict.fromkeys(_writes(variant, la), kernel))
     reads, i = (
         [],
         0,

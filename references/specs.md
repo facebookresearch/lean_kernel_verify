@@ -492,6 +492,7 @@ the other keys say why.
 | `error` | only if the pipeline failed (e.g. the frontend crashed): the message; the run is an ERROR |
 | `case`, `out`, `src`, `p1_strict` | the case name (`check`: `--name`, default `kir`), the output directory, the exported source root (null for `check` without `--src`), whether `--p1-strict` was given |
 | `case_file`, `frontend`, `target`, `rev`, `env` | `run` only: the case file, `cute` or `ttgir`, the target, the analyzed revision (null if unknown), the frontend's environment record (dump.json `"env"`) |
+| `loc_quality` | `run` only, and only if some KIR's source locations are best effort: `{variant: "line_only"}`, the variants the CuTe frontend translated from DSL 4.4.2 PTX (`LKV_FRONTEND=ptx`), whose line numbers are read in the kernel's own source file (frontend_cute.md, "PTX translation"); report.md's environment section names them |
 | `host_rejected` | `[{input, error}]`: the inputs the host code rejected; they count toward no outcome |
 | `frontend_failures` | `[{variant, kernel, inputs, kind, error}]`: the P0 variants the frontend made no KIR for, with the inputs that launched them; `kind` is `gap` (refused by design: UNDECIDED) or `error` (ERROR) |
 | `variants`, `variants_p1` | the P0 and the P1 KIRs Lean checked or tried to (below) |

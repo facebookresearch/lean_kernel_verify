@@ -128,8 +128,11 @@ def build(fn):
     blocks, alias, cur = {}, {}, None
     for x in fn.body:
         if isinstance(x, parse.Label):
-            if cur is not None and not cur.instrs:
-                alias[x.name] = cur.name  # consecutive labels name one block
+            # Consecutive labels name one block, but an inline-asm scope's label (`L#k`)
+            # starts its own: a wait loop right at an outer loop's header stays a loop
+            # of its own (regions.py's Wait), not part of the outer one.
+            if cur is not None and not cur.instrs and "#" not in x.name:
+                alias[x.name] = cur.name
                 continue
             cur = blocks[x.name] = Block(x.name, [])
         else:
@@ -278,7 +281,11 @@ def _check_shape(cfg):
 def roles(cfg):
     """The roles of the kernel and its warp-specialize Dispatch (None without brx.idx)."""
     fn = cfg.fn
-    brx = [b for b, blk in cfg.blocks.items() if blk.instrs[-1].base == "brx"]
+    brx = [
+        b
+        for b, blk in cfg.blocks.items()
+        if blk.instrs and blk.instrs[-1].base == "brx"
+    ]
     if len(brx) > 1:
         lines = [cfg.blocks[b].instrs[-1].line for b in brx]
         raise CfgError(
@@ -312,7 +319,11 @@ def _warp_specialized(cfg, xb, nwarps):
     targets = blocks[xb].succs
     db, D, wid, default, worker = _entry(cfg, h, nwarps)
     smem, K = _state_base(cfg, h, ld, wid)
-    ret = next(b for b, blk in blocks.items() if blk.instrs[-1].base in ("ret", "exit"))
+    ret = next(
+        b
+        for b, blk in blocks.items()
+        if blk.instrs and blk.instrs[-1].base in ("ret", "exit")
+    )
     pre, side, dflt = _parts(cfg, h, db, default, worker, ret)
     warps, E = _state_map(cfg, smem, K, D, nwarps, targets, default, dflt, ret)
     first = {b: blocks[b].succs for b in dflt}
@@ -423,8 +434,13 @@ def _header(cfg, xb):
         )
     h = blocks[xb].preds[0]
     instrs = blocks[h].instrs
-    bypass = instrs[-1]
-    if xb not in cfg.loops.get(h, ()) or bypass.base != "bra" or bypass.guard is None:
+    bypass = instrs[-1] if instrs else None
+    if (
+        xb not in cfg.loops.get(h, ())
+        or bypass is None
+        or bypass.base != "bra"
+        or bypass.guard is None
+    ):
         raise _no(
             cfg,
             "header",

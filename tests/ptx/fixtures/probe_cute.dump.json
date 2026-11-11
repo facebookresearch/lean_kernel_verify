@@ -1,0 +1,327 @@
+{
+ "case": "probe_cute",
+ "source": {
+  "src": "@SRC@"
+ },
+ "num_sms": 2,
+ "dsl": {
+  "version": "4.4.2"
+ },
+ "compiles": [
+  {
+   "index": 0,
+   "callable": "lkv_e2e_probe_cute.host",
+   "flags": {},
+   "digest": "02200b3bc0acee10",
+   "params": [
+    {
+     "name": "m",
+     "constexpr": false,
+     "leaves": [
+      "m"
+     ]
+    }
+   ],
+   "ptx": {
+    "file": "probe_cute.ptx",
+    "sha256": "a2ad12cb5a64fb7abeaf861b15f70250cfc661ae68567bf27d0ac4b8bd40a6e2"
+   }
+  },
+  {
+   "index": 1,
+   "callable": "lkv_e2e_probe_cute.host",
+   "flags": {},
+   "digest": "02200b3bc0acee10",
+   "params": [
+    {
+     "name": "m",
+     "constexpr": false,
+     "leaves": [
+      "m"
+     ]
+    }
+   ],
+   "ptx": {
+    "file": "probe_cute.ptx",
+    "sha256": "a2ad12cb5a64fb7abeaf861b15f70250cfc661ae68567bf27d0ac4b8bd40a6e2"
+   }
+  },
+  {
+   "index": 2,
+   "callable": "lkv_e2e_probe_cute.host",
+   "flags": {},
+   "digest": "02200b3bc0acee10",
+   "params": [
+    {
+     "name": "m",
+     "constexpr": false,
+     "leaves": [
+      "m"
+     ]
+    }
+   ],
+   "ptx": {
+    "file": "probe_cute.ptx",
+    "sha256": "a2ad12cb5a64fb7abeaf861b15f70250cfc661ae68567bf27d0ac4b8bd40a6e2"
+   }
+  }
+ ],
+ "inputs": [
+  {
+   "name": "n128",
+   "host_reads": [],
+   "launches": [
+    {
+     "compile": 0,
+     "args": [
+      {
+       "kind": "tensor",
+       "dtype": "float32",
+       "shape": [
+        128
+       ],
+       "stride": [
+        1
+       ],
+       "storage": [
+        140139516800000,
+        512
+       ],
+       "byte_offset": 0,
+       "sources": []
+      }
+     ],
+     "hinted": [],
+     "launch_records": [
+      {
+       "kernel": "host",
+       "target": "sm_100a",
+       "entry": "kernel_cutlass_add_one_tensorptrf32gmemalign16o1_0",
+       "grid": [
+        1,
+        1,
+        1
+       ],
+       "block": [
+        128,
+        1,
+        1
+       ],
+       "cluster": [
+        1,
+        1,
+        1
+       ],
+       "smem_dynamic": 0,
+       "attrs": {
+        "pdl": false,
+        "cooperative": false
+       },
+       "params": [
+        {
+         "i": 0,
+         "name": "kernel_cutlass_add_one_tensorptrf32gmemalign16o1_0_param_0",
+         "decl": ".param .align 8 .b8 kernel_cutlass_add_one_tensorptrf32gmemalign16o1_0_param_0[16]",
+         "kind": "aggregate",
+         "type": "b8",
+         "size": 16,
+         "align": 8,
+         "bytes": "002c1ec6747f000080000000747f0000",
+         "fields": [
+          {
+           "off": 0,
+           "size": 8,
+           "name": "param0_0",
+           "value": 140139516800000,
+           "kind": "ptr",
+           "tensor": [
+            {
+             "tensor": "m",
+             "storage": [
+              140139516800000,
+              140139516800512
+             ],
+             "elem_off": 0,
+             "match": "exact"
+            }
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "n100",
+   "host_reads": [],
+   "launches": [
+    {
+     "compile": 1,
+     "args": [
+      {
+       "kind": "tensor",
+       "dtype": "float32",
+       "shape": [
+        100
+       ],
+       "stride": [
+        1
+       ],
+       "storage": [
+        140139518327104,
+        400
+       ],
+       "byte_offset": 0,
+       "sources": []
+      }
+     ],
+     "hinted": [],
+     "launch_records": [
+      {
+       "kernel": "host",
+       "target": "sm_100a",
+       "entry": "kernel_cutlass_add_one_tensorptrf32gmemalign16o1_0",
+       "grid": [
+        1,
+        1,
+        1
+       ],
+       "block": [
+        128,
+        1,
+        1
+       ],
+       "cluster": [
+        1,
+        1,
+        1
+       ],
+       "smem_dynamic": 0,
+       "attrs": {
+        "pdl": false,
+        "cooperative": false
+       },
+       "params": [
+        {
+         "i": 0,
+         "name": "kernel_cutlass_add_one_tensorptrf32gmemalign16o1_0_param_0",
+         "decl": ".param .align 8 .b8 kernel_cutlass_add_one_tensorptrf32gmemalign16o1_0_param_0[16]",
+         "kind": "aggregate",
+         "type": "b8",
+         "size": 16,
+         "align": 8,
+         "bytes": "407935c6747f000064000000757f0000",
+         "fields": [
+          {
+           "off": 0,
+           "size": 8,
+           "name": "param0_0",
+           "value": 140139518327104,
+           "kind": "ptr",
+           "tensor": [
+            {
+             "tensor": "m",
+             "storage": [
+              140139518327104,
+              140139518327504
+             ],
+             "elem_off": 0,
+             "match": "exact"
+            }
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "n0",
+   "host_reads": [],
+   "launches": [
+    {
+     "compile": 2,
+     "args": [
+      {
+       "kind": "tensor",
+       "dtype": "float32",
+       "shape": [
+        0
+       ],
+       "stride": [
+        1
+       ],
+       "storage": [
+        0,
+        0
+       ],
+       "byte_offset": 0,
+       "sources": []
+      }
+     ],
+     "hinted": [],
+     "launch_records": [
+      {
+       "kernel": "host",
+       "target": "sm_100a",
+       "entry": "kernel_cutlass_add_one_tensorptrf32gmemalign16o1_0",
+       "grid": [
+        1,
+        1,
+        1
+       ],
+       "block": [
+        128,
+        1,
+        1
+       ],
+       "cluster": [
+        1,
+        1,
+        1
+       ],
+       "smem_dynamic": 0,
+       "attrs": {
+        "pdl": false,
+        "cooperative": false
+       },
+       "params": [
+        {
+         "i": 0,
+         "name": "kernel_cutlass_add_one_tensorptrf32gmemalign16o1_0_param_0",
+         "decl": ".param .align 8 .b8 kernel_cutlass_add_one_tensorptrf32gmemalign16o1_0_param_0[16]",
+         "kind": "aggregate",
+         "type": "b8",
+         "size": 16,
+         "align": 8,
+         "bytes": "000000000000000000000000757f0000",
+         "fields": [
+          {
+           "off": 0,
+           "size": 8,
+           "name": "param0_0",
+           "value": 0,
+           "kind": "scalar"
+          }
+         ]
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "n200",
+   "host_reads": [],
+   "launches": [],
+   "host_error": "ValueError: probe takes at most 128 elements at lkv_e2e_probe_cute.py:33"
+  }
+ ]
+}

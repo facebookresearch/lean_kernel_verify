@@ -194,7 +194,7 @@ structure Param where
   deriving Repr
 
 inductive Ir where
-  | ttgir | «cute-mlir»
+  | ttgir | «cute-mlir» | ptx
   deriving Repr
 
 /-- The KIR top level without `case` (inputs are passed to the checker separately). -/

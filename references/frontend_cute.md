@@ -458,6 +458,27 @@ instead.
   out-of-bounds write of its seeded unmasked fill from P0-1 to P0-5 in Lean, and a
   misspelled flag is refused.
 
+## PTX translation (preview)
+
+`LKV_FRONTEND=ptx` in the environment of `lkv.py run` (or of `to_kir`) makes `to_kir`
+translate the PTX the dump records for each variant (`ptx/NN_<digest>.ptx`) instead of
+the analyzed stage. The shared PTX core (`frontend/ptx/`) gives the roles, events and
+barriers, and `to_kir` assembles them with the variant's tensors, inputs and checks as
+above: the same variant names and `kir/report.json`; the KIR has `ir` `"ptx"`
+(`kir.md`), every tensor shape and stride leaf is an i64 param, the scalar params are
+the kernel-parameter bytes the PTX reads, and `logs/frontend.log` shows `[to_kir]
+LKV_FRONTEND=ptx: translating the PTX`. The preview covers global loads and stores,
+metadata loads, mbarriers and their waits, and `work`; TMA, tcgen05, cluster and CLC
+instructions are refused as gaps (`not in M1`), and there is no P1 pass (P1 is
+`not_applicable` without tcgen05 in the PTX, else `refused`). DSL 4.4.2's PTX names
+wrong source files, so only its line numbers are used, read in the kernel's own source
+file (a `.loc` on a blank or comment position is skipped; a `where` anchor matches by
+line): these locations are best effort, which the variant's `kir/report.json` entry
+(`"loc_quality": "line_only"`), report.json `loc_quality` and report.md's environment
+section say. Under 4.6.1 locations are exact (an inline asm block's instructions take
+the location of its start). Unset or `legacy` is the translation above and the default;
+any other value is an error.
+
 ## Limitations
 
 * A verdict covers the case inputs, the analyzed variants and `max_iters`.

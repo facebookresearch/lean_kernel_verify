@@ -283,6 +283,8 @@ def run_cute(case_path, case, root, fe, logs, sel):
     for e in json.loads(report.read_text()):
         if "kir" in e:
             kirs.append(Path(e["kir"]))
+            if "loc_quality" in e:
+                LOC_QUALITY[f"{e['kernel']}__{e['digest']}"] = e["loc_quality"]
         elif e["kernel"] != "(host)":  # a rejected input, read from dump.json
             failures.append(
                 {
@@ -312,6 +314,11 @@ def run_cute(case_path, case, root, fe, logs, sel):
 # P1 translations without a P1 KIR (refused, failed: "error", not applicable), filled by
 # the frontends.
 P1_NOT_CHECKED = []
+# KIRs whose source lines are best effort, {variant: "line_only"}, filled by run_cute:
+# the CuTe frontend's PTX translation (LKV_FRONTEND=ptx) under DSL 4.4.2, whose PTX
+# attributes code to the wrong source files, takes only the line numbers, in the
+# kernel's own source file. Empty for the legacy translation: no report key.
+LOC_QUALITY = {}
 
 
 def run_ttgir(case_path, root, fe, logs, sel, target):
@@ -1110,7 +1117,9 @@ def md_variants(report):
 
 
 def md_env(report):
-    """The environment the frontend ran with (dump.json "env", frontend/ttgir/host_env.py)."""
+    """The environment the frontend ran with (dump.json "env",
+    frontend/ttgir/host_env.py), and the variants whose source lines are best effort
+    (`loc_quality`, LOC_QUALITY)."""
     env = report.get("env")
     if not env:
         return []
@@ -1129,6 +1138,14 @@ def md_env(report):
     if "triton_cache_invalidating" in env:
         out.append(
             f"- Triton cache-invalidating variables: {pairs(env['triton_cache_invalidating'])}"
+        )
+    if report.get("loc_quality"):
+        out.append(
+            "- source locations are best effort in "
+            + ", ".join(map(code, sorted(report["loc_quality"])))
+            + ": the CuTe DSL 4.4.2 PTX names wrong source files, so its line numbers "
+            "are read in the kernel's own source file (a line may belong to another "
+            "file)"
         )
     return out
 
@@ -1244,6 +1261,8 @@ def write_report(report, out):
     report["variants_p1"] = [v for v in report["variants"] if v.get("p1")]
     report["variants"] = [v for v in report["variants"] if not v.get("p1")]
     report["p1_not_checked"] = list(P1_NOT_CHECKED)
+    if LOC_QUALITY:
+        report["loc_quality"] = dict(LOC_QUALITY)
     report["totals"] = totals(report["variants"], LABELS, unchecked(report))
     report["totals_p1"] = totals(
         report["variants_p1"], LABELS_P1, unchecked(report, p1=True)

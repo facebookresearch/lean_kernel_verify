@@ -1,0 +1,700 @@
+{
+ "case": "probe_tlx",
+ "kernel": "probe",
+ "source": "tests/e2e/kernels/lkv_e2e_probe_tlx.py",
+ "src_root": "@SRC@",
+ "num_sms": 2,
+ "target": {
+  "name": "sm_100",
+  "arch": 100,
+  "max_shared_mem": 232448
+ },
+ "compiler": {
+  "name": "triton",
+  "version": "3.9.0"
+ },
+ "specs": {
+  "1691f771b8a0": {
+   "kernel": "probe",
+   "ptx": "probe_tlx.ptx",
+   "constexprs": {
+    "BLOCK": 128
+   },
+   "shared_bytes": 28
+  },
+  "6614c8dcb51d": {
+   "kernel": "probe",
+   "ptx": "probe_tlx.ptx",
+   "constexprs": {
+    "BLOCK": 128
+   },
+   "shared_bytes": 28
+  }
+ },
+ "inputs": [
+  {
+   "name": "aligned",
+   "stale_reads": [],
+   "launches": [
+    {
+     "spec": "1691f771b8a0",
+     "index": 0,
+     "grid": [
+      2,
+      1,
+      1
+     ],
+     "args": {
+      "x_ptr": {
+       "kind": "tensor",
+       "dtype": "float32",
+       "elem_bytes": 4,
+       "shape": [
+        256
+       ],
+       "strides": [
+        1
+       ],
+       "storage_offset": 0,
+       "storage": [
+        140327963520000,
+        140327963521024
+       ],
+       "data_ptr": 140327963520000
+      },
+      "n": {
+       "kind": "scalar",
+       "value": 256
+      },
+      "BLOCK": {
+       "kind": "scalar",
+       "value": 128
+      }
+     },
+     "stale": {},
+     "launch": {
+      "entry": "probe",
+      "grid": [
+       2,
+       1,
+       1
+      ],
+      "block": [
+       256,
+       1,
+       1
+      ],
+      "cluster": [
+       1,
+       1,
+       1
+      ],
+      "smem_dynamic": 28,
+      "attrs": {
+       "pdl": false,
+       "cooperative": false,
+       "preferred_cluster": null
+      },
+      "params": [
+       {
+        "i": 0,
+        "name": "x_ptr",
+        "type": "*fp32",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 140327963520000,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_0"
+       },
+       {
+        "i": 1,
+        "name": "n",
+        "type": "i32",
+        "kind": "scalar",
+        "size": 4,
+        "align": 4,
+        "value": 256,
+        "decl": ".param .b32 probe_param_1"
+       },
+       {
+        "i": 2,
+        "name": "__global_scratch",
+        "type": "*i8",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 0,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_2"
+       },
+       {
+        "i": 3,
+        "name": "__profile_scratch",
+        "type": "*i8",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 0,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_3"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "partial",
+   "stale_reads": [],
+   "launches": [
+    {
+     "spec": "6614c8dcb51d",
+     "index": 1,
+     "grid": [
+      3,
+      1,
+      1
+     ],
+     "args": {
+      "x_ptr": {
+       "kind": "tensor",
+       "dtype": "float32",
+       "elem_bytes": 4,
+       "shape": [
+        300
+       ],
+       "strides": [
+        1
+       ],
+       "storage_offset": 0,
+       "storage": [
+        140327975053568,
+        140327975054768
+       ],
+       "data_ptr": 140327975053568
+      },
+      "n": {
+       "kind": "scalar",
+       "value": 300
+      },
+      "BLOCK": {
+       "kind": "scalar",
+       "value": 128
+      }
+     },
+     "stale": {},
+     "launch": {
+      "entry": "probe",
+      "grid": [
+       3,
+       1,
+       1
+      ],
+      "block": [
+       256,
+       1,
+       1
+      ],
+      "cluster": [
+       1,
+       1,
+       1
+      ],
+      "smem_dynamic": 28,
+      "attrs": {
+       "pdl": false,
+       "cooperative": false,
+       "preferred_cluster": null
+      },
+      "params": [
+       {
+        "i": 0,
+        "name": "x_ptr",
+        "type": "*fp32",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 140327975053568,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_0"
+       },
+       {
+        "i": 1,
+        "name": "n",
+        "type": "i32",
+        "kind": "scalar",
+        "size": 4,
+        "align": 4,
+        "value": 300,
+        "decl": ".param .b32 probe_param_1"
+       },
+       {
+        "i": 2,
+        "name": "__global_scratch",
+        "type": "*i8",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 0,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_2"
+       },
+       {
+        "i": 3,
+        "name": "__profile_scratch",
+        "type": "*i8",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 0,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_3"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "partial_floor",
+   "stale_reads": [],
+   "launches": [
+    {
+     "spec": "6614c8dcb51d",
+     "index": 2,
+     "grid": [
+      2,
+      1,
+      1
+     ],
+     "args": {
+      "x_ptr": {
+       "kind": "tensor",
+       "dtype": "float32",
+       "elem_bytes": 4,
+       "shape": [
+        300
+       ],
+       "strides": [
+        1
+       ],
+       "storage_offset": 0,
+       "storage": [
+        140327524142336,
+        140327524143536
+       ],
+       "data_ptr": 140327524142336
+      },
+      "n": {
+       "kind": "scalar",
+       "value": 300
+      },
+      "BLOCK": {
+       "kind": "scalar",
+       "value": 128
+      }
+     },
+     "stale": {},
+     "launch": {
+      "entry": "probe",
+      "grid": [
+       2,
+       1,
+       1
+      ],
+      "block": [
+       256,
+       1,
+       1
+      ],
+      "cluster": [
+       1,
+       1,
+       1
+      ],
+      "smem_dynamic": 28,
+      "attrs": {
+       "pdl": false,
+       "cooperative": false,
+       "preferred_cluster": null
+      },
+      "params": [
+       {
+        "i": 0,
+        "name": "x_ptr",
+        "type": "*fp32",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 140327524142336,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_0"
+       },
+       {
+        "i": 1,
+        "name": "n",
+        "type": "i32",
+        "kind": "scalar",
+        "size": 4,
+        "align": 4,
+        "value": 300,
+        "decl": ".param .b32 probe_param_1"
+       },
+       {
+        "i": 2,
+        "name": "__global_scratch",
+        "type": "*i8",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 0,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_2"
+       },
+       {
+        "i": 3,
+        "name": "__profile_scratch",
+        "type": "*i8",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 0,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_3"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "empty",
+   "stale_reads": [],
+   "launches": [
+    {
+     "spec": "1691f771b8a0",
+     "index": 3,
+     "grid": [
+      0,
+      1,
+      1
+     ],
+     "args": {
+      "x_ptr": {
+       "kind": "tensor",
+       "dtype": "float32",
+       "elem_bytes": 4,
+       "shape": [
+        0
+       ],
+       "strides": [
+        1
+       ],
+       "storage_offset": 0,
+       "storage": [
+        0,
+        0
+       ],
+       "data_ptr": 0
+      },
+      "n": {
+       "kind": "scalar",
+       "value": 0
+      },
+      "BLOCK": {
+       "kind": "scalar",
+       "value": 128
+      }
+     },
+     "stale": {},
+     "launch": {
+      "entry": "probe",
+      "grid": [
+       0,
+       1,
+       1
+      ],
+      "block": [
+       256,
+       1,
+       1
+      ],
+      "cluster": [
+       1,
+       1,
+       1
+      ],
+      "smem_dynamic": 28,
+      "attrs": {
+       "pdl": false,
+       "cooperative": false,
+       "preferred_cluster": null
+      },
+      "params": [
+       {
+        "i": 0,
+        "name": "x_ptr",
+        "type": "*fp32",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 0,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_0"
+       },
+       {
+        "i": 1,
+        "name": "n",
+        "type": "i32",
+        "kind": "scalar",
+        "size": 4,
+        "align": 4,
+        "value": 0,
+        "decl": ".param .b32 probe_param_1"
+       },
+       {
+        "i": 2,
+        "name": "__global_scratch",
+        "type": "*i8",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 0,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_2"
+       },
+       {
+        "i": 3,
+        "name": "__profile_scratch",
+        "type": "*i8",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 0,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_3"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "below_block",
+   "stale_reads": [],
+   "launches": [
+    {
+     "spec": "6614c8dcb51d",
+     "index": 4,
+     "grid": [
+      1,
+      1,
+      1
+     ],
+     "args": {
+      "x_ptr": {
+       "kind": "tensor",
+       "dtype": "float32",
+       "elem_bytes": 4,
+       "shape": [
+        100
+       ],
+       "strides": [
+        1
+       ],
+       "storage_offset": 0,
+       "storage": [
+        140327971238080,
+        140327971238480
+       ],
+       "data_ptr": 140327971238080
+      },
+      "n": {
+       "kind": "scalar",
+       "value": 100
+      },
+      "BLOCK": {
+       "kind": "scalar",
+       "value": 128
+      }
+     },
+     "stale": {},
+     "launch": {
+      "entry": "probe",
+      "grid": [
+       1,
+       1,
+       1
+      ],
+      "block": [
+       256,
+       1,
+       1
+      ],
+      "cluster": [
+       1,
+       1,
+       1
+      ],
+      "smem_dynamic": 28,
+      "attrs": {
+       "pdl": false,
+       "cooperative": false,
+       "preferred_cluster": null
+      },
+      "params": [
+       {
+        "i": 0,
+        "name": "x_ptr",
+        "type": "*fp32",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 140327971238080,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_0"
+       },
+       {
+        "i": 1,
+        "name": "n",
+        "type": "i32",
+        "kind": "scalar",
+        "size": 4,
+        "align": 4,
+        "value": 100,
+        "decl": ".param .b32 probe_param_1"
+       },
+       {
+        "i": 2,
+        "name": "__global_scratch",
+        "type": "*i8",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 0,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_2"
+       },
+       {
+        "i": 3,
+        "name": "__profile_scratch",
+        "type": "*i8",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 0,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_3"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "below_block_floor",
+   "stale_reads": [],
+   "launches": [
+    {
+     "spec": "6614c8dcb51d",
+     "index": 5,
+     "grid": [
+      0,
+      1,
+      1
+     ],
+     "args": {
+      "x_ptr": {
+       "kind": "tensor",
+       "dtype": "float32",
+       "elem_bytes": 4,
+       "shape": [
+        100
+       ],
+       "strides": [
+        1
+       ],
+       "storage_offset": 0,
+       "storage": [
+        140327971239424,
+        140327971239824
+       ],
+       "data_ptr": 140327971239424
+      },
+      "n": {
+       "kind": "scalar",
+       "value": 100
+      },
+      "BLOCK": {
+       "kind": "scalar",
+       "value": 128
+      }
+     },
+     "stale": {},
+     "launch": {
+      "entry": "probe",
+      "grid": [
+       0,
+       1,
+       1
+      ],
+      "block": [
+       256,
+       1,
+       1
+      ],
+      "cluster": [
+       1,
+       1,
+       1
+      ],
+      "smem_dynamic": 28,
+      "attrs": {
+       "pdl": false,
+       "cooperative": false,
+       "preferred_cluster": null
+      },
+      "params": [
+       {
+        "i": 0,
+        "name": "x_ptr",
+        "type": "*fp32",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 140327971239424,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_0"
+       },
+       {
+        "i": 1,
+        "name": "n",
+        "type": "i32",
+        "kind": "scalar",
+        "size": 4,
+        "align": 4,
+        "value": 100,
+        "decl": ".param .b32 probe_param_1"
+       },
+       {
+        "i": 2,
+        "name": "__global_scratch",
+        "type": "*i8",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 0,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_2"
+       },
+       {
+        "i": 3,
+        "name": "__profile_scratch",
+        "type": "*i8",
+        "kind": "ptr",
+        "size": 8,
+        "align": 8,
+        "value": 0,
+        "decl": ".param .u64 .ptr .global .align 1 probe_param_3"
+       }
+      ]
+     }
+    }
+   ]
+  },
+  {
+   "name": "two_dim",
+   "stale_reads": [],
+   "launches": []
+  },
+  {
+   "name": "empty_skipped",
+   "stale_reads": [],
+   "launches": []
+  }
+ ]
+}
