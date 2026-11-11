@@ -801,6 +801,23 @@ class LocAndAddrTest(unittest.TestCase):
         ):
             build(ttgir({}, self.REDUCE), {})
 
+    def test_approx_divf_is_dropped(self):
+        # Newer Triton builds emit tt.approx_divf for a float division: float math, kept
+        # off the slice like tt.precise_divf.
+        div = "    %q = tt.approx_divf %cst, %cst : f32 loc(#loc2)\n"
+        kir = build(ttgir({}, div), {})
+        self.assertEqual(
+            [e["ev"] for e in events(kir["roles"][0]["body"])], ["bar_init"]
+        )
+        decides = f"""    %i = arith.fptosi %q : f32 to i32 loc(#loc3)
+    %c = arith.cmpi sgt, %i, %c0_i32 : i32 loc(#loc3)
+    scf.if %c {{
+      ttng.arrive_barrier %b0, 1 : {BAR} loc(#loc4)
+    }} loc(#loc4)
+"""
+        with self.assertRaisesRegex(SliceError, "dropped op"):
+            build(ttgir({}, div + decides), {})
+
     def test_addr_marks_address_arithmetic_only(self):
         body = """    %pid = tt.get_program_id x : i32 loc(#loc2)
     %off = arith.muli %pid, %c64_i32 : i32 loc(#loc2)

@@ -156,6 +156,7 @@ DROP_OPS = {
     "tt.scan.return",
     "tt.elementwise_inline_asm",
     "tt.precise_divf",
+    "tt.approx_divf",
     "tt.precise_sqrt",
     "tt.trans",
     "tt.reshape",

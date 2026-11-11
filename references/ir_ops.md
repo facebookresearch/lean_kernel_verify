@@ -132,7 +132,7 @@ i32 tensor terms).
 Floating-point arithmetic and math (`arith.addf subf mulf divf remf negf maximumf
 minimumf maxnumf minnumf truncf extf sitofp uitofp fptosi fptoui cmpf bitcast`,
 `math.exp exp2 log log2 sqrt rsqrt fma absf erf tanh floor ceil sin cos`,
-`tt.fp_to_fp precise_divf precise_sqrt clampf`), tile data movement and reshaping
+`tt.fp_to_fp precise_divf precise_sqrt approx_divf clampf`), tile data movement and reshaping
 (`ttg.local_load local_store local_dealloc memdesc_trans memdesc_reinterpret
 memdesc_subslice`, `ttng.tmem_alloc tmem_load tmem_store tmem_subslice tmem_copy`,
 `tt.trans reshape split join cat bitcast reduce reduce.return scan scan.return`),
