@@ -125,7 +125,7 @@ class Kernel:
     work: dict = field(default_factory=dict)  # id(instr) -> [anchor site]
     work_fields: tuple = ()
     work_mode: str = "gate"  # "gate" (the TTGIR rule) or "each" (the CuTe rule)
-    work_per: tuple = ()  # work fields that name tensor segments (`per`)
+    work_per: dict = field(default_factory=dict)  # field -> tensors segmented per it
     origin: dict = field(
         default_factory=dict
     )  # expression -> (loc, line) of its instruction
@@ -174,6 +174,7 @@ class Translator:
         self.regions: list = []  # open If branches: (id(node), side) (barrier keys)
         self.work_scopes: list = [{}]  # work fields defined in each open region
         self.work_events = 0
+        self.novalue: dict = {}  # `per` field defined without a value -> its first anchor
         self.slot_facts: dict = {}  # slot variable -> known trailing zeros
         self.cur = None  # the instruction being translated
         self._inst: dict = {}
@@ -1594,13 +1595,10 @@ class Translator:
                     ),
                 )
             if site["kind"] == "novalue":  # defined here, no instruction holds it
-                if name in self.k.work_per:
-                    self.fail(
-                        i,
-                        f"work field '{name}' names segments but no instruction holds "
-                        "its value (anchors.py)",
-                        "error",
-                    )
+                if (
+                    name in self.k.work_per
+                ):  # refused if the role needs it (translate.py)
+                    self.novalue.setdefault(name, i)
                 v = E.const(-1, 64)
             else:
                 v = self.k.mem.anchor_value(self, i, site)

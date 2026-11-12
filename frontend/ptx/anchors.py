@@ -26,7 +26,8 @@ name, index in fn.instructions(), PTX line). The value: for "load", the element 
 load reads; for "assign", register detail["reg"] right after instr; "novalue" has none (an
 assignment that runs but whose value no instruction is known to hold, below): the field
 is defined from instr on, which serves the gating, but its value is unknown, so the
-interpreter must refuse it for a field the spec reads (a segments `per` field). notes:
+translation refuses it where the spec reads it: in a role that accesses a tensor whose
+segments the field names (translate.py _novalue). notes:
 findings worth a message that do not stop the kernel (a dropped branch, loads on several
 lines). A case error is an AnchorError naming the field and the candidates.
 

@@ -552,15 +552,22 @@ class NoValueAnchor(unittest.TestCase):
         return run(GATED, scalars=(), work=work)
 
     def test_defined_without_value(self):
-        f = self.facts([])
-        (w,) = [e for r in f.roles for e in events(r["body"]) if e["ev"] == "work"]
-        self.assertEqual(w["fields"]["head"], {"e": "const", "w": 64, "v": -1})
-        self.assertEqual(w["fields"]["batch"]["e"], "var")
+        # Also where `head` names the segments of a tensor the role does not access.
+        for per in ({}, {"head": ["y"]}, {"batch": ["x"]}):
+            with self.subTest(per=per):
+                f = self.facts(per)
+                self.assertEqual(f.refusals, [])
+                (w,) = [
+                    e for r in f.roles for e in events(r["body"]) if e["ev"] == "work"
+                ]
+                self.assertEqual(w["fields"]["head"], {"e": "const", "w": 64, "v": -1})
+                self.assertEqual(w["fields"]["batch"]["e"], "var")
 
-    def test_refused_for_segments(self):
-        (refusal,) = self.facts(["head"]).refusals
+    def test_refused_where_an_access_needs_its_segment(self):
+        (refusal,) = self.facts({"head": ["x"]}).refusals
         self.assertEqual(refusal["kind"], "error")
         self.assertIn("no instruction holds its value", refusal["msg"])
+        self.assertIn("the role accesses x", refusal["msg"])
 
 
 class TtgirAssembly(unittest.TestCase):

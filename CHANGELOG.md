@@ -94,5 +94,10 @@ First public release.
   executed by part of a warp is undefined in PTX).
 - TTGIR frontend: two mbarrier arrays, or two in-kernel descriptors, printed with one SSA
   name in sibling regions are refused instead of merged into one KIR name.
+- TTGIR frontend: `tt.approx_divf` (a float division newer Triton builds emit) is float
+  math like `tt.precise_divf`, dropped and kept off the slice.
+- PTX translation: a TLX work field the compiler folded away in a role (no register
+  holds its value there) is refused only in a role that accesses a tensor whose segments
+  it names, the only accesses whose check reads it; elsewhere it is -1.
 - Docs: CuTe DSL 4.4.2 compiles with the PTX compiler it embeds (12.9.83), not CUDA
   13.0's ptxas; a TMA reduce is once per warp only behind the DSL's `elect.sync`.

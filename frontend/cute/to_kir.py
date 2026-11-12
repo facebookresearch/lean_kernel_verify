@@ -908,7 +908,7 @@ def translate_ptx(
     except anchors.AnchorError as e:
         raise Unsupported("case", "work", str(e), kind="error") from e
     notes = v.notes.get("tensors", {})
-    per = sorted({t["segments"]["per"] for t in notes.values() if t.get("segments")})
+    per = T.per_fields(notes)
     pol = T.policy("cute", src_root=dump["source"]["src"], params=table, **locs, ptxas=_ptxas(recs[0]),
                    tensors={n: {"elem_bytes": t["elem_bytes"], **t["first"]} for n, t in v.k.tensors.items()},
                    max_iters=int(case.get("max_iters", 4096)), p1=p1,

@@ -323,8 +323,9 @@ A case's `work` names, per work field, where its value comes from
   result that leaves that span (a register read outside it). An element of a tuple target
   narrows to the instructions computing that element. No result, or several, is a case
   error naming the candidates. A field the compiler folded away (its assignment runs, no
-  register holds its value) is defined from there on with no value: -1, refused if a
-  segments `per` names it.
+  register holds its value) is defined from there on with no value: -1, refused in a
+  role that accesses a tensor whose segments `per` names it (only those accesses read
+  it).
 * **Load anchor** (`[{"load": "T", "where": "text"}]`; CuTe, and TLX in this translation
   only): `where` matches a source line as a substring of the line or of
   `<relpath>:<line>`; every global load of T located on a matching line is an anchor (DSL

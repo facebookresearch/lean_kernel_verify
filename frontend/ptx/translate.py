@@ -76,9 +76,10 @@ Policy (a dict; `policy()` fills the family defaults):
                     "per": [fields naming tensor segments], "sites": anchor sites}: a
                     site is anchors.Site or a dict {field, kind: "load" | "assign" |
                     "novalue", instr: (function, index in fn.instructions(), line),
-                    detail: {tensor (load) | reg (assign)}}; a "novalue" field (it is
-                    defined there but no instruction holds its value, anchors.py) is
-                    -1, refused if it names segments
+                    detail: {tensor (load) | reg (assign)}}; "per": {field: [tensors
+                    whose segments it names]}; a "novalue" field (it is defined there
+                    but no instruction holds its value, anchors.py) is -1, refused in a
+                    role that accesses a tensor whose segments it names
 
 Facts (refusals non-empty: the variant is refused, everything else empty):
     kernel, target ("sm_100" / "sm_103"), block, cluster
@@ -232,7 +233,7 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
                  split=pol["roles"] == "warps", vectorize=bool(pol.get("vectorize")),
                  work=_sites(fn, work.get("sites", ())),
                  work_fields=tuple(work.get("fields", ())), work_mode=work.get("mode", "gate"),
-                 work_per=tuple(work.get("per", ())),
+                 work_per=dict(work.get("per", {})),
                  srclocs=srclocs, p1=p1)  # fmt: skip
     translators = []
     for role in roles:
@@ -296,6 +297,7 @@ def _role(k, tree, name, w0, nw, pol) -> list:
             raise
         except Exception as e:  # a bug of the core (an ExprError, ...): refused there
             tr.fail(tr.cur, f"{type(e).__name__}: {e}", "error")
+        _novalue(k, tr)
         if k.work_mode == "each" and k.work_fields:  # fields are -1 until an anchor
             tr.stmts[:0] = [{"op": "let", "var": f"work_{f}", "expr": {"e": "const", "w": 64, "v": -1}}
                             for f in k.work_fields]  # fmt: skip
@@ -305,6 +307,19 @@ def _role(k, tree, name, w0, nw, pol) -> list:
             continue
         out.append(tr)
     return out
+
+
+def _novalue(k, tr) -> None:
+    """A work field without a value (anchors.py "novalue") is -1 in the role's work items,
+    which only P0-1's segment check of an access reads: refused if the role accesses a
+    tensor whose segments the field names (any event of it, conservatively)."""
+    used = {s.get("tensor", s.get("desc")) for s in _statements(tr.stmts)
+            if s["op"] == "event"}  # fmt: skip
+    for name, i in tr.novalue.items():
+        hit = sorted(used & set(k.work_per[name]))
+        if hit:
+            tr.fail(i, f"work field '{name}' names segments but no instruction holds its "
+                    f"value (anchors.py), and the role accesses {', '.join(hit)}", "error")  # fmt: skip
 
 
 def _idle(tr) -> bool:
@@ -858,12 +873,22 @@ def _anchor_sites(work: dict, family: str, fn, root: str, case: dict) -> list:
     return list(got[0] if isinstance(got, tuple) else got)
 
 
-def _per_fields(case: dict) -> list:
-    """Work fields the case's tensor annotations name as segment `per` fields."""
+def _per_fields(case: dict) -> dict:
+    """{work field: [tensors]} of the segment `per` fields of the case's tensor
+    annotations."""
     tensors = dict(case.get("tensors", {}))
     for k in case.get("kernels", {}).values():
         tensors.update(k.get("tensors", {}))
-    return sorted({t["segments"]["per"] for t in tensors.values() if t.get("segments")})
+    return per_fields(tensors)
+
+
+def per_fields(annotations: dict) -> dict:
+    """{work field: sorted tensors whose segments name it} of tensor annotations."""
+    out = {}
+    for name, t in sorted(annotations.items()):
+        if t.get("segments"):
+            out.setdefault(t["segments"]["per"], []).append(name)
+    return out
 
 
 def _minimal_kir(

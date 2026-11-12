@@ -1543,9 +1543,7 @@ def build_ptx(where: Path, dump: dict, key: str, case: dict) -> dict:
         )
     except anchors.AnchorError as e:
         raise KirError(f"case `work`: {e}", kind="error") from e
-    per = sorted(
-        {a["segments"]["per"] for a in annotations.values() if a.get("segments")}
-    )
+    per = T.per_fields(annotations)
     pol = T.policy("ttgir", src_root=dump["src_root"], params=T.param_table(records, "ttgir", fn),
                    tensors={n: {"elem_bytes": a["elem_bytes"]} for n, a in snap0.items()
                             if a["kind"] == "tensor"}, blocks=_desc_blocks(launches),
