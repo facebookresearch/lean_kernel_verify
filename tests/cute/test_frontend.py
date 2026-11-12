@@ -28,6 +28,16 @@ from ...frontend.ttgir import host_env
 HERE = Path(__file__).resolve().parent
 SKILL = HERE.parents[1]
 DSL = importlib.metadata.version("nvidia-cutlass-dsl")  # this test binary's
+# test_issuing_threads_match_the_ptx: the elect.sync count of each kernel's PTX (bulk_g2s:
+# with 4.4.2; the kernel elects its init and arrive.expect_tx, 4.6.1 also the copy)
+ELECTS = {
+    "tma_load": 2,
+    "tma_store": 0,
+    "tma_reduce": 1,
+    "bulk_g2s": 2,
+    "umma": 5,
+    "umma_bs": 7,
+}
 
 
 def run_case(
@@ -119,6 +129,59 @@ def loops(stmts, out=None):
             if k in s:
                 loops(s[k], out)
     return out
+
+
+_BLOCK_START = re.compile(r"\s*([$\w]+:|\.(visible|entry|func)\b)")  # label, function
+_ELECT = re.compile(r"\s*elect\.sync\s+\S*\|(%\w+),\s*-1;")  # its predicate
+
+
+def elected(ptx: str, instr: str) -> list:
+    """Per `instr` instruction of the PTX (predicated or not): whether only the elected
+    lane of a warp reaches it: a full-mask `elect.sync %r|%p, -1` precedes it with no label
+    or function start in between, and either the instruction is predicated on %p, or a
+    branch between them on the negation of %p skips it (the DSL's `elect.sync; not.pred %q,
+    %p; @%q bra`, or `@!%p bra`)."""
+    at = re.compile(r"\s*(?:@(!?%\w+)\s+)?" + re.escape(instr))
+    lines, out = ptx.splitlines(), []
+    for i, line in enumerate(lines):
+        m = at.match(line)
+        if m:
+            j = i - 1
+            while j >= 0 and not (
+                _BLOCK_START.match(lines[j]) or _ELECT.match(lines[j])
+            ):
+                j -= 1
+            e = _ELECT.match(lines[j]) if j >= 0 else None
+            if e is None:
+                out.append(False)
+                continue
+            p, nots, skips = e.group(1), {"!" + e.group(1)}, False
+            for x in lines[j + 1 : i]:
+                n = re.match(r"\s*not\.pred\s+(%\w+),\s*(%\w+);", x)
+                if n and n.group(2) == p:
+                    nots.add(n.group(1))
+                b = re.match(r"\s*@(!?%\w+)\s+bra\b", x)
+                skips = skips or bool(b and b.group(1) in nots)
+            out.append(m.group(1) == p or skips)
+    return out
+
+
+class ElectedTest(unittest.TestCase):
+    def test_only_a_guard_on_the_elect_predicate_counts(self):
+        elect = "elect.sync %r1|%p1, -1;\n"
+        cp = "cp.async.bulk.tensor.2d [%r3], [%rd1, {%r4, %r5}], [%r2];\n"
+        for body, want in (
+            ("not.pred %p2, %p1;\n@%p2 bra $L;\n" + cp + "$L:\n", True),  # the DSL's
+            ("@!%p1 bra $L;\n" + cp + "$L:\n", True),
+            ("@%p1 " + cp, True),
+            ("@%p1 mbarrier.arrive.b64 _, [%r2];\n" + cp, False),  # every lane issues
+            ("@!%p1 " + cp, False),
+            ("@%p3 bra $L;\n" + cp + "$L:\n", False),
+            ("not.pred %p2, %p1;\n@%p2 bra $L;\n$M:\n" + cp + "$L:\n", False),
+        ):
+            with self.subTest(body):
+                self.assertEqual(elected(elect + body, "cp.async.bulk.tensor"), [want])
+        self.assertEqual(elected(cp, "cp.async.bulk.tensor"), [False])
 
 
 class CuteFrontendTest(unittest.TestCase):
@@ -650,6 +713,43 @@ class CuteFrontendTest(unittest.TestCase):
                 else:  # a loop over the role's threads, issuing on one lane per warp
                     (loop,) = thread_loops
                     self.assertEqual(loop["body"][-1]["op"], "if")
+
+    def test_issuing_threads_match_the_ptx(self):
+        # ir_ops_cute.md "Issuing threads" against the PTX the DSL's own compile makes (the
+        # dump keeps it: host_patches.py P5) of kernels that run each op on every lane of a
+        # warp, without elect_one. What the table issues once per warp (TMA load and reduce,
+        # with 4.6.1 the bulk copy; P1: tcgen05.mma and .cp) is behind the lowering's
+        # full-mask elect.sync; what it issues per lane (arrive.expect_tx, with 4.4.2 the
+        # bulk copy, tcgen05.commit; TMA store, per distinct operands by ptxas; P1:
+        # tcgen05.ld/st, .sync.aligned) reaches PTX on every lane. The count of elect.sync
+        # in any spelling (also in inline asm, or guarding a block placed elsewhere) catches
+        # an election the per-instruction check would miss.
+        bulk = DSL in ops.BULK_G2S_ELECTS
+        for name, entry, builder, inp, want, elects in (
+            ("tma_load", "run_tma_pipeline", "args_tma_pipeline", {"rows": 64, "elect_producer": False},
+             {"cp.async.bulk.tensor": [True], "mbarrier.arrive.expect_tx": [False]}, ELECTS["tma_load"]),
+            ("tma_store", "run_tma_store", "args_tma_store", {"rows": 128, "mode": "warp"},
+             {"cp.async.bulk.tensor": [False]}, ELECTS["tma_store"]),
+            ("tma_reduce", "run_tma_store", "args_tma_store", {"rows": 128, "mode": "reduce"},
+             {"cp.reduce.async.bulk.tensor": [True]}, ELECTS["tma_reduce"]),
+            ("bulk_g2s", "run_bulk_g2s", "args_bulk_g2s", {"rows": 64, "mode": "warp"},
+             {"cp.async.bulk.shared": [bulk]}, ELECTS["bulk_g2s"] + bulk),
+            ("umma", "run_umma", "args_umma", {"block_scaled": False},
+             {"tcgen05.mma": [True] * 4, "tcgen05.commit": [False], "tcgen05.ld": [False], "tcgen05.st": [False]},
+             ELECTS["umma"]),
+            ("umma_bs", "run_umma", "args_umma", {"block_scaled": True},
+             {"tcgen05.cp": [True] * 2, "tcgen05.mma": [True] * 4, "tcgen05.commit": [False]}, ELECTS["umma_bs"]),
+        ):  # fmt: skip
+            with self.subTest(name):
+                _, _, recorded = run_case(
+                    f"ptx_{name}", entry, builder, [{"name": "i", **inp}]
+                )
+                (c,) = recorded["compiles"]
+                ptx = Path(c["ptx"]["file"]).read_text()
+                got = {m: elected(ptx, m) for m in want}
+                self.assertEqual(
+                    (got, len(re.findall(r"\belect\.sync\b", ptx))), (want, elects)
+                )
 
     def test_tma_reduce_needs_a_full_warp_and_lane_uniform_operands(self):
         # The lowering's full-mask elect.sync reached by 16 lanes, or by the one lane of an

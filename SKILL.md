@@ -213,8 +213,10 @@ A verdict depends on exactly these items (`design.md`, "Trust base"):
 4. **The ledger algorithm** for P0-2 and P0-4, argued sound in Ledger.lean but
    not proved: a PASS there means "the ledger found no violation".
 5. **P1-1 only:** the P1 op-table rows (TMEM footprints, the scale-factor
-   footprints of the CuTe DSL's TMEM SF layouts, cp/mma and their commit issued
-   by one elected lane) and the PTX completion rules it encodes.
+   footprints of the CuTe DSL's TMEM SF layouts, cp/mma issued by one elected lane,
+   checked in the DSL's PTX, and their commit by the same lane, which the kernel's
+   `elect_one` or a whole-warp commit gives: not checked) and the PTX completion rules
+   it encodes.
 6. **P1-1 only:** the P1 ledger (the ledger of item 4 with per-wait needs from
    the arrivals that may precede a wait's return, argued sound in Ledger.lean,
    not proved), named-barrier semantics, and the reading of a role of several
@@ -321,6 +323,6 @@ python3 -I $S/tests/e2e/test_e2e.py         # lkv.py end to end, ~2 min (fronten
 python3 -I $S/tests/cute/test_core.py       # CuTe translation, pure Python
 python3 -I $S/tests/ptx/test_translate.py   # PTX translation, pure Python (and tests/ptx/test_*.py)
 # Frontend tests: tests/ttgir/test_translate.py, test_ttgir.py (Triton) and tests/cute/test_frontend.py
-# (CuTe DSL, run once per supported DSL release); tests/ttgir/test_gpu_parity.py: CPU-dumped
-# TTGIR == real launch (needs a Blackwell GPU)
+# (CuTe DSL, run once per supported DSL release); tests/ttgir/test_gpu_parity.py and
+# tests/cute/test_gpu_parity.py: CPU-dumped TTGIR / CuTe MLIR == real launch (need a Blackwell GPU)
 ```

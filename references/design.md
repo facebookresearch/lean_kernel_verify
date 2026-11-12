@@ -189,7 +189,7 @@ it names in `elision_flags` the flags that select a mask-elided fast path.
    identical for every kernel. Its issuing-thread rows for CuTe TMA stores follow
    the waterfall loop ptxas emits (measured on hardware for the compilers the DSLs
    embed), and those for TMA loads and reduces the `elect.sync` the DSL emits
-   (`ir_ops_cute.md`, "Issuing threads").
+   (`ir_ops_cute.md`, "Issuing threads"; `tests/cute` checks the PTX).
 3. `native_decide` (Lean compiler) for whole-trace verdicts.
 4. The phase ledger (`lean/KV/Spec/Ledger.lean`) for P0-2 and P0-4: its
    classification of waits (happens-before over the role traces, each role taken
@@ -206,9 +206,11 @@ it names in `elision_flags` the flags that select a mask-elided fast path.
    no violation.
 5. For P1-1 only: the P1 op-table rows (TMEM footprints, the SF footprints of
    the CuTe DSL's TMEM SF layouts: SFA 4 columns, SFB 4 per 128 rows of N; the
-   issuing threads; the cp/mma and the commits that complete them are issued by
-   one elected lane) and the PTX completion rules it encodes (ld/st complete at
-   `tcgen05.wait`, cp/mma at a landed later commit of the same thread).
+   issuing threads; the cp/mma are issued by one elected lane, checked in the DSL's
+   PTX, not SASS; the commits that complete them by the same lane: the DSL does not
+   elect a commit (checked), so this rests on the kernel's `elect_one` around it or on
+   a whole-warp commit, not checked) and the PTX completion rules it encodes (ld/st
+   complete at `tcgen05.wait`, cp/mma at a landed later commit of the same thread).
 6. For P1-1 only: the P1 ledger (`Run.ledgersP1`: item 4's ledger whose
    happens-before also uses per-wait needs, `k x count` minus the other roles'
    arrivals that may precede the wait's return, `SlotLedger.needsWith`; argued

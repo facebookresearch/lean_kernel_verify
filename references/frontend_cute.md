@@ -437,6 +437,10 @@ instead.
   CTA two (one per warp; on hardware a reduce is issued once per executing lane,
   `tests/ptx/test_gpu_tma_issue.py`, and the DSL's `elect.sync` leaves one). A `st.global.u16`
   scale-factor helper is a 2-byte `gstore` per thread (all specs PASS).
+* The issuing-thread rows of `ir_ops_cute.md` against the PTX of the DSL's own compile
+  (`test_issuing_threads_match_the_ptx`); on a GB300, the initial MLIR and pipeline the dump
+  records for the TMA producer/consumer equal those of a real compile and launch, and
+  whole-warp tcgen05 commits complete a count-32 barrier (`tests/cute:test_gpu_parity`).
 * A bulk copy (`cp.async.bulk` global -> shared, completing on an mbarrier after one
   128-byte `arrive_expect_tx`): with 4.4.2 every executing lane issues it (warp-wide: 32
   copies, 16 lanes: 16, both P0-4 FAIL; inside `elect_one`: one, PASS); with 4.6.1 a warp

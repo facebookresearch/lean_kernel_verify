@@ -84,6 +84,15 @@ every lane; `mbarrier_wait` (`nvvm.mbarrier.try_wait.parity` with a suspend-time
 a `try_wait.parity` loop; `nvvm.tcgen05.commit` (under the kernel's own `elect.sync`) and
 `nvvm.cp.async.shared.global` lower one to one.
 
+`tests/cute` `test_issuing_threads_match_the_ptx` keeps these rows checked against the PTX
+that the DSL's own compile makes (the dump keeps it, host patch P5) of kernels that run
+each op on every lane of a warp without `elect_one`, with 4.4.2 and with 4.6.1: a TMA load,
+a TMA reduce, a bulk copy with 4.6.1, each `tcgen05.mma` (dense and block scaled) and each
+`tcgen05.cp` sit behind a full-mask `elect.sync`; `mbarrier.arrive.expect_tx`, a bulk copy
+with 4.4.2, a TMA store, `tcgen05.commit` and `tcgen05.ld/st` do not; and the kernel's
+count of `elect.sync` in any spelling is fixed. The TMA store's one issue per distinct
+operands is ptxas's (below).
+
 Checked in the SASS (`cuobjdump -sass` of CUDA 13.0; the store rows on PTX compiled by
 ptxas 13.0, `-arch=sm_100a`, with operands edited in the PTX), and since measured on
 sm_100a hardware for every compiler the families use (`tests/ptx/test_gpu_tma_issue.py`;
@@ -253,11 +262,17 @@ the old flatten (atoms have no leaves), so its KIR is unchanged.
 
 **Issuing threads (P1).** `tcgen05.ld/st` are `.sync.aligned`: every lane of the warp,
 one access per warp. `copy_s2t` and the UMMA ops are executed by the whole warp at the
-analyzed stage and lowered to one elected lane (`elect.sync`, full member mask); the
-`tcgen05.commit` of the same warp is under `elect.sync` with the same mask, which elects
-the same lane ("the same leader thread is elected for the same membermask every time"):
-the landing rule takes the commit and the cp/mma to be issued by one thread (trust item
-5 of references/design.md). Not checked in PTX/SASS for this release yet (future work).
+analyzed stage and lowered to one elected lane (`elect.sync`, full member mask). The DSL
+does not elect a `tcgen05.commit`: from a whole warp it is one per lane (as P0 counts it;
+on a GB300 the whole-warp commits of `tests/cute:test_gpu_parity` complete a count-32
+barrier), which includes the elected lane; kernels wrap their commits in `elect_one`,
+whose `elect.sync` has the same mask and so elects the same lane ("the same leader thread
+is elected for the same membermask every time"). The landing rule takes the commit and the
+cp/mma to be issued by one thread (trust item 5 of references/design.md): that rests on
+such a commit, not on a check (a commit under another lane condition is not refused).
+Checked in PTX, not SASS (`test_issuing_threads_match_the_ptx`, DSL 4.4.2 and 4.6.1):
+each `tcgen05.mma` and `tcgen05.cp` gets its own full-mask `elect.sync`, `tcgen05.commit`
+none.
 
 ## Data (dropped in the P0 slice)
 

@@ -818,3 +818,135 @@ def run_cluster_ready(out: torch.Tensor, remote: bool) -> None:
 
 def args_cluster_ready(inp: dict):
     return [torch.zeros(inp["rows"])], {"remote": inp.get("remote", True)}, {}
+
+
+# ---------------------- tcgen05 MMA, TMEM copies and commit from every lane of a warp
+
+
+def _umma(block_scaled: bool):
+    """Warp 0 runs a 128x64 UMMA over K = 4 MMA k-blocks from shared memory into TMEM
+    (bf16, or MXF8 whose scale factors it first copies to TMEM) and commits it to a
+    count-32 mbarrier, all with no elect_one; the four warps wait, load their TMEM lane
+    quarter and store it back."""
+    # Imported here: kernels.py is imported by every frontend test, of either DSL.
+    import cutlass.utils.blackwell_helpers as sm100_utils  # noqa: PLC0415
+    import cutlass.utils.blockscaled_layout as blockscaled_utils  # noqa: PLC0415
+    from cutlass.cute.nvgpu import tcgen05  # noqa: PLC0415
+
+    ab = cutlass.Float8E4M3FN if block_scaled else cutlass.BFloat16
+    sf, vec = cutlass.Float8E8M0FNU, 32
+    tiler = (128, 64, 128 if block_scaled else 64)
+
+    def s2t(sSF, tSF):  # an attention backward's make_s2t_copy_partitions
+        tiled = tcgen05.make_s2t_copy(cute.make_copy_atom(tcgen05.Cp4x32x128bOp(tcgen05.CtaGroup.ONE), sf),
+                                      cute.filter_zeros(tSF))  # fmt: skip
+        thr = tiled.get_slice(0)
+        src = tcgen05.get_s2t_smem_desc_tensor(
+            tiled, thr.partition_S(cute.filter_zeros(sSF))
+        )
+        return tiled, src, thr.partition_D(cute.filter_zeros(tSF))
+
+    @cute.kernel
+    def kernel(tiled_mma: cute.TiledMma, a_layout: cute.ComposedLayout, b_layout: cute.ComposedLayout,
+               sfa_layout: cute.Layout, sfb_layout: cute.Layout):  # fmt: skip
+        tidx, _, _ = cute.arch.thread_idx()
+        warp = cute.arch.make_warp_uniform(cute.arch.warp_idx())
+        smem = cutlass.utils.SmemAllocator()
+        bar = smem.allocate_array(cutlass.Int64, 1)
+        holder = smem.allocate_array(Int32, 1)
+        sA = smem.allocate_tensor(
+            ab, a_layout.outer, byte_alignment=128, swizzle=a_layout.inner
+        )
+        sB = smem.allocate_tensor(
+            ab, b_layout.outer, byte_alignment=128, swizzle=b_layout.inner
+        )
+        if warp == 0:
+            cute.arch.alloc_tmem(256, holder)
+            with cute.arch.elect_one():
+                cute.arch.mbarrier_init(bar, 32)
+        cute.arch.mbarrier_init_fence()
+        cute.arch.sync_threads()
+        acc_ptr = cute.arch.retrieve_tmem_ptr(
+            Float32, alignment=16, ptr_to_buffer_holding_addr=holder
+        )
+        tCrA = tiled_mma.make_fragment_A(sA)
+        tCrB = tiled_mma.make_fragment_B(sB)
+        acc = tiled_mma.make_fragment_C(tiled_mma.partition_shape_C(tiler[:2]))
+        tCtAcc = cute.make_tensor(acc_ptr, acc.layout)
+        if cutlass.const_expr(block_scaled):
+            sSFA = smem.allocate_tensor(sf, sfa_layout, byte_alignment=128)
+            sSFB = smem.allocate_tensor(sf, sfb_layout, byte_alignment=128)
+            col = tcgen05.find_tmem_tensor_col_offset(tCtAcc)
+            tCtSFA = cute.make_tensor(cute.recast_ptr(acc_ptr + col, dtype=sf), blockscaled_utils.make_tmem_layout_sfa(
+                tiled_mma, tiler, vec, cute.slice_(sfa_layout, (None, None, None, 0))))  # fmt: skip
+            col = col + tcgen05.find_tmem_tensor_col_offset(tCtSFA)
+            tCtSFB = cute.make_tensor(cute.recast_ptr(acc_ptr + col, dtype=sf), blockscaled_utils.make_tmem_layout_sfb(
+                tiled_mma, tiler, vec, cute.slice_(sfb_layout, (None, None, None, 0))))  # fmt: skip
+        if warp == 0:
+            if cutlass.const_expr(block_scaled):
+                for sSF, tSF in ((sSFA, tCtSFA), (sSFB, tCtSFB)):
+                    tiled, src, dst = s2t(sSF, tSF)
+                    cute.copy(tiled, src[(None, None, None, None, 0)], dst)
+            for k in cutlass.range_constexpr(cute.size(tCrA, mode=[2])):
+                if cutlass.const_expr(block_scaled):
+                    tiled_mma.set(tcgen05.Field.SFA, tCtSFA[(None, None, k)].iterator)
+                    tiled_mma.set(tcgen05.Field.SFB, tCtSFB[(None, None, k)].iterator)
+                cute.gemm(
+                    tiled_mma,
+                    tCtAcc,
+                    tCrA[None, None, k, 0],
+                    tCrB[None, None, k, 0],
+                    tCtAcc,
+                )
+            tcgen05.commit(bar)
+        cute.arch.mbarrier_wait(bar, 0)
+        tAcc = tCtAcc[((None, None), 0, 0)]
+        t2r = tcgen05.make_tmem_copy(
+            cute.make_copy_atom(tcgen05.Ld32x32bOp(tcgen05.Repetition.x64), Float32),
+            tAcc,
+        )
+        r2t = tcgen05.make_tmem_copy(
+            cute.make_copy_atom(tcgen05.St32x32bOp(tcgen05.Repetition.x64), Float32),
+            tAcc,
+        )
+        frag = cute.make_rmem_tensor(
+            t2r.get_slice(tidx).partition_D(cute.make_identity_tensor(tiler[:2])).shape,
+            Float32,
+        )
+        cute.copy(t2r, t2r.get_slice(tidx).partition_S(tAcc), frag)
+        cute.arch.fence_view_async_tmem_load()
+        cute.copy(r2t, frag, r2t.get_slice(tidx).partition_D(tAcc))
+        cute.arch.sync_threads()
+        if warp == 0:
+            cute.arch.dealloc_tmem(acc_ptr, 256)
+
+    @cute.jit
+    def host(mC: cute.Tensor):
+        major = tcgen05.OperandMajorMode.K
+        if cutlass.const_expr(block_scaled):
+            tiled_mma = sm100_utils.make_blockscaled_trivial_tiled_mma(
+                ab, major, major, sf, vec, tcgen05.CtaGroup.ONE, tiler[:2])  # fmt: skip
+        else:
+            tiled_mma = sm100_utils.make_trivial_tiled_mma(
+                ab, major, major, Float32, tcgen05.CtaGroup.ONE, tiler[:2]
+            )
+        kernel(tiled_mma, sm100_utils.make_smem_layout_a(tiled_mma, tiler, ab, 1),
+               sm100_utils.make_smem_layout_b(tiled_mma, tiler, ab, 1),
+               blockscaled_utils.make_smem_layout_sfa(tiled_mma, tiler, vec, 1),
+               blockscaled_utils.make_smem_layout_sfb(tiled_mma, tiler, vec, 1)).launch(
+            grid=(1, 1, 1), block=(128, 1, 1), smem=64 * 1024)  # fmt: skip
+
+    return host
+
+
+_UMMA_HOSTS: dict = {}
+
+
+def run_umma(c: torch.Tensor, block_scaled: bool) -> None:
+    if block_scaled not in _UMMA_HOSTS:
+        _UMMA_HOSTS[block_scaled] = _umma(block_scaled)
+    cute.compile(_UMMA_HOSTS[block_scaled], _cute(c, 0))(c)
+
+
+def args_umma(inp: dict):
+    return [torch.zeros(1)], {"block_scaled": inp["block_scaled"]}, {}
