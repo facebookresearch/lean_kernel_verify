@@ -433,7 +433,9 @@ instead.
 * A warp-wide TMA store with warp-uniform operands is one event, as with `elect_one`
   (P0-3 PASS both); one whose lanes 16-31 store the next tile is two stores (PASS), one
   whose lanes 16-31 store a second shared buffer to the same tile writes each element
-  twice (P0-3 FAIL); a warp-wide TMA reduce is one event. A `st.global.u16`
+  twice (P0-3 FAIL); a warp-wide TMA reduce is one event, and one from both warps of the
+  CTA two (one per warp; on hardware a reduce is issued once per executing lane,
+  `tests/ptx/test_gpu_tma_issue.py`, and the DSL's `elect.sync` leaves one). A `st.global.u16`
   scale-factor helper is a 2-byte `gstore` per thread (all specs PASS).
 * A bulk copy (`cp.async.bulk` global -> shared, completing on an mbarrier after one
   128-byte `arrive_expect_tx`): with 4.4.2 every executing lane issues it (warp-wide: 32

@@ -357,7 +357,8 @@ def _tma_store(mode: str):
     with the same operands (cute.copy without elect_one); "lane_coords", a store from every
     lane, lanes 16-31 storing the CTA's second tile; "lane_smem", a store from every lane,
     lanes 16-31 storing a second shared-memory buffer to the same tile; "reduce", a TMA
-    reduce-add from every lane; "reduce_half", the reduce from lanes 0-15;
+    reduce-add from every lane; "reduce_2warps", the reduce from every lane of both warps;
+    "reduce_half", the reduce from lanes 0-15;
     "reduce_elect", the reduce from one elected lane; "reduce_lane_coords", the reduce
     from every lane, lanes 16-31 reducing into the CTA's second tile."""
     tiles = 2 if mode.endswith("lane_coords") else 1
@@ -395,7 +396,9 @@ def _tma_store(mode: str):
         stage = 0
         if cutlass.const_expr(mode == "lane_smem"):
             stage = half
-        if warp == 0:
+        if cutlass.const_expr(mode == "reduce_2warps"):
+            cute.copy(tma_atom, tCsC[None, stage], tCgC)
+        elif warp == 0:
             if cutlass.const_expr(mode in ("elect", "reduce_elect")):
                 with cute.arch.elect_one():
                     cute.copy(tma_atom, tCsC[None, stage], tCgC)

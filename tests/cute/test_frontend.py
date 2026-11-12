@@ -621,31 +621,35 @@ class CuteFrontendTest(unittest.TestCase):
     def test_warp_wide_tma_reduce_is_issued_once_per_warp(self):
         # The DSL lowers cp.reduce.async.bulk.tensor behind a full-mask elect.sync, so a
         # warp issues it once, as under elect_one, even with every lane executing the copy
-        # (PTX and SASS checked, see ir_ops_cute.md "Issuing threads").
+        # (PTX and SASS checked, see ir_ops_cute.md "Issuing threads"; on hardware, a
+        # reduce once per executing lane: tests/ptx/test_gpu_tma_issue.py). From both warps
+        # of the CTA: twice.
         notes = {
             "host": {
                 "intended_writes": {"mC": "unchecked"},
                 "why": "written by reduce-adds only",
             }
         }
-        report, kirs, _ = run_case(
-            "tma_reduce",
-            "run_tma_store",
-            "args_tma_store",
-            [{"name": "i", "rows": 128, "mode": "reduce"}],
-            notes,
-        )
-        self.assert_valid(report)
-        (k,) = kirs.values()
-        (role,) = [r for r in k["roles"] if events(r["body"])]
-        (red,) = events(role["body"])
-        self.assertEqual(red["ev"], "gatomic")
-        lane_loops = [
-            s
-            for s in loops(role["body"])
-            if s["ub"] == {"e": "const", "w": 32, "v": 32}
-        ]
-        self.assertEqual(lane_loops, [])  # one event, no loop over the lanes
+        for mode, threads in (("reduce", 32), ("reduce_2warps", 64)):
+            with self.subTest(mode=mode):
+                report, kirs, _ = run_case(f"tma_{mode}", "run_tma_store", "args_tma_store",
+                                           [{"name": "i", "rows": 128, "mode": mode}], notes)  # fmt: skip
+                self.assert_valid(report)
+                (k,) = kirs.values()
+                (role,) = [r for r in k["roles"] if events(r["body"])]
+                self.assertEqual(role["warps"], threads // 32)
+                (red,) = events(role["body"])
+                self.assertEqual(red["ev"], "gatomic")
+                thread_loops = [
+                    s
+                    for s in loops(role["body"])
+                    if s["ub"] == {"e": "const", "w": 32, "v": threads}
+                ]
+                if threads == 32:  # one event, no loop over the lanes
+                    self.assertEqual(thread_loops, [])
+                else:  # a loop over the role's threads, issuing on one lane per warp
+                    (loop,) = thread_loops
+                    self.assertEqual(loop["body"][-1]["op"], "if")
 
     def test_tma_reduce_needs_a_full_warp_and_lane_uniform_operands(self):
         # The lowering's full-mask elect.sync reached by 16 lanes, or by the one lane of an
