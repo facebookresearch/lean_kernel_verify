@@ -20,7 +20,9 @@ Entry points.
   (`SpecResult.certain`). Without one it is undecided, and an `UNDECIDED` line says so:
   on an evaluation error of kind `limit` or `unexpected` (every spec; a `kernel` error is
   certain), after an out-of-bounds metadata load (below), for P0-2 and P0-4 on a cluster
-  whose barrier ledger does not converge (Ledger.lean, `unconverged`), or for P1-1 pairs
+  whose barrier ledger does not converge (Ledger.lean, `unconverged`), for P0-4 on a slot
+  whose transaction bytes break it only through another CTA's landings that may complete
+  a later phase than their issue order shows (Ledger.lean, "Landers"), or for P1-1 pairs
   that only the lockstep contents, named barriers used with two counts or another round of
   a ledger that does not converge might order (TmemReuse.lean). The evaluation-error line names the kind (Eval.lean `ErrKind`).
 * A role that loads metadata outside the tensor stops there (Eval.lean): P0-1 fails with
@@ -95,8 +97,9 @@ def undecided (r : Run) : Array Issue :=
 `Ls = r.ledgers` (computed once for P0-2 and P0-4); the same decision as `s.Holds r`. -/
 def SpecId.result (s : SpecId) (r : Run) (Ls : Ledgers) : SpecResult :=
   let un := undecided r
-  -- `un` and `undec` (P0-2, P0-4: clusters whose ledger did not converge) are the only
-  -- issues of a P0 spec that are not certain counterexamples.
+  -- `un` and `undec` (P0-2, P0-4: clusters whose ledger did not converge; P0-4: slots whose
+  -- landers' bytes balance only if a landing completes a later phase than its issue order
+  -- shows) are the only issues of a P0 spec that are not certain counterexamples.
   let p0 (holds : Bool) (own nts : Array Issue) (undec : Array Issue := #[]) : SpecResult :=
     { spec := s, holds := holds, issues := un ++ undec ++ own, notes := nts, certain := !own.isEmpty }
   match s with
@@ -105,7 +108,8 @@ def SpecId.result (s : SpecId) (r : Run) (Ls : Ledgers) : SpecResult :=
     { spec := s, holds := decide (Bounds.Holds r), issues := own, notes := Bounds.notes r, certain := !own.isEmpty }
   | .tripCount => p0 (r.complete && decide (TripCount.HoldsWith Ls)) (TripCount.issues r.host Ls) (TripCount.notes r.host Ls) (unconverged r.host Ls)
   | .coverage => p0 (r.complete && decide (Coverage.Holds r)) (Coverage.issues r) (Coverage.notes r)
-  | .barrier => p0 (r.complete && decide (Barrier.HoldsWith Ls)) (Barrier.issues r.host Ls) (Barrier.notes r.host Ls) (unconverged r.host Ls)
+  | .barrier => p0 (r.complete && decide (Barrier.HoldsWith Ls)) (Barrier.issues r.host Ls) (Barrier.notes r.host Ls)
+      (unconverged r.host Ls ++ Barrier.undecided r.host Ls)
   | .maskElision => p0 (r.complete && decide (MaskElision.Holds r)) (MaskElision.issues r) (MaskElision.notes r)
   | .tmemReuse =>
     let o := TmemReuse.analyze r r.ledgersP1

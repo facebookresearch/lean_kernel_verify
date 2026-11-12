@@ -1,0 +1,745 @@
+{
+ "kir_version": 1,
+ "kernel": "cluster_lander_shares",
+ "source": "tests/lean/cluster_lander_shares.kir.json",
+ "ir": "cute-mlir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "cluster": [
+  2,
+  1,
+  1
+ ],
+ "params": [
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "t64",
+   "kind": "desc",
+   "elem_bytes": 1,
+   "shape": [
+    {
+     "e": "const",
+     "v": 1024,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false,
+   "box": [
+    64
+   ]
+  }
+ ],
+ "barriers": [
+  {
+   "name": "x",
+   "count": {
+    "e": "const",
+    "v": 4,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "rel",
+   "count": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "b",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "bin",
+       "o": "urem",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "expect_tx",
+       "loc": "shares.py:10",
+       "bytes": {
+        "e": "const",
+        "v": 128,
+        "w": 32
+       },
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "shares.py:10",
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "tma_load",
+       "loc": "shares.py:11",
+       "desc": "t64",
+       "coords": [
+        {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        }
+       ],
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "shares.py:12",
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "expect_tx",
+       "loc": "shares.py:13",
+       "bytes": {
+        "e": "const",
+        "v": 128,
+        "w": 32
+       },
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "shares.py:13",
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "tma_load",
+       "loc": "shares.py:14",
+       "desc": "t64",
+       "coords": [
+        {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        }
+       ],
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "for",
+       "var": "j",
+       "lb": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "ub": {
+        "e": "const",
+        "v": 5,
+        "w": 32
+       },
+       "step": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "loc": "shares.py:15",
+       "body": [
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "shares.py:16",
+         "bar": "x",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ]
+      }
+     ],
+     "else": []
+    }
+   ]
+  },
+  {
+   "name": "a",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "bin",
+       "o": "urem",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "for",
+       "var": "j",
+       "lb": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "ub": {
+        "e": "const",
+        "v": 4,
+        "w": 32
+       },
+       "step": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "loc": "shares.py:20",
+       "body": [
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "shares.py:20",
+         "bar": "x",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ]
+      }
+     ],
+     "else": []
+    }
+   ]
+  },
+  {
+   "name": "c",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "bin",
+       "o": "urem",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "for",
+       "var": "j",
+       "lb": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "ub": {
+        "e": "const",
+        "v": 4,
+        "w": 32
+       },
+       "step": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "loc": "shares.py:25",
+       "body": [
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "shares.py:25",
+         "bar": "x",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ]
+      }
+     ],
+     "else": []
+    }
+   ]
+  },
+  {
+   "name": "w",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "bin",
+       "o": "urem",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "shares.py:30",
+       "parity": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "shares.py:30",
+       "bar": "rel",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "cta": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "shares.py:30",
+       "parity": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "shares.py:30",
+       "bar": "rel",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "cta": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       }
+      }
+     ],
+     "else": []
+    }
+   ]
+  },
+  {
+   "name": "z",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "bin",
+       "o": "urem",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "shares.py:35",
+       "parity": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "shares.py:35",
+       "bar": "rel",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "cta": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "shares.py:35",
+       "parity": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "shares.py:35",
+       "bar": "rel",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "cta": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       }
+      }
+     ],
+     "else": []
+    }
+   ]
+  },
+  {
+   "name": "p",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "bin",
+       "o": "urem",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "complete_tx",
+       "loc": "shares.py:40",
+       "bytes": {
+        "e": "const",
+        "v": 64,
+        "w": 32
+       },
+       "cta": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "eq",
+        "a": {
+         "e": "var",
+         "name": "MODE",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "shares.py:41",
+         "bar": "rel",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ],
+       "else": []
+      },
+      {
+       "op": "event",
+       "ev": "complete_tx",
+       "loc": "shares.py:42",
+       "bytes": {
+        "e": "const",
+        "v": 64,
+        "w": 32
+       },
+       "cta": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "bar": "x",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "else": []
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "cluster_lander_shares",
+  "inputs": [
+   {
+    "name": "ordered",
+    "params": {
+     "MODE": 0
+    }
+   },
+   {
+    "name": "unordered",
+    "params": {
+     "MODE": 1
+    }
+   }
+  ]
+ }
+}

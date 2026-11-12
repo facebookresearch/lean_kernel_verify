@@ -57,3 +57,18 @@ ledger_cycle !NOTES
 ledger_confirm UNDECIDED at_budget P0-2
 ledger_confirm UNDECIDED at_budget P0-4
 ledger_confirm !UNDECIDED one_more P0-2
+cluster_pair_prologue UNDECIDED peer_unordered P0-4
+cluster_pair_prologue !UNDECIDED short_peer
+cluster_pair_prologue !UNDECIDED extra_peer_box
+cluster_pair_prologue !UNDECIDED peer_extra_iteration
+cluster_pair_prologue !phase 1: expect_tx 384 bytes != tma_load
+cluster_multicast_pipeline UNDECIDED local_release P0-4
+cluster_multicast_pipeline !UNDECIDED n4
+cluster_multicast_pipeline !UNDECIDED s2_n6
+cluster_multicast_pipeline !UNDECIDED swapped_slices
+cluster_lander_shares UNDECIDED ordered P0-4
+cluster_lander_shares UNDECIDED unordered P0-4
+cluster_lander_shares !TMA bytes land in it
+cluster_lander_shares !bytes landing in it
+cluster_dsmem_relay evaluation error (unexpected): cluster.py:53: cta (0,0,0) role relay: complete_tx: negative byte count -256
+cluster_dsmem_relay UNDECIDED negative_bytes P0-4

@@ -26,7 +26,8 @@ and returns one event trace per (CTA, role).
   GPU computes an unspecified value, which the kernel may never use). `unexpected`, the
   case or LKV needs a fix, so no spec is decided and it is an ERROR: `while` exceeding
   `max_iters` (a hang of the kernel, or a budget too small for the input), an in-extent
-  metadata `load` at a negative offset or one the input gives no value for; in the host
+  metadata `load` at a negative offset or one the input gives no value for, a negative
+  `expect_tx` or `complete_tx` byte count (PTX transaction counts are unsigned); in the host
   setup a negative barrier `num` and a segmented global tensor whose strides overlap
   (rows of offsets undefined); and IR inconsistencies (width mismatch, unbound variable,
   unknown tensor/barrier) that `frontend/kir.py` should already have rejected.
@@ -545,6 +546,14 @@ def tmaAccess (loc : Loc) (desc : String) (coords : List Expr) : M (Nat × Tenso
     throwAt loc s!"TMA {desc}: {cs.size} coords, box {info.decl.box}, rank {info.rank}"
   return (t, info, cs)
 
+/-- The byte count of an expect_tx or complete_tx. PTX transaction counts are unsigned, so a
+negative one does not say what the hardware sees (`unexpected`); the ledger's attribution of
+another CTA's bytes also needs them non-negative (Ledger.lean, "Landers"). -/
+def txBytes (loc : Loc) (what : String) (e : Expr) : M Int := do
+  let n ← evalInt loc e
+  if n < 0 then throwAt loc s!"{what}: negative byte count {n} (transaction counts are unsigned)"
+  return n
+
 def execEvent : Event → M Unit
   | .bar_init bar idx count loc => do emit loc (.barInit (← slotOf loc bar idx (← read).rank) (← evalInt loc count))
   | .arrive bar idx n perWarp cta loc => do
@@ -555,7 +564,7 @@ def execEvent : Event → M Unit
     for c in ← ctasOf loc "commit_arrive" mask do
       emit loc (.arrive (← slotOf loc bar idx c) 1 true)
   | .expect_tx bar idx bytes cta loc => do
-    emit loc (.expectTx (← slotOf loc bar idx (← ctaOf loc "expect_tx" cta)) (← evalInt loc bytes))
+    emit loc (.expectTx (← slotOf loc bar idx (← ctaOf loc "expect_tx" cta)) (← txBytes loc "expect_tx" bytes))
   | .wait bar idx parity cta loc => do
     emit loc (.wait (← slotOf loc bar idx (← ctaOf loc "wait" cta)) (← evalInt loc parity))
   | .tma_load desc coords bar idx mask leader loc => do
@@ -567,7 +576,7 @@ def execEvent : Event → M Unit
       let s ← slotOf loc bar idx (if leader then d - d % 2 else d)
       emit loc (if k == 0 then .tmaLoad t cs s bytes else .landTx s bytes)
   | .complete_tx bar idx bytes cta loc => do
-    emit loc (.landTx (← slotOf loc bar idx (← ctaOf loc "complete_tx" cta)) (← evalInt loc bytes))
+    emit loc (.landTx (← slotOf loc bar idx (← ctaOf loc "complete_tx" cta)) (← txBytes loc "complete_tx" bytes))
   | .tma_store desc coords loc => do
     let (t, _, cs) ← tmaAccess loc desc coords
     emit loc (.tmaStore t cs)

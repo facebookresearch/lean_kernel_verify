@@ -112,7 +112,8 @@ python3 -I $S/scripts/lkv.py check K.kir.json... --out DIR   # Layer 2 alone on 
   a construct the frontend refuses by design, a role trace stopped at an
   out-of-bounds metadata load (itself a P0-1 FAIL) when nothing certain is found
   for that spec, a division by zero, a barrier ledger that does not converge
-  (P0-2, P0-4), P1-1 pairs only the lockstep contents order). A variant without verdicts gives every spec of each of its inputs its
+  (P0-2, P0-4), another CTA's TMA bytes that balance only if a landing completes a
+  later phase than its issue order shows (P0-4), P1-1 pairs only the lockstep contents order). A variant without verdicts gives every spec of each of its inputs its
   outcome (UNDECIDED if refused by design, else ERROR).
 - Outcome and exit status of a run (P0 and P1-1's ERRORs; P1-1's FAIL and
   UNDECIDED only with `--p1-strict`; `--no-p1` skips it): **1 FAIL** = some

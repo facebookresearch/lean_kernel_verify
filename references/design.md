@@ -32,7 +32,8 @@ environment failed: a frontend error, invalid KIR, a Lean error, an
 INCONSISTENT verdict, an unexpected evaluation error; UNDECIDED at a known
 limit: a construct the frontend refuses by design, a model limit such as a
 division by zero, an out-of-bounds metadata load before anything certain, a
-barrier ledger that does not converge);
+barrier ledger that does not converge, another CTA's TMA bytes whose phases
+only lower bounds give);
 then the FAIL, ERROR and UNDECIDED findings and the notes, grouped by spec and
 source line. `lkv.py export` exports sources at a
 revision and records it in the tree, so `run --src` reports the analyzed
@@ -127,7 +128,8 @@ constructs (e.g. lane-divergent barrier ops, indirect calls) are hard errors.
   completing on the pair leader's barrier and a DSMEM copy (`complete_tx`) are
   events on another CTA's slot, and P0-2/P0-4 build one barrier ledger per
   cluster (the roles of all its CTAs; transaction bytes another CTA lands are
-  attributed by lockstep byte shares).
+  attributed by its issue order, each landing to the first phase it can
+  complete, and P0-4 is undecided where only those lower bounds break it).
 - `Spec/*.lean`: the five P0 specs as `Prop`s over traces, each with a
   `Decidable` instance, plus a counterexample extractor and a note extractor for
   reporting.
@@ -145,7 +147,9 @@ constructs (e.g. lane-divergent barrier ops, indirect calls) are hard errors.
   input whose evaluation stops with an error that is not a kernel error, a spec
   of an input with an out-of-bounds metadata load that finds nothing certain on
   the evaluated events, P0-2 and P0-4 with nothing certain outside a cluster whose
-  barrier ledger does not converge, and P1-1 with only pairs that the lockstep
+  barrier ledger does not converge, P0-4 with nothing certain outside a slot whose
+  bytes from another CTA balance only if a landing completes a later phase than its
+  issue order shows, and P1-1 with only pairs that the lockstep
   contents, named barriers used with two counts or another round of a ledger that
   does not converge might order. `lkv.py` reports it as UNDECIDED (a known limit), or as an ERROR when the evaluation error is
   unexpected (`Eval.lean` `ErrKind`: the case or LKV needs a fix).
@@ -199,7 +203,9 @@ it names in `elision_flags` the flags that select a mask-elided fast path.
    repeated parities into presumed skips, judged under the contents, and never
    raises a phase lower bound), its optimistic progress pass and its attribution
    of transaction bytes to phases (under every fitting share assignment until
-   one satisfies P0-4), iterated to a fixpoint (a cluster without one leaves P0-2
+   one satisfies P0-4; another CTA's landings by its issue order, with the
+   induction argument in the module doc, which needs non-negative transaction
+   counts: the evaluator rejects negative ones), iterated to a fixpoint (a cluster without one leaves P0-2
    and P0-4 undecided). The Props are stated over the ledger's output, and the
    ledger's soundness against mbarrier semantics is argued informally in its
    module doc, not proved. A P0-2/P0-4 verdict therefore says the ledger found

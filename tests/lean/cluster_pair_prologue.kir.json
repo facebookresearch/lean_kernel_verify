@@ -1,0 +1,807 @@
+{
+ "kir_version": 1,
+ "kernel": "cluster_pair_prologue",
+ "source": "tests/lean/cluster_pair_prologue.kir.json",
+ "ir": "cute-mlir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "cluster": [
+  2,
+  1,
+  1
+ ],
+ "params": [
+  {
+   "name": "N",
+   "type": "i32"
+  },
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "tk",
+   "kind": "desc",
+   "elem_bytes": 2,
+   "shape": [
+    {
+     "e": "const",
+     "v": 1024,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false,
+   "box": [
+    64
+   ]
+  },
+  {
+   "name": "tq",
+   "kind": "desc",
+   "elem_bytes": 2,
+   "shape": [
+    {
+     "e": "const",
+     "v": 1024,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false,
+   "box": [
+    32
+   ]
+  },
+  {
+   "name": "tqh",
+   "kind": "desc",
+   "elem_bytes": 2,
+   "shape": [
+    {
+     "e": "const",
+     "v": 1024,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false,
+   "box": [
+    16
+   ]
+  }
+ ],
+ "barriers": [
+  {
+   "name": "full",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "empty",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "producer",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "k",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "bin",
+      "o": "add",
+      "a": {
+       "e": "var",
+       "name": "N",
+       "w": 32
+      },
+      "b": {
+       "e": "select",
+       "c": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "cmp",
+         "o": "eq",
+         "a": {
+          "e": "var",
+          "name": "MODE",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 4,
+          "w": 32
+         },
+         "w": 1
+        },
+        "b": {
+         "e": "cmp",
+         "o": "eq",
+         "a": {
+          "e": "bin",
+          "o": "urem",
+          "a": {
+           "e": "pid",
+           "axis": 0,
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 2,
+           "w": 32
+          },
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 1,
+          "w": 32
+         },
+         "w": 1
+        },
+        "w": 1
+       },
+       "a": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "w": 32
+      },
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "loc": "prologue.py:10",
+     "body": [
+      {
+       "op": "if",
+       "cond": {
+        "e": "bin",
+        "o": "or",
+        "a": {
+         "e": "cmp",
+         "o": "eq",
+         "a": {
+          "e": "bin",
+          "o": "urem",
+          "a": {
+           "e": "pid",
+           "axis": 0,
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 2,
+           "w": 32
+          },
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "w": 1
+        },
+        "b": {
+         "e": "cmp",
+         "o": "ne",
+         "a": {
+          "e": "var",
+          "name": "MODE",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 3,
+          "w": 32
+         },
+         "w": 1
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "prologue.py:11",
+         "bar": "empty",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "bin",
+          "o": "xor",
+          "a": {
+           "e": "bin",
+           "o": "and",
+           "a": {
+            "e": "var",
+            "name": "k",
+            "w": 32
+           },
+           "b": {
+            "e": "const",
+            "v": 1,
+            "w": 32
+           },
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 32
+         }
+        }
+       ],
+       "else": []
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "eq",
+        "a": {
+         "e": "bin",
+         "o": "urem",
+         "a": {
+          "e": "pid",
+          "axis": 0,
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 2,
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "expect_tx",
+         "loc": "prologue.py:12",
+         "bar": "full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "bytes": {
+          "e": "select",
+          "c": {
+           "e": "cmp",
+           "o": "eq",
+           "a": {
+            "e": "var",
+            "name": "k",
+            "w": 32
+           },
+           "b": {
+            "e": "const",
+            "v": 0,
+            "w": 32
+           },
+           "w": 1
+          },
+          "a": {
+           "e": "const",
+           "v": 384,
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 128,
+           "w": 32
+          },
+          "w": 32
+         }
+        },
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "prologue.py:12",
+         "bar": "full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ],
+       "else": []
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "eq",
+        "a": {
+         "e": "var",
+         "name": "k",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "tma_load",
+         "loc": "prologue.py:13",
+         "desc": "tk",
+         "coords": [
+          {
+           "e": "const",
+           "v": 0,
+           "w": 32
+          }
+         ],
+         "bar": "full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "leader": true
+        }
+       ],
+       "else": []
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "bin",
+         "o": "and",
+         "a": {
+          "e": "cmp",
+          "o": "eq",
+          "a": {
+           "e": "var",
+           "name": "MODE",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 1
+         },
+         "b": {
+          "e": "cmp",
+          "o": "eq",
+          "a": {
+           "e": "var",
+           "name": "k",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 1
+         },
+         "w": 1
+        },
+        "b": {
+         "e": "cmp",
+         "o": "eq",
+         "a": {
+          "e": "bin",
+          "o": "urem",
+          "a": {
+           "e": "pid",
+           "axis": 0,
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 2,
+           "w": 32
+          },
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 1,
+          "w": 32
+         },
+         "w": 1
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "tma_load",
+         "loc": "prologue.py:14",
+         "desc": "tqh",
+         "coords": [
+          {
+           "e": "const",
+           "v": 0,
+           "w": 32
+          }
+         ],
+         "bar": "full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "leader": true
+        }
+       ],
+       "else": [
+        {
+         "op": "event",
+         "ev": "tma_load",
+         "loc": "prologue.py:15",
+         "desc": "tq",
+         "coords": [
+          {
+           "e": "const",
+           "v": 0,
+           "w": 32
+          }
+         ],
+         "bar": "full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "leader": true
+        }
+       ]
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "bin",
+         "o": "and",
+         "a": {
+          "e": "cmp",
+          "o": "eq",
+          "a": {
+           "e": "var",
+           "name": "MODE",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 2,
+           "w": 32
+          },
+          "w": 1
+         },
+         "b": {
+          "e": "cmp",
+          "o": "eq",
+          "a": {
+           "e": "var",
+           "name": "k",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 1
+         },
+         "w": 1
+        },
+        "b": {
+         "e": "cmp",
+         "o": "eq",
+         "a": {
+          "e": "bin",
+          "o": "urem",
+          "a": {
+           "e": "pid",
+           "axis": 0,
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 2,
+           "w": 32
+          },
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 1,
+          "w": 32
+         },
+         "w": 1
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "tma_load",
+         "loc": "prologue.py:16",
+         "desc": "tq",
+         "coords": [
+          {
+           "e": "const",
+           "v": 0,
+           "w": 32
+          }
+         ],
+         "bar": "full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "leader": true
+        }
+       ],
+       "else": []
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "mma",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "bin",
+       "o": "urem",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "for",
+       "var": "k",
+       "lb": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "ub": {
+        "e": "var",
+        "name": "N",
+        "w": 32
+       },
+       "step": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "loc": "prologue.py:20",
+       "body": [
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "prologue.py:21",
+         "bar": "full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "bin",
+          "o": "and",
+          "a": {
+           "e": "var",
+           "name": "k",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 32
+         }
+        },
+        {
+         "op": "event",
+         "ev": "commit_arrive",
+         "loc": "prologue.py:22",
+         "bar": "empty",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "cta_mask": {
+          "e": "const",
+          "v": 3,
+          "w": 32
+         }
+        }
+       ]
+      }
+     ],
+     "else": []
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "cluster_pair_prologue",
+  "inputs": [
+   {
+    "name": "n2",
+    "params": {
+     "N": 2,
+     "MODE": 0
+    }
+   },
+   {
+    "name": "n3",
+    "params": {
+     "N": 3,
+     "MODE": 0
+    }
+   },
+   {
+    "name": "n4",
+    "params": {
+     "N": 4,
+     "MODE": 0
+    }
+   },
+   {
+    "name": "short_peer",
+    "params": {
+     "N": 3,
+     "MODE": 1
+    }
+   },
+   {
+    "name": "extra_peer_box",
+    "params": {
+     "N": 3,
+     "MODE": 2
+    }
+   },
+   {
+    "name": "peer_unordered",
+    "params": {
+     "N": 3,
+     "MODE": 3
+    }
+   },
+   {
+    "name": "peer_extra_iteration",
+    "params": {
+     "N": 3,
+     "MODE": 4
+    }
+   }
+  ]
+ }
+}

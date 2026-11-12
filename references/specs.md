@@ -27,7 +27,9 @@ verdict means. The Lean definitions are the authority; each section names them.
   whose evaluation stops with a `model limit` or an `unexpected` error, a spec
   that finds nothing certain on an input with an out-of-bounds metadata load
   ("Undecided specs"), P0-2 and P0-4 with nothing certain outside a cluster whose
-  barrier ledger does not converge, and P1-1 with only U1 pairs or F1 pairs that a
+  barrier ledger does not converge, P0-4 with nothing certain outside a slot whose
+  bytes from another CTA balance only if a landing completes a later phase than its
+  issue order shows (P0-4), and P1-1 with only U1 pairs or F1 pairs that a
   named barrier used with two counts, or another round of a ledger that does not
   converge, might order. `lkv.py` reports such a spec as
   ERROR after an `unexpected` evaluation error (the case or LKV must be fixed),
@@ -67,7 +69,7 @@ verdict means. The Lean definitions are the authority; each section names them.
 | lockstep credit                           | a second happens-before closure (`saturate` with `lockstep = true`) in which phase k also needs each arriving role's least share, over all fitting assignments, of the phases up to min(k, lockstep) of the lockstep contents. The contents are an assumption (one fixed share per role and phase), not a certainty, so this closure decides only whether a repeated parity is a presumed skip instead of stale, and serves as evidence for zero shares and initialization arrivals (it can only make contents exist). Phase lower bounds (and with them happens-before) never use it. A presumed skip counts at c+2 for the hang checks of P0-2 (its `assumedPhase`): if the contents are right the role needs that phase, and if not the wait is stale, so a hang found that way is a violation either way. The credit thus replaces a stale FAIL by the verdict under the contents, and never fails an input that passes without it                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | waited phases                             | phases up to R* = the highest phase some role's waits need on the slot                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | lockstep contents                         | over the waited complete phases (the first min(R*, K)): each arriving role contributes the same number of arrivals s_r to every one of them, ending exactly at one of its arrive events after each, and the s_r sum to the count (`KV.lockstepShares`); or, if no such shares exist, an initialization arrival forms phase 1 by itself and shares cover the phases after it (`KV.lockstepContents`). A role with arrivals takes s_r = 0 only if its first arrival surely follows the last waited phase. An initialization arrival is the first `count` arrivals of one role, reached at one of its arrive events, such that nothing else lands in phase 1: every other role's first arrival on the slot surely follows phase 1's completion, or the initialization arrivals contain no commit and surely precede every other role's first arrive event (a commit lands after its event). E.g. FA4's dQ ring: warp 4 pre-arrives once at init, the store warp makes every later release; the releases may be commits. Evidence for a zero share or an initialization arrival uses happens-before credit only from slots whose contents need none, never from the slot itself. Several share assignments can fit (count 8 as 2+2+4 or 1+1+6): the representative one has the most participating roles; the fitting ones are those whose zero shares are evidenced |
-| bytes of a phase                          | an `expect_tx` belongs to the phase its role's next arrival falls in under a fitting share assignment; a `tma_load` to the phase of its role's latest `expect_tx` on the slot. A role of another CTA whose only events on the slot are transaction landings (`tma_load`, `complete_tx`; a lander: the other CTA of a cta_group::2 pair, a multicast destination, a DSMEM copy) lands the same bytes v in every waited phase in whole landings: a landing belongs to phase `bytes before it / v + 1` (at most K + 1), for each byte share v its landings reach exactly at v, 2v, ... (`RoleSlot.byteShares`); with no fitting share its bytes cannot be attributed. Phase K + 1 is the last one: it never completes, so bytes issued after phase K land in it (with K = 0 every byte belongs to phase 1). Bytes of a role with share 0 cannot be attributed. The bytes are attributed under the representative assignment and, if that breaks a transaction clause of P0-4, under the other fitting ones (distinct on the roles with transaction events, at most 64 in all, `KV.maxShareVectors`) with each landers' byte share choice (at most 256 combinations) until one keeps them all; P0-4 shows the first combination's attribution if none does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| bytes of a phase                          | an `expect_tx` belongs to the phase its role's next arrival falls in under a fitting share assignment; a `tma_load` to the phase of its role's latest `expect_tx` on the slot. A role of another CTA whose only events on the slot are transaction landings (`tma_load`, `complete_tx`; a lander: the other CTA of a cta_group::2 pair, a multicast destination, a DSMEM copy) is attributed by its issue order: a landing belongs to phase f + 1 (at most K + 1), f the highest phase of the slot that surely completed before it is issued (sound happens-before with the precise needs of P1-1, `TxRec.floor`), its first possible phase; the bytes per phase need not be equal, but none is negative (a negative `expect_tx` or `complete_tx` count is an evaluation error). Phase K + 1 is the last one: it never completes, so bytes issued after phase K land in it (with K = 0 every byte belongs to phase 1). Bytes of a role with share 0 cannot be attributed. The bytes are attributed under the representative assignment and, if that breaks a transaction clause of P0-4, under the other fitting ones (distinct on the roles with transaction events, at most 64 in all, `KV.maxShareVectors`) until one keeps them all; if none does, P0-4 shows the first attribution that breaks them only through a lander's lower bounds as not decided (P0-4), else the representative one                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | optimistic progress                       | every role runs as far as its waits allow when every arrival takes effect as soon as its event is reached and transaction bytes are ignored; a wait passes once the arrivals on its slot reach its phase lower bound x count, presumed skips counted at c+2 (`KV.deadlocks`, `assumedPhase`). A wait still blocked when nothing can move never returns in the lockstep model (or a presumed skip it depends on is stale)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | static waiter                             | a role whose code (any branch or loop body) waits on the barrier array. It is expected to observe every slot of the array on which it has no wait, arrival or transaction event (a `bar_init` does not count: TTGIR emits every one in the `default` role); a role with an arrival or transaction bytes on a slot is one of the slot's producers (one array can hold several logical barriers: the CuTe frontend emits each pipeline's full and empty barriers as one array)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | complete trace                            | a role's event trace that ran to its end; a role whose metadata `load` index lies outside the tensor stops there (its later events depend on the value read). P0-2 and P0-4 use the clusters (CTAs without clusters) whose role traces are all complete                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -213,12 +215,49 @@ Per cluster (a CTA without clusters; with complete role traces) and slot (`Barri
   than PTX, which lets the transaction count go below zero while a phase is
   pending; the frontends emit `arrive.expect_tx` before the copies), or bytes
   that cannot be attributed to a phase. A lander (a role of another CTA of the
-  cluster, shared notions) issues no `expect_tx`: its bytes need only a byte
-  share.
+  cluster, shared notions) issues no `expect_tx`: its bytes need not be covered.
 
 The last three clauses (`SlotLedger.TxOk`) are judged on the bytes of a phase
 (shared notions): they fail only if they fail under every fitting share
 assignment tried, because the lockstep model admits each of them.
+
+A lander's phase is a lower bound: the landing cannot complete an earlier phase,
+but it can complete a later one if the phase it is put in completes without it.
+So (`Ledger.lean`, "Landers"):
+
+- the clauses holding under that attribution prove it: by induction over the
+  phases, phase g can only receive the landings put in g (later ones are issued
+  after g completed, earlier ones landed in their own phases) and needs all of
+  them, so every landing lands where it was put (PASS);
+- a failure is certain if it does not rest on the lower bounds: a clause of the
+  slot's own roles, a landing whose first possible phase nobody waits for, a
+  first unbalanced waited phase that receives fewer bytes than it expects (no
+  later landing can reach it), or waited phases whose bytes differ from their
+  `expect_tx` bytes in all;
+- otherwise (the first unbalanced phase receives more bytes than it expects
+  while the totals match) a landing may complete a later phase, depending on
+  timing the ledger does not order: P0-4 lists one `not decided on this input`
+  line for the slot (`SlotLedger.txUndecided`, `Barrier.undecided`) instead of
+  its transaction lines, and is UNDECIDED unless something else is certain. E.g.
+  a peer that issues its loads without waiting for the phases before
+  (`tests/lean/cluster_pair_prologue` `peer_unordered`). With several fitting
+  share assignments the slot is not decided as soon as one of them fails only
+  so (`tests/lean/cluster_lander_shares`): a transaction clause fails only if it
+  fails certainly under every assignment.
+
+"Surely completed before" uses the precise needs (`Ledger.lean`, the arrivals
+of other roles that may precede a wait's return instead of their run totals):
+in a multicast pipeline every CTA's consumer arrives on every CTA's empty slot,
+and the run totals of two such arriving roles order nothing
+(`tests/lean/cluster_multicast_pipeline`). The induction needs every landing's
+bytes to be non-negative: PTX transaction counts are unsigned, and a negative
+`expect_tx` or `complete_tx` count stops the evaluation (`unexpected`).
+
+The attribution follows the kernel's issue order whatever the bytes per phase: a
+cta_group::2 backward whose prologue also loads K into the first phase (peer
+bytes 49152, 16384, 16384, ... on the leader's barrier) balances phase by phase.
+Before, a lander had to land the same bytes in every waited phase; no share fit
+3 or more such phases, and P0-4 reported a certain FAIL.
 
 The unwaited-phase rule has no bound below K + 1 because none is needed: phases
 beyond K + 1 cannot start (phase K + 1 never completes), so every byte lands in
@@ -460,7 +499,8 @@ no counterexample is listed. The error's kind (`Eval.lean` `ErrKind`, printed as
   an ERROR: a `while` exceeding `max_iters` (a hang of the kernel, or a budget
   too small for the input), an in-extent metadata `load` at a negative offset
   (negative strides) or at one the input gives no value for, a negative barrier
-  `num`, a segmented global tensor whose strides give no unique row per offset
+  `num`, a negative `expect_tx` or `complete_tx` byte count (PTX transaction
+  counts are unsigned), a segmented global tensor whose strides give no unique row per offset
   (shared notions), and IR and input inconsistencies that `frontend/kir.py`
   rejects (width mismatch, unbound variable, unknown tensor/barrier, a param
   without a value).
@@ -562,8 +602,15 @@ with at least one note, whatever their outcome (a PASS can have notes).
   per cluster, a cta_group::2 MMA or copy accessing the TMEM of both CTAs of its
   pair (`Ev.tmem` CTA set). What P0 does not
   see across CTAs: which CTA's data a copy carries (a copy sent to the wrong CTA
-  keeps the byte counts), DSMEM loads and stores outside bulk copies, and the
-  arrival of exited threads on the cluster barrier. Refused: 2-CTA TTGIR kernels
+  keeps the byte counts), DSMEM loads and stores outside bulk copies, the
+  arrival of exited threads on the cluster barrier, and an order between another
+  CTA's landings and a slot's phases that the ledger's happens-before does not
+  find: one that only a named barrier gives (P0 has no named barriers: e.g. a
+  relay warp whose next copy waits on a `bar.sync` with compute warps that wait
+  for the peer's phase), or one carried only by transaction bytes (a multicast
+  pipeline over more than 2 CTAs, whose consumers only the other CTAs' slices
+  hold back); its landings go to their first possible phase, and P0-4 is
+  UNDECIDED if they then overfill one. Refused: 2-CTA TTGIR kernels
   (`ttng.two-ctas`, remote mbarriers, DSMEM), TTGIR multi-CTA layouts
   (`ttg.num-ctas` > 1), CLC, im2col TMA, pointers carried by loops (TTGIR; CuTe:
   a loop-carried value that changes structure, e.g. a pointer into another

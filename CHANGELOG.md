@@ -86,6 +86,28 @@ First public release.
   list one `not decided` line for it and are UNDECIDED unless another cluster has a
   certain counterexample; P1-1's F1 pairs there are not certain either
   (`tests/lean/ledger_cycle`, `ledger_confirm`, `p1/ledger_cycle`).
+- P0-4: transaction bytes that another CTA of the cluster lands on a slot (the other CTA
+  of a cta_group::2 pair loading into the leader's barrier, a multicast destination, a
+  DSMEM copy) are attributed by that role's issue order: each landing goes to the first
+  phase it can complete (one after the highest phase of the slot that surely completed
+  before it is issued), no longer to a fixed byte share per phase. A 2-CTA pipeline whose
+  first phase also carries a prologue load (per-phase peer bytes 49152, 16384, 16384, ...)
+  was a certain FAIL with 3 or more phases on a slot; it now PASSes when every phase
+  balances. A failure is certain when a phase lacks bytes, the totals differ or a landing
+  can only land in a phase nobody waits for; when only the lower bounds fail (a phase
+  receives more bytes than it expects while the totals match), P0-4 is UNDECIDED with a
+  `not decided` line (`tests/lean/cluster_pair_prologue`). So are copies ordered after the
+  phases before them only by a named barrier, which P0 does not model (e.g. a relay warp
+  exchanging DSMEM copies with its peer CTA), or only by transaction bytes (a multicast
+  pipeline over more than 2 CTAs), which the byte share used to PASS. "Surely completed"
+  uses the precise needs of P1-1, so a multicast pipeline over 2 CTAs, whose empty slots
+  two consumers release, PASSes (`tests/lean/cluster_multicast_pipeline`). With several
+  fitting arrival share assignments, a slot is not decided as soon as one of them fails
+  only through the lower bounds, and lists no transaction line as certain
+  (`tests/lean/cluster_lander_shares`).
+- A negative `expect_tx` or `complete_tx` byte count is an evaluation error (`unexpected`):
+  PTX transaction counts are unsigned, and P0-4's attribution by issue order needs them
+  non-negative (`tests/lean/cluster_dsmem_relay` `negative_bytes`).
 - P0-2: on a barrier array that some role's code initializes, each slot a CTA uses needs
   exactly one executed `bar_init` there; a slot used without one or initialized twice is
   a malformed barrier (references/kir.md change 13; `tests/lean/bar_init_once`).

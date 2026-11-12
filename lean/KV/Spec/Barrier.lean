@@ -27,7 +27,11 @@ certain in the extracted model:
 
 The transaction clauses (the last three, `SlotLedger.TxOk`) fail only if they fail under
 every share assignment that fits the lockstep contents (Ledger.lean; the counterexamples
-show the attribution under the representative one).
+show the attribution under the representative one). Bytes another CTA lands on the slot (a
+lander) are put in the first phase they can complete by its issue order; if the clauses
+fail under some share assignment only because such a landing may complete a later phase,
+the slot is not decided and lists only the `not decided` line for them (`undecided`,
+Ledger.lean "Landers").
 
 Notes (no effect on the verdict): laps (a wait after the role's first one on the slot that
 synchronizes with phase k+2 or later instead of the phase k after its previous wait,
@@ -98,7 +102,7 @@ def slotIssues (h : Host) (pid : Nat × Nat × Nat) (L : SlotLedger) : Array Iss
         out := out.push { loc := w.loc, context := ctx h pid L rs.role,
                           msg := s!"first wait has parity 1 on a slot that receives TMA bytes: it passes on the fresh barrier, before any byte lands (a consumer of the data starts at parity 0)" }
   for p in L.txPhases do
-    if p.phase ≤ L.waited && p.expect != p.landed then
+    if p.phase ≤ L.waited && p.expect != p.landed && !L.txUndecided then
       out := out.push { loc := p.loc, context := ctx h pid L none, msg := s!"{bytesMsg p} landing in it" }
     if L.waited < p.phase && p.landed != 0 then
       out := out.push { loc := p.loc, context := ctx h pid L none,
@@ -109,9 +113,7 @@ def slotIssues (h : Host) (pid : Nat × Nat × Nat) (L : SlotLedger) : Array Iss
   for u in L.uncovered do
     out := out.push { loc := u.loc, context := ctx h pid L u.role, msg := uncoveredMsg u }
   if let some (r, loc) := L.unattributed[0]? then
-    let lander := L.roles.any fun rs => rs.role == r && rs.lander
-    let why := if lander then "the role lands transaction bytes on the slot without arriving or expecting bytes there (a TMA load or copy from another CTA of the cluster), and its bytes do not split into one fixed share per waited phase"
-      else if L.contents.isNone then "the arriving roles have no lockstep contents (P0-2)"
+    let why := if L.contents.isNone then "the arriving roles have no lockstep contents (P0-2)"
       else "the role does not arrive on the slot in every waited phase (an expect_tx and the arrive of its phase must be in the same role)"
     out := out.push { loc, context := ctx h pid L (some r),
                       msg := s!"{L.unattributed.size} transaction event(s) cannot be attributed to a phase: {why}" }
@@ -134,6 +136,20 @@ def slotNotes (h : Host) (pid : Nat × Nat × Nat) (L : SlotLedger) : Array Issu
       out := out.push { loc := p.loc, context := ctx h pid L none,
                         msg := s!"{bytesMsg p}, and nobody waits for this phase (transaction bytes pending after the last wait)" }
   return out
+
+/-- The `not decided` line of a slot whose transaction bytes break P0-4 only through the
+lower bounds of a lander's phases (Ledger.lean, "Landers"). -/
+def undecidedSlot (h : Host) (pid : Nat × Nat × Nat) (L : SlotLedger) : Array Issue :=
+  if !L.txUndecided then #[] else
+  match L.txPhases.find? fun p => p.phase ≤ L.waited && p.expect != p.landed with
+  | none => #[]
+  | some p =>
+    let who := ", ".intercalate ((L.roles.filter (·.lander)).map (h.gRoleName pid ·.role)).toList
+    #[{ loc := p.loc, context := ctx h pid L none,
+        msg := s!"not decided on this input: role(s) {who} (another CTA of the cluster) land transaction bytes on the slot without arriving or expecting bytes there, and the barrier events do not show which phase each landing completes: with each put in the first phase it can complete by its issue order (after the phases that surely completed before it is issued), phase {p.phase} receives {p.landed} bytes for expect_tx {p.expect} bytes while the waited phases receive the bytes they expect in all, so a landing may complete a later phase instead, depending on an order the ledger does not see (e.g. a named barrier, which P0 does not model, or an order carried only by transaction bytes); the lines of this spec that are not `not decided` lines are certain counterexamples" }]
+
+/-- `not decided` lines of P0-4 on the ledgers `Ls` (`undecidedSlot`). -/
+def undecided (h : Host) (Ls : Ledgers) : Array Issue := forSlots Ls (undecidedSlot h)
 
 /-- Counterexamples of P0-4 on the ledgers `Ls` of a run on host `h`. -/
 def issues (h : Host) (Ls : Ledgers) : Array Issue := forSlots Ls (slotIssues h)

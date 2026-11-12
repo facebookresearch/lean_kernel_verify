@@ -34,7 +34,9 @@
   (meta_oob_load out_of_range, eval_errors meta_oob, meta_masked_load unmasked_empty,
   meta_oob_elided out_of_range) and P0-2/P0-4 of ledger_cycle's inputs and ledger_confirm
   at_budget (a barrier ledger that does not converge) where nothing but the `not decided`
-  line is listed.
+  line is listed, and P0-4 of cluster_pair_prologue peer_unordered, cluster_multicast_pipeline
+  local_release and cluster_lander_shares' inputs (another CTA's bytes that balance only if
+  a landing completes a later phase than its issue order shows).
 * probe_tlx / probe_cute: the probe kernels of kernels/ through the real TTGIR and CuTe
   frontends (`lkv.py run`), with degenerate inputs (an empty tensor, fewer elements than
   one block). The seeded bugs (a floor grid; threads past the end) must be the only FAILs.
@@ -139,6 +141,16 @@ EVAL_ERROR_KINDS = {
     ("segmented_gload", "bad_layout"): "unexpected",
     ("cluster_launch", "grid3"): "kernel",
     ("cluster_remote_arrive", "rank_outside_cluster"): "kernel",
+    ("cluster_dsmem_relay", "negative_bytes"): "unexpected",
+}
+
+
+# P0-4 UNDECIDED through another CTA's landings (Ledger.lean, "Landers").
+LANDER_UNDECIDED = {
+    ("cluster_pair_prologue", "peer_unordered", "P0-4"),
+    ("cluster_multicast_pipeline", "local_release", "P0-4"),
+    ("cluster_lander_shares", "ordered", "P0-4"),
+    ("cluster_lander_shares", "unordered", "P0-4"),
 }
 
 
@@ -846,7 +858,9 @@ class EndToEnd(unittest.TestCase):
         input that kind's outcome; the other UNDECIDED outcomes are the specs of the inputs
         with an out-of-bounds metadata load or a barrier ledger that does not converge that
         list nothing but the `not decided` line (its other lines are certain
-        counterexamples), and there is no other ERROR."""
+        counterexamples), and P0-4 of the inputs whose peer CTA's bytes balance only if a
+        landing completes a later phase than its issue order shows (LANDER_UNDECIDED), which
+        list nothing but the `not decided` line; there is no other ERROR."""
         outcomes, evals, only_marker = {}, {}, set()
         for v, i in runs_of_report(report):
             if i["eval_error"]:
@@ -890,8 +904,10 @@ class EndToEnd(unittest.TestCase):
                 for x in stopped | unconverged
                 for label in SPECS[1:]
                 if (*x, label) in only_marker
-            },
+            }
+            | LANDER_UNDECIDED,
         )
+        self.assertLessEqual(LANDER_UNDECIDED, only_marker)
         # A stopped input FAILs a spec it has a certain counterexample for.
         self.assertIn(("meta_oob_load", "out_of_range", "P0-3"), outcomes["FAIL"])
         self.assertIn(("meta_oob_elided", "out_of_range", "P0-2"), outcomes["FAIL"])

@@ -127,8 +127,16 @@ cluster_pair_tma cluster.py:10: cta (0,0,0) slot full[0]: phase 1: expect_tx 128
 cluster_remote_arrive cluster.py:45: cta (0,0,0) slot ready[0]: role waiter of cta (0,0,0) (consumer convention, 1 waits) needs 1 completions but the slot completes 0 times (1 arrivals / count 2): the wait hangs
 cluster_remote_arrive arrive names CTA rank 2, outside the cluster of 2 CTA(s)
 cluster_dsmem_relay cluster.py:51: cta (0,0,0) slot peer_full[0]: phase 1: expect_tx 512 bytes != tma_load 256 bytes landing in it
-cluster_dsmem_relay cluster.py:51: cta (0,0,0) slot peer_full[0]: phase 2: expect_tx 512 bytes != tma_load 0 bytes landing in it
+cluster_dsmem_relay cluster.py:51: cta (0,0,0) slot peer_full[0]: phase 2: expect_tx 512 bytes != tma_load 768 bytes landing in it
+cluster_dsmem_relay cluster.py:53: cta (0,0,0) role relay: complete_tx: negative byte count -256 (transaction counts are unsigned)
+cluster_pair_prologue prologue.py:12: cta (0,0,0) slot full[0]: phase 2: expect_tx 128 bytes != tma_load 96 bytes landing in it
+cluster_pair_prologue prologue.py:12: cta (0,0,0) slot full[0]: phase 2: expect_tx 128 bytes != tma_load 192 bytes landing in it
+cluster_pair_prologue prologue.py:12: cta (0,0,0) slot full[0]: not decided on this input: role(s) producer of cta (1,0,0) (another CTA of the cluster) land transaction bytes on the slot without arriving or expecting bytes there, and the barrier events do not show which phase each landing completes: with each put in the first phase it can complete by its issue order (after the phases that surely completed before it is issued), phase 1 receives 512 bytes for expect_tx 384 bytes
+cluster_pair_prologue prologue.py:15: cta (0,0,0) slot full[0]: phase 4: 64 TMA bytes land in it, but the waits observe phases up to 3
 cluster_multicast cluster.py:70: cta (1,0,0) slot full[0]: phase 1: expect_tx 128 bytes != tma_load 0 bytes landing in it
+cluster_multicast_pipeline mcast.py:12: cta (0,0,0) slot full[0]: phase 1: expect_tx 128 bytes != tma_load 96 bytes landing in it
+cluster_multicast_pipeline mcast.py:12: cta (0,0,0) slot full[0]: not decided on this input: role(s) producer of cta (1,0,0) (another CTA of the cluster) land transaction bytes on the slot without arriving or expecting bytes there
+cluster_lander_shares shares.py:10: cta (0,0,0) slot x[0]: not decided on this input: role(s) p of cta (1,0,0) (another CTA of the cluster) land transaction bytes on the slot without arriving or expecting bytes there, and the barrier events do not show which phase each landing completes: with each put in the first phase it can complete by its issue order (after the phases that surely completed before it is issued), phase 1 receives 192 bytes for expect_tx 128 bytes
 cluster_launch grid (3,1,1) is not a multiple of the cluster dims (2,1,1): the launch fails
 cluster_barrier cluster.py:101: cta (0,0,0) slot cluster_barrier[0]: role warp1 of cta (1,0,0) (consumer convention, 1 waits) needs 1 completions but the slot completes 0 times (96 arrivals / count 128): the wait hangs
 ledger_cycle ?: cta (0,0,0): not decided on this input: the barrier ledger of this CTA does not converge

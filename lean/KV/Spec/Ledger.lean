@@ -85,8 +85,8 @@ arrivals; bytes are attributed under each of them (the representative first, at 
 `maxShareVectors` in all) until one satisfies P0-4's transaction clauses
 (`SlotLedger.TxOk`), so P0-4 fails only if none does.
 
-Precise needs (P1-1 only: `ledger` with `precise`, `Run.ledgersP1`; P0-2 and P0-4 use the
-default). Subtracting the other roles' arrivals over the whole run says nothing about a
+Precise needs (P1-1: `ledger` with `precise`, `Run.ledgersP1`; P0-4 only for the landers'
+lower bounds, below; P0-2 and the classification of P0-4 use the default). Subtracting the other roles' arrivals over the whole run says nothing about a
 role whose co-arrivers have later arrivals: with compute warps split into roles of 1 and
 3 warps on one count-4 slot, phase k needs `4k - 3K` of the 1-warp role (K the run's
 phases), at most 0 for k < K. A wait that returned for phase k saw `k x count` arrivals
@@ -132,12 +132,31 @@ Landers. A role of another CTA whose only events on a slot are transaction landi
 load or `complete_tx`, no arrival, no expect_tx) lands bytes a role of the slot's CTA
 expects: the other CTA of a pair loading into the leader's barrier, or a peer copying into
 this CTA. (Within a CTA, transaction bytes keep the rule above: the role that expects them
-arrives.) Its bytes are
-attributed under lockstep transaction shares: it lands the same bytes in every waited phase,
-in whole landings, and a landing belongs to phase `bytes before it / share + 1` (at most
-K + 1). Several shares can fit (`RoleSlot.byteShares`); bytes are attributed under each (with
-each arrival share assignment, at most `maxShareVectors` combinations) until one satisfies
-P0-4's transaction clauses; a lander with no fitting share leaves its landings unattributed.
+arrives.) Its bytes are attributed by its issue order: a landing belongs to phase f + 1 (at
+most K + 1), f the highest phase of the slot that surely completed before the landing is
+issued (sound happens-before with the precise needs above, `TxRec.floor`; e.g. the other CTA
+of a pair loads iteration k after its wait on its own empty slot, which the leader's MMA
+releases only after it waited for phase k - 1; in a multicast pipeline that empty slot has
+an arriving role per CTA, which the run totals never order). That is a lower bound: the
+landing cannot complete an earlier phase, but it may land in a later one if the phase it is
+put in completes without it. The bytes per phase need not be uniform (a prologue that also
+loads K into the first phase), but they are not negative (a negative transaction count is an
+evaluation error, Eval.lean `txBytes`).
+* `TxOk` under it proves the attribution: by induction over the phases, phase g can only
+  receive the landings put in g (later ones are issued after g completed, earlier ones
+  landed in their own phases), and needs all of them, so each lands where it was put.
+* A failure is certain if it does not depend on the lower bounds: a landing put in a phase
+  nobody waits for, a clause of the slot's own roles, or a first unbalanced waited phase
+  that receives fewer bytes than it expects (no later landing can make up for it), or
+  waited phases whose bytes differ from their expect_tx bytes in all (the excess lands in
+  an unwaited phase, or a phase lacks bytes).
+* Otherwise the first unbalanced phase receives more bytes than it expects while the
+  totals match: a landing may complete a later phase instead, depending on timing the
+  model does not order (a named barrier, an order carried only by transaction bytes, a
+  happens-before chain the closure does not find). P0-4 is then not decided on the slot
+  (`SlotLedger.txUndecided`), never a PASS or a certain FAIL; with several fitting share
+  assignments, it is not decided as soon as one of them fails only so (none being `TxOk`),
+  and the slot's lines are that assignment's.
 -/
 import KV.Spec.Common
 
@@ -223,6 +242,11 @@ structure TxRec where
   loc : Loc
   /-- The role's arrivals on the slot before this event. -/
   arrivedBefore : Int
+  /-- Position of the event in its role's trace. -/
+  pos : Nat
+  /-- A lander's landing (module doc, "Landers"): the highest phase of the slot that surely
+  completed before it is issued (`ledger`, sound happens-before with the precise needs). -/
+  floor : Int := 0
   deriving Inhabited
 
 structure RoleSlot where
@@ -256,21 +280,6 @@ def RoleSlot.needed (rs : RoleSlot) : Int := (rs.waits.back?.map (·.assumedPhas
 transaction landings. -/
 def RoleSlot.lander (rs : RoleSlot) : Bool :=
   rs.remote && rs.arrivals.isEmpty && !rs.tx.isEmpty && rs.tx.all (·.load)
-
-/-- Byte-share candidates of a lander over `W ≥ 1` waited phases: byte counts `v` that its
-landings reach exactly after `v, 2v, ..., min(W, total / v) x v` bytes. -/
-def RoleSlot.byteShares (rs : RoleSlot) (W : Int) : Array Int := Id.run do
-  let mut cum : Array Int := #[]
-  let mut acc : Int := 0
-  for x in rs.tx do
-    acc := acc + x.bytes
-    cum := cum.push acc
-  let sorted := dedup cum
-  let reaches (n : Int) : Bool :=
-    let i := searchFirst sorted (· ≥ n)
-    i < sorted.size && sorted[i]! == n
-  return sorted.filter fun v =>
-    0 < v && (List.range (min W (acc / v)).toNat).all fun j => reaches ((j + 1) * v)
 
 /-- Index of the first entry of `rs.arrivals` satisfying the monotone predicate `p`
 (`rs.arrivals.size` if none). -/
@@ -352,6 +361,9 @@ structure SlotLedger where
   /-- The cluster's classification reached a fixpoint (`ledger`); if not, P0-2 and P0-4 are
   not decided on the cluster (`unconverged`). -/
   converged : Bool := true
+  /-- `TxOk` fails, but only because a lander's landings may complete later phases than
+  their lower bounds (module doc, "Landers"): P0-4 is not decided on the slot. -/
+  txUndecided : Bool := false
   deriving Inhabited
 
 def SlotLedger.completions (L : SlotLedger) : Int := L.arrivals / L.count
@@ -609,6 +621,17 @@ def completedIn (L : Array SlotLedger) (waits : Array (Array WaitPos)) (locAt : 
   let a := rs.firstArrival (·.2 ≥ need - (all - ins[best]!))
   return rs.arrivals[a]?.map fun (p, _) => { role := rs.role, loc := locAt rs.role p, wait := false }
 
+/-- The highest phase bound of a wait on ledger slot `slot` within the prefixes `done` (0 if
+none): on a slot with transaction bytes, the phases that surely completed before the event
+the prefixes precede (`completedIn`). -/
+def completedUpTo (waits : Array (Array WaitPos)) (done : Array Nat) (slot : Nat) : Int := Id.run do
+  let mut k : Int := 0
+  for r in [0:waits.size] do
+    for (p, s, b) in waits[r]! do
+      if p ≥ done[r]! then break
+      if s == slot then k := max k b
+  return k
+
 /-! ## Phase classification -/
 
 /-- One classification round (module doc): the phase of every wait from the phase lower
@@ -823,26 +846,19 @@ def addTx (ps : Array TxPhase) (p expect landed : Int) (loc : Loc) : Array TxPha
   | some j => ps.modify j fun x => { x with expect := x.expect + expect, landed := x.landed + landed }
   | none => ps.push { phase := p, expect, landed, loc }
 
-/-- Attribute the slot's transaction bytes to phases under the share assignment `shares` and
-the landers' byte shares `bytes` (per entry of `roles`; module doc, `SlotLedger.phaseOf`);
+/-- Attribute the slot's transaction bytes to phases under the share assignment `shares`
+(module doc, `SlotLedger.phaseOf`) and the landers' lower bounds (module doc, "Landers");
 nothing is attributed on a slot nobody waits on. -/
-def SlotLedger.attributeWith (L : SlotLedger) (shares : Array Int) (bytes : Array (Option Int) := #[]) :
-    SlotLedger := Id.run do
+def SlotLedger.attributeWith (L : SlotLedger) (shares : Array Int) : SlotLedger := Id.run do
   if L.waited ≤ 0 then return L
   let mut phases : Array TxPhase := #[]
   let mut uncovered : Array Uncovered := #[]
   let mut unattributed : Array (Nat × Loc) := #[]
   for (rs, i) in L.roles.zipIdx do
     if rs.lander then
-      -- a lander: phase = bytes landed before / its byte share + 1 (module doc)
-      let mut before : Int := 0
+      -- a lander: the first phase its landing can complete (module doc)
       for x in rs.tx do
-        let ph : Option Int := if L.completions ≤ 0 then some 1
-          else (bytes[i]?.join).map fun v => min (before / v + 1) (L.completions + 1)
-        match ph with
-        | some p => phases := addTx phases p 0 x.bytes x.loc
-        | none => unattributed := unattributed.push (rs.role, x.loc)
-        before := before + x.bytes
+        phases := addTx phases (min (x.floor + 1) (L.completions + 1)) 0 x.bytes x.loc
       continue
     -- phase of the role's latest expect_tx (`some none`: unattributed)
     let mut cur : Option (Option Int) := none
@@ -875,40 +891,38 @@ def SlotLedger.TxOk (L : SlotLedger) : Prop :=
 
 instance (L : SlotLedger) : Decidable L.TxOk := by unfold SlotLedger.TxOk; infer_instance
 
-/-- Choices of one byte share per lander from `cands` (per entry of `roles`; `#[]` for a
-role that is no lander), at most `max` of them; a lander without candidates gets `none`. -/
-def byteShareVectors (cands : Array (Array Int)) (max : Nat) : Array (Array (Option Int)) := Id.run do
-  let mut out : Array (Array (Option Int)) := #[#[]]
-  for cs in cands do
-    let opts : Array (Option Int) := if cs.isEmpty then #[none] else cs.map some
-    let mut next := #[]
-    for v in out do
-      for o in opts do
-        if next.size < max then next := next.push (v.push o)
-    out := next
-  return out
+/-- `TxOk` fails under this attribution only through landers' bytes, whose phases are lower
+bounds (module doc, "Landers"): no clause of the slot's own roles fails, no byte is put in a
+phase nobody waits for, the waited phases receive the bytes they expect in all, and the
+first unbalanced one receives more. -/
+def SlotLedger.landerUnsure (L : SlotLedger) : Bool :=
+  let w := L.txPhases.filter (·.phase ≤ L.waited)
+  let total (f : TxPhase → Int) := w.foldl (· + f ·) 0
+  L.roles.any (·.lander) && L.uncovered.isEmpty && L.unattributed.isEmpty &&
+    L.txPhases.all (fun p => p.phase ≤ L.waited || p.landed == 0) && total (·.expect) == total (·.landed) &&
+    (w.find? fun p => p.expect != p.landed).any fun p => p.landed > p.expect
 
 /-- Attribute the slot's transaction bytes under the representative shares or, if that
-violates `TxOk`, under the first other fitting assignment that does not (module doc), with
-each fitting choice of the landers' byte shares: the bytes stay attributed under the first
-choice only if no combination explains them. -/
+violates `TxOk`, under the first other fitting assignment that does not (module doc). If none
+does, the slot is not decided (`txUndecided`) under the first assignment that fails only
+through landers' lower bounds (`landerUnsure`), so it lists none of the transaction lines
+that some assignment does not certainly fail; failing that, the bytes stay attributed under
+the representative one (a certain failure). -/
 def SlotLedger.attribute (L : SlotLedger) : SlotLedger := Id.run do
-  let landers := L.roles.map fun rs => if rs.lander then rs.byteShares L.waited else #[]
-  let bvs := byteShareVectors landers maxShareVectors
   let arrivals : Array (Array Int) := match L.contents with
     | none => #[#[]]
     | some c =>
       #[c.shares] ++ (shareVectors c.feasible L.count (L.roles.map (!·.tx.isEmpty)) maxShareVectors)
-  let first := L.attributeWith (arrivals.getD 0 #[]) (bvs.getD 0 #[])
+  let first := L.attributeWith (arrivals.getD 0 #[])
   if decide first.TxOk then return first
-  let mut tries := 0
-  for sh in arrivals do
-    for bv in bvs do
-      if tries ≥ maxShareVectors * 4 then return first
-      tries := tries + 1
-      let x := L.attributeWith sh bv
-      if decide x.TxOk then return x
-  return first
+  let mut unsure : Option SlotLedger := if first.landerUnsure then some first else none
+  for sh in arrivals.extract 1 arrivals.size do
+    let x := L.attributeWith sh
+    if decide x.TxOk then return x
+    if unsure.isNone && x.landerUnsure then unsure := some x
+  return match unsure with
+    | some u => { u with txUndecided := true }
+    | none => first
 
 /-! ## Optimistic progress -/
 
@@ -979,7 +993,8 @@ def ClusterTrace.roles (c : ClusterTrace) (n : Nat) : Array RoleTrace :=
 /-- Ledger of every slot touched in cluster `c`, in (CTA rank, barrier, index) order. With
 `precise` (P1-1 only; P0-2 and P0-4 use the default), happens-before also uses `needsWith`
 (the other roles' arrivals that may precede a wait's return instead of their totals over the
-run) and every wait gets its `lockPhase`. -/
+run) and every wait gets its `lockPhase`. The landers' lower bounds (`TxRec.floor`) use
+`needsWith` either way (module doc, "Landers"). -/
 def ledger (h : Host) (c : ClusterTrace) (precise : Bool := false) : Array SlotLedger := Id.run do
   let nr := h.kernel.roles.length
   let nb := h.barriers.size
@@ -995,8 +1010,8 @@ def ledger (h : Host) (c : ClusterTrace) (precise : Bool := false) : Array SlotL
                       tmaBytes := 0, roles := #[], staticWaiters := #[], initDeclared := false,
                       contents := none, txPhases := #[], uncovered := #[], unattributed := #[] }
   let slot (s : Slot) : Nat := base[s.cta * nb + s.bar]! + s.idx
-  let tx (load : Bool) (n : Int) (loc : Loc) (rs : RoleSlot) : RoleSlot :=
-    { rs with tx := rs.tx.push { load, bytes := n, loc, arrivedBefore := rs.total } }
+  let tx (load : Bool) (n : Int) (loc : Loc) (pos : Nat) (rs : RoleSlot) : RoleSlot :=
+    { rs with tx := rs.tx.push { load, bytes := n, loc, arrivedBefore := rs.total, pos } }
   for rt in roles do
     let r := rt.role
     for (e, pos) in rt.events.zipIdx do
@@ -1008,13 +1023,13 @@ def ledger (h : Host) (c : ClusterTrace) (precise : Bool := false) : Array SlotL
                                firstCommit := rs.firstCommit.orElse fun _ => if async then some rs.arrivals.size else none })
           fun l => { l with arrivals := l.arrivals + n, async := l.async || async }
       | .expectTx s n =>
-        L := bump L (slot s) e.loc r (tx false n e.loc) fun l => { l with expectBytes := l.expectBytes + n }
+        L := bump L (slot s) e.loc r (tx false n e.loc pos) fun l => { l with expectBytes := l.expectBytes + n }
       | .wait s p =>
         let w : WaitRec := { parity := p, loc := e.loc, pos, minPhase := 0, assumedPhase := 0, phase := 0,
                              presumed := false, stale := none, lapped := none, blocked := none }
         L := bump L (slot s) e.loc r (fun rs => { rs with waits := rs.waits.push w }) id
       | .tmaLoad _ _ s n | .landTx s n =>
-        L := bump L (slot s) e.loc r (tx true n e.loc) fun l => { l with tmaBytes := l.tmaBytes + n }
+        L := bump L (slot s) e.loc r (tx true n e.loc pos) fun l => { l with tmaBytes := l.tmaBytes + n }
       | _ => pure ()
   -- Round 0 knows no other waits and no contents, so only each role's own events order
   -- anything; its bounds are sound, and every later round uses the bounds and contents of
@@ -1055,10 +1070,20 @@ def ledger (h : Host) (c : ClusterTrace) (precise : Bool := false) : Array SlotL
   let inited := initDeclared h
   let mark (rs : RoleSlot) : RoleSlot := { rs with waits := rs.waits.map fun w =>
     { w with blocked := (blocked.find? fun (r, p, _) => r == rs.role && p == w.pos).map (·.2.2) } }
-  return (cur.filter (·.used)).map fun l =>
+  let fin := cur.map fun l => { l with roles := l.roles.map fun rs => { mark rs with remote := rs.role / nr != l.slot.cta } }
+  -- Landers (module doc): per role the positions of its landings, ascending, and the
+  -- prefixes that surely happened before each (sound happens-before, precise needs)
+  let landings := fin.foldl (init := Array.replicate n #[]) fun acc l =>
+    l.roles.foldl (init := acc) fun acc rs => if rs.lander then acc.modify rs.role (· ++ rs.tx.map (·.pos)) else acc
+  let landings := landings.map fun ps => ps.qsort (· < ·)
+  let mayF := if landings.all (·.isEmpty) then #[] else mayBeforeReturn fin bounds sizes
+  let hb := (Array.range n).map fun r => if landings[r]!.isEmpty then #[] else surelyBeforeAll fin bounds false r landings[r]! mayF
+  let floor (i r p : Nat) : Int := completedUpTo bounds (hb[r]![searchFirst landings[r]! (· ≥ p)]!).1 i
+  return (fin.zipIdx.filter (·.1.used)).map fun (l, i) =>
     SlotLedger.attribute { l with staticWaiters := sw[l.slot.bar]!.map (· + l.slot.cta * nr),
                                   initDeclared := inited[l.slot.bar]!, converged,
-                                  roles := l.roles.map fun rs => { mark rs with remote := rs.role / nr != l.slot.cta } }
+                                  roles := l.roles.map fun rs => if !rs.lander then rs else
+                                    { rs with tx := rs.tx.map fun x => { x with floor := floor i rs.role x.pos } } }
 
 /-- The clusters of the run whose roles all ran to their end (a trace cut short at an
 out-of-bounds metadata load has no meaningful ledger), in the order of their first CTA, each

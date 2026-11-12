@@ -209,8 +209,9 @@ segment_edges             no_segment       FAIL PASS PASS PASS PASS
 segment_edges             intended_past_extent PASS PASS FAIL PASS PASS
 # Thread-block clusters (kir.md change 11): a cta_group::2 pair whose loads complete on the
 # leader's barrier and whose MMA commit arrives on both CTAs; remote arrivals; DSMEM copies
-# (complete_tx: bytes from another CTA, attributed by lockstep byte shares); multicast loads;
-# the cluster barrier; a grid the cluster dims do not divide.
+# (complete_tx: bytes from another CTA, each put in the first phase it can complete by the
+# copying role's issue order: uneven_copies' second copy waits for phase 1, so phase 1 lacks
+# bytes); multicast loads; the cluster barrier; a grid the cluster dims do not divide.
 cluster_pair_tma          ok               PASS PASS PASS PASS PASS
 cluster_pair_tma          follower_no_leader PASS PASS PASS FAIL PASS
 cluster_pair_tma          commit_leader_only PASS FAIL PASS PASS PASS
@@ -221,8 +222,39 @@ cluster_remote_arrive     rank_outside_cluster FAIL FAIL FAIL FAIL FAIL
 cluster_dsmem_relay       ok               PASS PASS PASS PASS PASS
 cluster_dsmem_relay       short_copy       PASS PASS PASS FAIL PASS
 cluster_dsmem_relay       uneven_copies    PASS PASS PASS FAIL PASS
+# negative_bytes: a negative complete_tx count (it cancels an excess copy) is an evaluation
+# error (unexpected), never a balanced phase.
+cluster_dsmem_relay       negative_bytes   FAIL FAIL FAIL FAIL FAIL
+# A cta_group::2 pair whose first phase also carries a prologue load (lp_fa4's backward): the
+# peer's bytes per phase are 192, 64, 64, ..., matched per iteration by its waits on its empty
+# slot, which the leader's MMA releases after each phase (before, no uniform share fit 3 or more
+# phases: a certain FAIL). The peer loads half a box in iteration 1 (short_peer: phase 2 lacks
+# bytes) or one box more (extra_peer_box: the totals differ); loads without waiting
+# (peer_unordered: the attribution is a lower bound that overfills phase 1 while the totals
+# match, not decided); runs one iteration more (peer_extra_iteration: phase 4 nobody waits for).
+cluster_pair_prologue     n2               PASS PASS PASS PASS PASS
+cluster_pair_prologue     n3               PASS PASS PASS PASS PASS
+cluster_pair_prologue     n4               PASS PASS PASS PASS PASS
+cluster_pair_prologue     short_peer       PASS PASS PASS FAIL PASS
+cluster_pair_prologue     extra_peer_box   PASS PASS PASS FAIL PASS
+cluster_pair_prologue     peer_unordered   PASS PASS PASS FAIL PASS
+cluster_pair_prologue     peer_extra_iteration PASS PASS PASS FAIL PASS
 cluster_multicast         ok               PASS PASS PASS PASS PASS
 cluster_multicast         leader_only_mask PASS PASS PASS FAIL PASS
+# A multicast pipeline: every CTA's slice lands in both CTAs and each consumer releases both
+# CTAs' empty slots, so two roles arrive on each, and only the precise needs order the other
+# CTA's multicast after this CTA's phase. swapped_slices: phase 1 lacks bytes (certain);
+# local_release: each consumer releases only its own CTA, nothing orders the other CTA's
+# multicast (not decided).
+cluster_multicast_pipeline n4               PASS PASS PASS PASS PASS
+cluster_multicast_pipeline s2_n6            PASS PASS PASS PASS PASS
+cluster_multicast_pipeline swapped_slices   PASS PASS PASS FAIL PASS
+cluster_multicast_pipeline local_release    PASS PASS PASS FAIL PASS
+# Two share assignments fit slot x's arrivals, and another CTA's copies balance under one of
+# them only if a copy completes a later phase than its issue order shows: not decided, never
+# the representative assignment's lines as certain counterexamples.
+cluster_lander_shares     ordered          PASS PASS PASS FAIL PASS
+cluster_lander_shares     unordered        PASS PASS PASS FAIL PASS
 cluster_launch            grid4            PASS PASS PASS PASS PASS
 cluster_launch            grid3            FAIL FAIL FAIL FAIL FAIL
 cluster_barrier           ok               PASS PASS PASS PASS PASS

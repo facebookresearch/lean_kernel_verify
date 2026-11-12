@@ -1,0 +1,698 @@
+{
+ "kir_version": 1,
+ "kernel": "cluster_multicast_pipeline",
+ "source": "tests/lean/cluster_multicast_pipeline.kir.json",
+ "ir": "cute-mlir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "cluster": [
+  2,
+  1,
+  1
+ ],
+ "params": [
+  {
+   "name": "N",
+   "type": "i32"
+  },
+  {
+   "name": "S",
+   "type": "i32"
+  },
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "t32",
+   "kind": "desc",
+   "elem_bytes": 1,
+   "shape": [
+    {
+     "e": "const",
+     "v": 1024,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false,
+   "box": [
+    32
+   ]
+  },
+  {
+   "name": "t64",
+   "kind": "desc",
+   "elem_bytes": 1,
+   "shape": [
+    {
+     "e": "const",
+     "v": 1024,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false,
+   "box": [
+    64
+   ]
+  },
+  {
+   "name": "t96",
+   "kind": "desc",
+   "elem_bytes": 1,
+   "shape": [
+    {
+     "e": "const",
+     "v": 1024,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false,
+   "box": [
+    96
+   ]
+  }
+ ],
+ "barriers": [
+  {
+   "name": "full",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "var",
+    "name": "S",
+    "w": 32
+   }
+  },
+  {
+   "name": "empty",
+   "count": {
+    "e": "select",
+    "c": {
+     "e": "cmp",
+     "o": "eq",
+     "a": {
+      "e": "var",
+      "name": "MODE",
+      "w": 32
+     },
+     "b": {
+      "e": "const",
+      "v": 2,
+      "w": 32
+     },
+     "w": 1
+    },
+    "a": {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    },
+    "b": {
+     "e": "const",
+     "v": 2,
+     "w": 32
+    },
+    "w": 32
+   },
+   "num": {
+    "e": "var",
+    "name": "S",
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "producer",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "k",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "N",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "loc": "mcast.py:10",
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "mcast.py:11",
+       "bar": "empty",
+       "idx": {
+        "e": "bin",
+        "o": "urem",
+        "a": {
+         "e": "var",
+         "name": "k",
+         "w": 32
+        },
+        "b": {
+         "e": "var",
+         "name": "S",
+         "w": 32
+        },
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "xor",
+        "a": {
+         "e": "bin",
+         "o": "and",
+         "a": {
+          "e": "bin",
+          "o": "udiv",
+          "a": {
+           "e": "var",
+           "name": "k",
+           "w": 32
+          },
+          "b": {
+           "e": "var",
+           "name": "S",
+           "w": 32
+          },
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 1,
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "expect_tx",
+       "loc": "mcast.py:12",
+       "bar": "full",
+       "idx": {
+        "e": "bin",
+        "o": "urem",
+        "a": {
+         "e": "var",
+         "name": "k",
+         "w": 32
+        },
+        "b": {
+         "e": "var",
+         "name": "S",
+         "w": 32
+        },
+        "w": 32
+       },
+       "bytes": {
+        "e": "const",
+        "v": 128,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "mcast.py:12",
+       "bar": "full",
+       "idx": {
+        "e": "bin",
+        "o": "urem",
+        "a": {
+         "e": "var",
+         "name": "k",
+         "w": 32
+        },
+        "b": {
+         "e": "var",
+         "name": "S",
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "cmp",
+         "o": "eq",
+         "a": {
+          "e": "var",
+          "name": "MODE",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 1,
+          "w": 32
+         },
+         "w": 1
+        },
+        "b": {
+         "e": "cmp",
+         "o": "eq",
+         "a": {
+          "e": "bin",
+          "o": "urem",
+          "a": {
+           "e": "pid",
+           "axis": 0,
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 2,
+           "w": 32
+          },
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "w": 1
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "if",
+         "cond": {
+          "e": "cmp",
+          "o": "eq",
+          "a": {
+           "e": "bin",
+           "o": "and",
+           "a": {
+            "e": "var",
+            "name": "k",
+            "w": 32
+           },
+           "b": {
+            "e": "const",
+            "v": 1,
+            "w": 32
+           },
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 1
+         },
+         "then": [
+          {
+           "op": "event",
+           "ev": "tma_load",
+           "loc": "mcast.py:13",
+           "desc": "t96",
+           "coords": [
+            {
+             "e": "const",
+             "v": 0,
+             "w": 32
+            }
+           ],
+           "bar": "full",
+           "idx": {
+            "e": "bin",
+            "o": "urem",
+            "a": {
+             "e": "var",
+             "name": "k",
+             "w": 32
+            },
+            "b": {
+             "e": "var",
+             "name": "S",
+             "w": 32
+            },
+            "w": 32
+           },
+           "cta_mask": {
+            "e": "const",
+            "v": 3,
+            "w": 32
+           }
+          }
+         ],
+         "else": [
+          {
+           "op": "event",
+           "ev": "tma_load",
+           "loc": "mcast.py:13",
+           "desc": "t32",
+           "coords": [
+            {
+             "e": "const",
+             "v": 0,
+             "w": 32
+            }
+           ],
+           "bar": "full",
+           "idx": {
+            "e": "bin",
+            "o": "urem",
+            "a": {
+             "e": "var",
+             "name": "k",
+             "w": 32
+            },
+            "b": {
+             "e": "var",
+             "name": "S",
+             "w": 32
+            },
+            "w": 32
+           },
+           "cta_mask": {
+            "e": "const",
+            "v": 3,
+            "w": 32
+           }
+          }
+         ]
+        }
+       ],
+       "else": [
+        {
+         "op": "event",
+         "ev": "tma_load",
+         "loc": "mcast.py:14",
+         "desc": "t64",
+         "coords": [
+          {
+           "e": "const",
+           "v": 0,
+           "w": 32
+          }
+         ],
+         "bar": "full",
+         "idx": {
+          "e": "bin",
+          "o": "urem",
+          "a": {
+           "e": "var",
+           "name": "k",
+           "w": 32
+          },
+          "b": {
+           "e": "var",
+           "name": "S",
+           "w": 32
+          },
+          "w": 32
+         },
+         "cta_mask": {
+          "e": "const",
+          "v": 3,
+          "w": 32
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "consumer",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "k",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "N",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "loc": "mcast.py:20",
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "mcast.py:21",
+       "bar": "full",
+       "idx": {
+        "e": "bin",
+        "o": "urem",
+        "a": {
+         "e": "var",
+         "name": "k",
+         "w": 32
+        },
+        "b": {
+         "e": "var",
+         "name": "S",
+         "w": 32
+        },
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "bin",
+         "o": "udiv",
+         "a": {
+          "e": "var",
+          "name": "k",
+          "w": 32
+         },
+         "b": {
+          "e": "var",
+          "name": "S",
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "eq",
+        "a": {
+         "e": "var",
+         "name": "MODE",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 2,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "mcast.py:22",
+         "bar": "empty",
+         "idx": {
+          "e": "bin",
+          "o": "urem",
+          "a": {
+           "e": "var",
+           "name": "k",
+           "w": 32
+          },
+          "b": {
+           "e": "var",
+           "name": "S",
+           "w": 32
+          },
+          "w": 32
+         }
+        }
+       ],
+       "else": [
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "mcast.py:23",
+         "bar": "empty",
+         "idx": {
+          "e": "bin",
+          "o": "urem",
+          "a": {
+           "e": "var",
+           "name": "k",
+           "w": 32
+          },
+          "b": {
+           "e": "var",
+           "name": "S",
+           "w": 32
+          },
+          "w": 32
+         },
+         "cta": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        },
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "mcast.py:23",
+         "bar": "empty",
+         "idx": {
+          "e": "bin",
+          "o": "urem",
+          "a": {
+           "e": "var",
+           "name": "k",
+           "w": 32
+          },
+          "b": {
+           "e": "var",
+           "name": "S",
+           "w": 32
+          },
+          "w": 32
+         },
+         "cta": {
+          "e": "const",
+          "v": 1,
+          "w": 32
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "cluster_multicast_pipeline",
+  "inputs": [
+   {
+    "name": "n4",
+    "params": {
+     "N": 4,
+     "S": 1,
+     "MODE": 0
+    }
+   },
+   {
+    "name": "s2_n6",
+    "params": {
+     "N": 6,
+     "S": 2,
+     "MODE": 0
+    }
+   },
+   {
+    "name": "swapped_slices",
+    "params": {
+     "N": 4,
+     "S": 1,
+     "MODE": 1
+    }
+   },
+   {
+    "name": "local_release",
+    "params": {
+     "N": 4,
+     "S": 1,
+     "MODE": 2
+    }
+   }
+  ]
+ }
+}
