@@ -45,8 +45,10 @@
   (the legacy translation, KIR `ir` "cute-mlir") and with `--frontend ptx` (KIR `ir`
   "ptx", the same verdicts); the report names the translation.
 
-Outputs: $LKV_E2E_OUT (default /tmp/lkv_e2e_$USER), one directory per test.
+Outputs: $LKV_E2E_OUT (default ${TMPDIR:-/tmp}/lkv_e2e_$USER), one directory per test.
 """
+
+from __future__ import annotations
 
 import getpass
 import importlib.util
@@ -64,7 +66,11 @@ sys.dont_write_bytecode = True  # keep the skill tree free of __pycache__
 HERE = Path(__file__).resolve().parent
 SKILL = HERE.parents[1]
 LKV = SKILL / "scripts" / "lkv.py"
-OUT = Path(os.environ.get("LKV_E2E_OUT", f"/tmp/lkv_e2e_{getpass.getuser()}"))
+OUT = Path(
+    os.environ.get(
+        "LKV_E2E_OUT", f"{tempfile.gettempdir()}/lkv_e2e_{getpass.getuser()}"
+    )
+)
 SPECS = [f"P0-{n}" for n in range(1, 6)]
 
 _spec = importlib.util.spec_from_file_location("lkv", LKV)
@@ -496,6 +502,10 @@ class Unit(unittest.TestCase):
         # The CuTe binary stands in as its to_kir alone, on the recorded DSL 4.4.2
         # probe_cute dump of tests/ptx (the legacy translation finds no stage there).
         fixtures, kernels = SKILL / "tests/ptx/fixtures", HERE / "kernels"
+        if sys.version_info < (3, 10) or not fixtures.is_dir():
+            self.skipTest(
+                "needs the frontends (Python 3.10+, not in the CI's Lean tree)"
+            )
 
         def buck_run(target, args, log_path):
             to_kir = SKILL / "frontend/cute/to_kir.py"

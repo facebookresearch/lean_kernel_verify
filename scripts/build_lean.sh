@@ -37,10 +37,11 @@ else
   # neither, build in a new private directory (not reused).
   BUILD_USER="$(id -un 2>/dev/null)" || BUILD_USER="${USER:-}"
   if [[ -n "$BUILD_USER" ]]; then
-    # One subdirectory per (lean/ sources, toolchain): the staleness checks below compare
-    # mtimes only, so another checkout's build with older files would be reused as is.
-    KEY="$( { echo "$PREFIX"; cd "$SRC" && find . -name '*.lean' | sort | xargs sha256sum; } \
-      | sha256sum | cut -c1-16)"
+    # One subdirectory per (lean/ sources, toolchain path and version): the staleness checks
+    # below compare mtimes only, so another checkout's or toolchain's build would be reused
+    # (a pinned toolchain's path need not change with its version).
+    KEY="$( { echo "$PREFIX"; "$PREFIX/bin/lean" --version; cd "$SRC" && find . -name '*.lean' |
+      sort | xargs sha256sum; } | sha256sum | cut -c1-16)"
     OUT="/tmp/lkv_lean_build_$BUILD_USER/$KEY"
   else
     OUT="$(mktemp -d "${TMPDIR:-/tmp}/lkv_lean_build.XXXXXX")"

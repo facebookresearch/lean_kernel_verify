@@ -24,12 +24,12 @@
 #    written by p1/make_fixtures.py) against p1/expected.txt (one P1-1 column),
 #    p1/expected_messages.txt and p1/report_checks.txt.
 #
-# Generated Lean files and outputs are kept in $LKV_TEST_OUT (default /tmp/lkv_lean_tests_$USER).
+# Generated Lean files and outputs are kept in $LKV_TEST_OUT (default ${TMPDIR:-/tmp}/lkv_lean_tests_$USER).
 set -uo pipefail
 
 T="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 S="$(cd "$T/../.." && pwd)"
-OUT="${LKV_TEST_OUT:-/tmp/lkv_lean_tests_$(id -un)}"
+OUT="${LKV_TEST_OUT:-${TMPDIR:-/tmp}/lkv_lean_tests_$(id -un)}"
 mkdir -p "$OUT"
 
 failures=0

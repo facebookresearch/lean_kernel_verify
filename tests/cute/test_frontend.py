@@ -391,8 +391,12 @@ class CuteFrontendTest(unittest.TestCase):
         self.assertEqual(
             type(direct.exception).__name__, "_Captured"
         )  # raised by the patched compile_and_cache (P5)
-        with self.assertRaisesRegex(RuntimeError, "NVIDIA driver"):
-            run_case("sync", "run_sync", "args_out", [{"name": "n128"}], notes)
+        # The CUDA call fails only where no GPU is visible (a GPU host just synchronizes).
+        import torch  # noqa: PLC0415 - as kernels.py: after this module's imports
+
+        if not torch.cuda.is_available():  # the real one: dump patches it during a run
+            with self.assertRaisesRegex(RuntimeError, "NVIDIA driver|No CUDA GPUs"):
+                run_case("sync", "run_sync", "args_out", [{"name": "n128"}], notes)
 
     def test_launch_argument_over_untracked_memory_fails_the_dump(self):
         # A runtime tensor is tracked as the torch tensor it wraps; one over other memory
