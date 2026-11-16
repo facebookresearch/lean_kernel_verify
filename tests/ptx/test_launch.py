@@ -332,7 +332,7 @@ class DecodeTest(unittest.TestCase):
                     decode(bad)
 
 
-def _desc(**kw) -> dict:
+def _desc(**kw: object) -> dict:
     d = {"dtype": "BFLOAT16", "elem_bits": 16, "dims": [64, 256], "strides_bytes": [192],
          "box": [32, 64], "estrides": [1, 1], "interleave": "NONE"}  # fmt: skip
     return {**d, **kw}
