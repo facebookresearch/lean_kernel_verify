@@ -41,19 +41,19 @@ HEAD = """
 """
 
 
-def tree(body):
+def tree(body: str) -> "R.Tree":
     fn = parse.parse(HEAD + body + "\n}\n").function("k")
     g = cfg.build(fn)
     (role,), _ = cfg.roles(g)
     return R.build(g, role)
 
 
-def kinds(seq):
+def kinds(seq: list[object]) -> list[str]:
     return [type(n).__name__ if not isinstance(n, str) else n for n in seq]
 
 
 class RegionTree(unittest.TestCase):
-    def test_diamond(self):
+    def test_diamond(self) -> None:
         t = tree("""
     ld.param.b32 %r1, [k_param_0];
     setp.lt.s32 %p1, %r1, 4;
@@ -74,7 +74,7 @@ JOIN:
         self.assertIn("%r2", t.live_in["JOIN"])
         self.assertNotIn("%r1", t.live_in["JOIN"])
 
-    def test_if_without_else(self):
+    def test_if_without_else(self) -> None:
         t = tree("""
     ld.param.b32 %r1, [k_param_0];
     setp.lt.s32 %p1, %r1, 4;
@@ -88,7 +88,7 @@ SKIP:
         self.assertEqual(node.then, [])  # the target is the join: nothing to run
         self.assertEqual(kinds(node.else_), ["Block"])
 
-    def test_loop_with_two_exit_edges(self):
+    def test_loop_with_two_exit_edges(self) -> None:
         t = tree("""
     ld.param.b32 %r1, [k_param_0];
     mov.b32 %r2, 0;
@@ -118,7 +118,7 @@ OUT:
 
         self.assertEqual(sorted(ends(loop.body)), [R.BREAK, R.BREAK, R.CONTINUE])
 
-    def test_wait_loops(self):
+    def test_wait_loops(self) -> None:
         for asm in (
             "{\n.reg .pred P1;\nWAIT:\nmbarrier.try_wait.parity.shared::cta.b64 P1, [%r1], %r2;\n"
             "@!P1 bra.uni WAIT;\n}",
@@ -136,7 +136,7 @@ OUT:
                 self.assertEqual(len(waits), 1)
                 self.assertEqual(waits[0].instr.operands[1][1][1], "%r1")
 
-    def test_wait_result_used_is_refused(self):
+    def test_wait_result_used_is_refused(self) -> None:
         with self.assertRaisesRegex(R.RegionError, "only the blocking wait loop"):
             tree("""
     mov.u32 %r1, smem;
@@ -148,7 +148,7 @@ WAIT:
     ret;
 """)
 
-    def test_other_try_wait_loop_is_a_loop(self):
+    def test_other_try_wait_loop_is_a_loop(self) -> None:
         t = tree("""
     mov.u32 %r1, smem;
     mov.b32 %r2, 0;
@@ -160,7 +160,7 @@ WAIT:
 """)
         self.assertIsInstance(t.body[1], R.Loop)  # the op table refuses its try_wait
 
-    def test_guarded_write_does_not_kill(self):
+    def test_guarded_write_does_not_kill(self) -> None:
         t = tree("""
     ld.param.b32 %r1, [k_param_0];
     setp.lt.s32 %p1, %r1, 4;

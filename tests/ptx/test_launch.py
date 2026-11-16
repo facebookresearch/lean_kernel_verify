@@ -87,12 +87,12 @@ CUTE = """
 """
 
 
-def _p(params) -> list:
+def _p(params: list[dict]) -> list:
     return [(p["kind"], p["type"], p["size"], p["align"]) for p in params]
 
 
 class ParamsTest(unittest.TestCase):
-    def test_triton_descriptor_and_scratch(self):
+    def test_triton_descriptor_and_scratch(self) -> None:
         params = ptx_params(TRITON)
         self.assertEqual([p["i"] for p in params], list(range(10)))
         self.assertEqual(
@@ -109,14 +109,14 @@ class ParamsTest(unittest.TestCase):
             params[5]["decl"], ".param .u64 .ptr .global .align 1 kern_param_5"
         )
 
-    def test_cute_structs(self):
+    def test_cute_structs(self) -> None:
         self.assertEqual(
             _p(ptx_params(CUTE)),
             [("bytes", "b8", 16, 8), ("bytes", "b8", 12, 4), ("bytes", "b8", 128, 64),
              ("bytes", "b8", 40, 8), ("bytes", "b8", 3, 1), ("scalar", "u32", 4, 4)],
         )  # fmt: skip
 
-    def test_scalar_types_arrays_and_spacing(self):
+    def test_scalar_types_arrays_and_spacing(self) -> None:
         ptx = (
             ".entry k ( .param .u8 a , .param .s16 b,.param .f64 c, .param .b128 d,"
             " .param .align 16 .b32 e [ 4 ], .param .u64 .ptr .align 16 f,"
@@ -129,7 +129,7 @@ class ParamsTest(unittest.TestCase):
              ("ptr", "u64", 8, 8)],
         )  # fmt: skip
 
-    def test_entries(self):
+    def test_entries(self) -> None:
         both = TRITON + CUTE
         with self.assertRaisesRegex(LaunchError, "2 .entry in the module"):
             ptx_params(both)
@@ -144,7 +144,7 @@ class ParamsTest(unittest.TestCase):
         # a commented-out .entry is not one
         self.assertEqual(len(ptx_params("// .entry old(.param .b32 x)\n" + TRITON)), 10)
 
-    def test_unsupported_declarations(self):
+    def test_unsupported_declarations(self) -> None:
         for decl in (
             ".param .pred p",
             ".param .u64 .ptr .global .align 1 p[2]",
@@ -239,12 +239,12 @@ def random_fields(rng: random.Random) -> dict:
 
 
 class DecodeTest(unittest.TestCase):
-    def test_driver_encodings(self):
+    def test_driver_encodings(self) -> None:
         for name, v in DRIVER.items():
             with self.subTest(name):
                 self.assertEqual(decode(v["raw"]), expected(v["args"]))
 
-    def test_cute_encodings(self):
+    def test_cute_encodings(self) -> None:
         """CuTe 4.4.2's encodings decode with encoder_variant 2 and map back onto the
         tensors they were made from (test_gpu_tmap compares them with the driver's)."""
         for name, v in CUTE442.items():
@@ -267,7 +267,7 @@ class DecodeTest(unittest.TestCase):
             (2, 1),
         )
 
-    def test_synthesized_fields(self):
+    def test_synthesized_fields(self) -> None:
         rng = random.Random(7)
         for _ in range(3000):
             d = random_fields(rng)
@@ -279,7 +279,7 @@ class DecodeTest(unittest.TestCase):
             )
             self.assertEqual(decode(raw), d)
 
-    def test_every_bit_outside_a_field_is_refused(self):
+    def test_every_bit_outside_a_field_is_refused(self) -> None:
         """Flip each of the 1024 bits of a valid descriptor: flips outside the fields are
         refused, flips inside are decoded, except where the new value is refused (encoder
         variant, rank, dtype code, interleave)."""
@@ -304,7 +304,7 @@ class DecodeTest(unittest.TestCase):
                 self.assertEqual(accepted & ~known, 0)
                 self.assertEqual(known & ~accepted & ~checked, 0)
 
-    def test_refusals(self):
+    def test_refusals(self) -> None:
         d = decode(DRIVER["u4_align16b"]["raw"])
         raw = pack(d)
         w = list(struct.unpack("<16Q", raw))
@@ -339,14 +339,14 @@ def _desc(**kw) -> dict:
 
 
 class KirDescTest(unittest.TestCase):
-    def test_dense(self):
+    def test_dense(self) -> None:
         self.assertEqual(
             kir_desc(_desc(), 2),
             {"shape": [256, 64], "strides": [96, 1], "box": [64, 32], "elem_bytes": 2,
              "dim0_ratio": (1, 1)},
         )  # fmt: skip
 
-    def test_dim0_units(self):
+    def test_dim0_units(self) -> None:
         """Dim 0 in KIR elements: packed 4- and 6-bit data in bytes, a format wider than the
         element scaled up, a narrower one scaled down (whole elements only)."""
         u4 = kir_desc(
@@ -382,7 +382,7 @@ class KirDescTest(unittest.TestCase):
                 with self.assertRaisesRegex(LaunchError, msg):
                     kir_desc(d, eb)
 
-    def test_refusals(self):
+    def test_refusals(self) -> None:
         for d, eb, msg in (
             (_desc(estrides=[1, 2]), 2, re.escape("element strides [1, 2]")),
             (_desc(interleave="16B"), 2, "interleave 16B"),
@@ -393,13 +393,15 @@ class KirDescTest(unittest.TestCase):
                     kir_desc(d, eb)
 
 
-def _tensor(ptr: int, shape: list, strides: list, eb: int, storage: list | None = None):
+def _tensor(
+    ptr: int, shape: list, strides: list, eb: int, storage: list | None = None
+) -> dict:
     span = 1 + sum((n - 1) * s for n, s in zip(shape, strides)) if all(shape) else 0
     return {"data_ptr": ptr, "storage": storage or [ptr, ptr + span * eb],
             "elem_bytes": eb, "shape": shape, "strides": strides}  # fmt: skip
 
 
-def _names(cands) -> list:
+def _names(cands: list[dict]) -> list:
     return [(c["tensor"], c["match"], c["elem_off"]) for c in cands]
 
 
@@ -407,7 +409,7 @@ B = 0x7F0000100000  # a storage start
 
 
 class ResolveTest(unittest.TestCase):
-    def test_views_and_aliases(self):
+    def test_views_and_aliases(self) -> None:
         """The probe's view base[:, 16:80] of a (256, 96) bf16 tensor: the view is exact,
         its base contains it at element 16; a byte alias of the base too, at byte 32."""
         store = [B, B + 256 * 96 * 2]
@@ -428,7 +430,7 @@ class ResolveTest(unittest.TestCase):
                                                   ("view", "inside", -16)])  # fmt: skip
         self.assertEqual(resolve(B - 16, ts), [])
 
-    def test_zero_length_tensors(self):
+    def test_zero_length_tensors(self) -> None:
         ts = {
             "empty": _tensor(
                 0, [0], [1], 4
@@ -445,7 +447,7 @@ class ResolveTest(unittest.TestCase):
             _names(resolve(B + 4, ts)), [("tail", "inside", -7), ("x", "inside", 1)]
         )
 
-    def test_shifted_base(self):
+    def test_shifted_base(self) -> None:
         """A ragged TMA tensor shifted back by 2^30 rows (quack create_ragged_tensor_for_tma,
         ptr_shift): (2^30, H, D) plus a (2^31 - 1)-row dim with the row stride, starting far
         below Q's storage; Q is the candidate at a negative offset, and so is V with Q's
