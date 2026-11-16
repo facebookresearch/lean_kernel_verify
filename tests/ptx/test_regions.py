@@ -107,7 +107,7 @@ OUT:
         self.assertEqual(loop.exit, "OUT")
         self.assertIn("%r2", t.defs["HEAD"])
 
-        def ends(seq):
+        def ends(seq: list[object]) -> list[str]:
             out = []
             for n in seq:
                 if isinstance(n, R.If):
