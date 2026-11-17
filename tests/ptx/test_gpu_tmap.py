@@ -23,6 +23,7 @@ import random
 import sys
 import unittest
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
 
@@ -51,7 +52,7 @@ MAX_TRIES = 200_000
 U32, U64 = ctypes.c_uint32, ctypes.c_uint64
 
 
-def _driver():
+def _driver() -> Callable[..., int] | None:
     """cuTensorMapEncodeTiled of the real driver with a current context, or None."""
     try:
         cu = ctypes.CDLL("libcuda.so.1")
@@ -128,7 +129,7 @@ def _draw(rng: random.Random, dtype: int) -> dict:
 
 class DriverRoundTripTest(unittest.TestCase):
     @classmethod
-    def setUpClass(cls):
+    def setUpClass(cls) -> None:
         cls.encode = _driver()
         if cls.encode is None:
             raise unittest.SkipTest("no CUDA driver with a visible GPU")
@@ -185,7 +186,7 @@ class DriverRoundTripTest(unittest.TestCase):
         )
         self.assertEqual([m for m in must if not seen[m]], [])
 
-    def _check_kir(self, d: dict):
+    def _check_kir(self, d: dict) -> None:
         """A dense descriptor maps to KIR over its own element size (bytes for the packed
         formats): dims reversed, dim 0 converted by dim0_ratio."""
         if d["interleave"] != "NONE" or set(d["estrides"]) != {1}:
@@ -209,7 +210,7 @@ class DriverRoundTripTest(unittest.TestCase):
             k["strides"], [s // eb for s in d["strides_bytes"][::-1]] + [1]
         )
 
-    def test_cute_encodings_match_driver(self):
+    def test_cute_encodings_match_driver(self) -> None:
         for name, v in CUTE442.items():
             with self.subTest(name):
                 d = launch.decode(v["raw"])
