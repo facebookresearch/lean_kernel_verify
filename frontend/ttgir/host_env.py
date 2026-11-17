@@ -32,6 +32,7 @@ import _collections_abc
 import ast
 import os
 import sys
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 COMPILER_PREFIXES = ("TRITON_", "CUTE_DSL_", "MLIR_", "LLVM_", "NVPTX_")
@@ -86,7 +87,7 @@ def source_reads(roots: list) -> set:
     return names
 
 
-def _reads(tree: ast.Module):
+def _reads(tree: ast.Module) -> Iterator[tuple[str | None, int]]:
     """(variable name or None, line) per environment read of a module."""
     consts = {}
     for node in tree.body:
@@ -103,7 +104,7 @@ def _reads(tree: ast.Module):
                 (t.id, value.value) for t in targets if isinstance(t, ast.Name)
             )
 
-    def key(node):
+    def key(node: "ast.expr") -> str | None:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return node.value
         return consts.get(node.id) if isinstance(node, ast.Name) else None
@@ -136,11 +137,11 @@ def _reads(tree: ast.Module):
                 yield key(node.left), node.lineno
 
 
-def _is_name(node, name: str) -> bool:
+def _is_name(node: "ast.expr", name: str) -> bool:
     return isinstance(node, ast.Name) and node.id == name
 
 
-def _is_environ(node) -> bool:
+def _is_environ(node: "ast.expr") -> bool:
     """`os.environ` or `environ` (from os import environ)."""
     return _is_name(node, "environ") or (
         isinstance(node, ast.Attribute)
@@ -172,7 +173,7 @@ def pin(case_env: dict, roots: list, own: dict) -> dict:
     }
 
 
-def drop(pinned: dict, names) -> None:
+def drop(pinned: dict, names: Iterable[str]) -> None:
     """Unset the variables among `names` that the case's env and the frontend do not set,
     recording their shell values in the pin record's "unset"."""
     for name in sorted(names):
