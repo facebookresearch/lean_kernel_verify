@@ -55,6 +55,7 @@ from dataclasses import dataclass, field
 from itertools import zip_longest
 
 import torch
+import triton.backends.nvidia.driver as nvidia_driver
 from triton.backends.nvidia.driver import expand_signature, wrap_handle_tensordesc
 from triton.compiler import ASTSource, compile as triton_compile
 from triton.runtime.autotuner import Autotuner
@@ -352,6 +353,23 @@ def _dims3(dims) -> list:
     return dims + [1] * (3 - len(dims))
 
 
+def _expand_descriptor(kernel: str, ty: str, meta, desc_meta) -> list:
+    """The launcher's parameter types of one descriptor argument. CudaLauncher passes
+    every descriptor of a kernel with `tensordesc_meta` as a CUtensorMap, else
+    decomposed; older Triton decided per descriptor."""
+    # Newer Triton takes one descriptor ABI per kernel as a `TensorDescABI` enum.
+    abi_enum = getattr(nvidia_driver, "TensorDescABI", None)
+    if abi_enum is None:
+        return expand_signature([ty], [desc_meta] if meta else None)
+    if meta and desc_meta is None:
+        raise RuntimeError(
+            f"{kernel}: a descriptor without tensordesc_meta in a kernel whose other "
+            "descriptors have it: not supported"
+        )
+    abi = abi_enum.CUDA_TMA if meta else abi_enum.DECOMPOSED
+    return expand_signature([ty], abi)
+
+
 def _device_params(launch: Launch, md, programs: int) -> list:
     """The flat device parameter list: [{name, type, kind, size, align, value}]."""
     if getattr(md, "auto_tma_recipes", None):
@@ -376,7 +394,7 @@ def _device_params(launch: Launch, md, programs: int) -> list:
             )
         if ty.startswith("tensordesc"):
             desc_meta = meta[k] if meta else None
-            types = expand_signature([ty], [desc_meta] if meta else None)
+            types = _expand_descriptor(launch.kernel, ty, meta, desc_meta)
             k += 1
             rank = (len(types) - 1) // 2
             names = (
