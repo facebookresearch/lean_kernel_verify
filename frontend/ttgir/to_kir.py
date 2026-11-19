@@ -1550,16 +1550,28 @@ def _add_clc(tensors: list, params: list) -> None:
         ]
 
 
-def build_ptx(where: Path, dump: dict, key: str, case: dict) -> dict:
+def build_ptx(
+    where: Path, dump: dict, key: str, case: dict, geometry: tuple | None = None
+) -> dict:
     """The KIR of a specialization from its PTX (LKV_FRONTEND=ptx): the PTX
     core's Facts (frontend/ptx/translate.py) assembled as build() assembles the
     Translator's, with the same names, tensors (host descriptors and the CLC tables
-    included), params, inputs and checks."""
+    included), params, inputs and checks. `geometry`: the cluster dims every cluster
+    of the launches has instead of their regular ones (preferred_geometry), with the
+    inputs whose grid they divide."""
     # Imported here: the legacy translation must not depend on the new core while both run.
     from ..ptx import anchors, parse as ptx_parse, translate as T
 
-    launches = _launches(dump, key)
+    launches: list[tuple[dict, dict]] = _launches(dump, key)
     check_required_cluster(dump, key)
+    if geometry is not None:
+        launches = [(inp, {**la, "launch": {**la["launch"], "cluster": list(geometry)}})
+                    for inp, la in launches
+                    if all(g % c == 0 for g, c in zip(la["launch"]["grid"], geometry))]  # fmt: skip
+        if not launches:
+            raise KirError(
+                f"no input's grid is a multiple of the cluster dims {geometry}"
+            )
     spec = dump["specs"][key]
     snap0 = launches[0][1]["args"]
     annotations = _annotations(case, [inp["name"] for inp, _ in launches], key)
@@ -1616,8 +1628,19 @@ def build_ptx(where: Path, dump: dict, key: str, case: dict) -> dict:
     tensors += _desc_tensors(facts.descs, annotations, written)
     if facts.clc:
         _add_clc(tensors, params)
-    return _document(dump, key, case, "ptx", facts.target, params, tensors, facts.barriers,
-                     roles, launches, written, {}, facts.clc, facts.cluster)  # fmt: skip
+    if geometry is not None and facts.clc:
+        raise KirError("CLC with a preferred cluster geometry (gap: which clusters a "
+                       "try_cancel may cancel when the sizes mix is not modeled)")  # fmt: skip
+    kir = _document(dump, key, case, "ptx", facts.target, params, tensors, facts.barriers,
+                    roles, launches, written, {}, facts.clc, facts.cluster)  # fmt: skip
+    if geometry is not None:
+        kir["case"]["name"] += geometry_suffix(geometry)
+    return kir
+
+
+def geometry_suffix(cluster: tuple) -> str:
+    """The variant name suffix of a cluster geometry, e.g. `@cluster4x1x1`."""
+    return "@cluster" + "x".join(map(str, cluster))
 
 
 def check_required_cluster(dump: dict, key: str) -> None:
@@ -1638,6 +1661,49 @@ def check_required_cluster(dump: dict, key: str) -> None:
                            f"but its function's required cluster (cuFuncSetAttribute "
                            f"REQUIRED_CLUSTER) is {tuple(req)} (gap: which one the "
                            "hardware uses is not modeled)")  # fmt: skip
+
+
+def preferred_geometry(dump: dict, key: str) -> tuple | None:
+    """The preferred cluster dims of the specialization's launches (LaunchRecord
+    attrs.preferred_cluster: Triton's preferred_ctas_per_cga, passed as the launch
+    attribute cudaLaunchAttributePreferredClusterDimension) where they differ from the
+    regular ones (the launch's cluster): the device groups CTAs into such clusters where
+    it can and into regular ones elsewhere (references/frontend_ptx.md, "Clusters").
+    KirError (gap) if the launches disagree, or if they break a rule CUDA states for the
+    attribute, as what the device then runs is not modeled: every launch has a regular
+    cluster (cluster dims other than 1 x 1 x 1, or the function's REQUIRED_CLUSTER; a
+    `.reqnctapercluster 1, 1, 1` alone is not in the LaunchRecord, so it is refused too),
+    the preferred x and y are multiples of the regular ones and z is the regular z, and the
+    preferred dims divide the grid of every launch."""
+    launches = _launches(dump, key)
+    recs = [la["launch"] for _, la in launches]
+    prefs = {tuple((r.get("attrs") or {}).get("preferred_cluster") or ()) for r in recs}
+    if prefs == {()}:
+        return None
+    regular = {tuple(r.get("cluster") or (1, 1, 1)) for r in recs}
+    if len(prefs) != 1 or len(regular) != 1 or () in prefs:
+        raise KirError(
+            f"launches differ in their (preferred) cluster dims {prefs}, {regular}"
+        )
+    pref, reg = prefs.pop(), regular.pop()
+    if pref == reg:
+        return None
+    unmodeled = "(gap: CUDA requires it; what the device runs then is not modeled)"
+    required = [((r.get("attrs") or {}).get("func_attributes") or {}).get("required_cluster")
+                for r in recs]  # fmt: skip
+    if reg == (1, 1, 1) and not all(required):
+        raise KirError(f"preferred cluster dims {pref} without a regular cluster (cluster "
+                       f"dims or REQUIRED_CLUSTER) in every launch {unmodeled}")  # fmt: skip
+    if (len(pref) != 3 or pref[2] != reg[2]
+            or any(p < 1 or p % r for p, r in zip(pref[:2], reg[:2]))):  # fmt: skip
+        raise KirError(f"preferred cluster dims {pref} are no multiple of the regular "
+                       f"{reg} in x and y with the same z {unmodeled}")  # fmt: skip
+    bad = sorted({inp["name"] for inp, la in launches
+                  if any(g % p for g, p in zip(la["launch"]["grid"], pref))})  # fmt: skip
+    if bad:
+        raise KirError(f"preferred cluster dims {pref} do not divide the grid of input(s) "
+                       f"{', '.join(bad)} {unmodeled}")  # fmt: skip
+    return pref
 
 
 def _desc_blocks(launches: list) -> dict:
@@ -1719,6 +1785,20 @@ def _check_case_names(case: dict, tensor_args: set, kernel: str) -> None:
             )
 
 
+def _input_name(inp: dict, launch: dict, key: str) -> str:
+    """The KIR input name of `launch`, a launch of specialization `key` in input `inp`:
+    the input's name, or `<name>#<i>` for the i-th of its launches of `key`. A copy of
+    one of them with other cluster dims (build_ptx's `geometry`) is found by its `index`
+    (the launch's position in the host run) and keeps the name of its original."""
+    same = [la for la in inp["launches"] if la["spec"] == key]
+    if len(same) == 1:
+        return inp["name"]
+    k = next((i for i, la in enumerate(same) if la is launch), None)
+    if k is None:
+        k = [la["index"] for la in same].index(launch["index"])
+    return f"{inp['name']}#{k}"
+
+
 def _document(dump: dict, key: str, case: dict, ir: str, target: str, params: list,
               tensors: list, barriers: list, roles: list, launches: list, written: set,
               desc_bases: dict, uses_clc: bool, cluster: tuple = (1, 1, 1)) -> dict:  # fmt: skip
@@ -1727,11 +1807,8 @@ def _document(dump: dict, key: str, case: dict, ir: str, target: str, params: li
     spec = dump["specs"][key]
     inputs = []
     for inp, launch in launches:
-        same = [la for la in inp["launches"] if la["spec"] == key]
-        name = inp["name"] if len(same) == 1 else f"{inp['name']}#{same.index(launch)}"
-        base = _input(
-            name, inp, launch, params, tensors, spec, case, written, desc_bases
-        )
+        base = _input(_input_name(inp, launch, key), inp, launch, params, tensors, spec,
+                      case, written, desc_bases)  # fmt: skip
         if uses_clc:
             resident = dump["num_sms"] * max(
                 1, dump["target"]["max_shared_mem"] // max(1, spec["shared_bytes"])
@@ -2058,23 +2135,38 @@ def translate(dump_path: Path, case: dict) -> dict:
     ptx = frontend() == "ptx"
     results: dict[str, dict | Exception] = {}
     for key, spec in dump["specs"].items():
-        try:
-            if ptx:
-                kir = build_ptx(dump_path.parent, dump, key, case)
-            else:
-                ttgir = (dump_path.parent / spec["ttgir"]).read_text()
-                kir = build(ttgir, dump, key, case)
-            violations = kir_contract.validate(kir)
-            if violations:
-                raise KirError(
-                    f"KIR contract (frontend/kir.py): {'; '.join(violations[:5])}",
-                    kind="error",
-                )
-        except (KirError, SliceError, OpError, ParseError) as e:
-            results[key] = e
-            continue
-        (dump_path.parent / f"{key}.kir.json").write_text(json.dumps(kir))
-        results[key] = kir
+        # PTX: also the all-preferred cluster geometry, `<key>@cluster<dims>.kir.json`;
+        # where preferred_geometry fails (launches that disagree on the preferred dims or
+        # break a CUDA rule for them), `<key>@cluster` is refused and the regular KIR is kept
+        todo: list[tuple[str, tuple | None]] = [(key, None)]
+        unchecked: KirError | None = None
+        for name, geometry in todo:
+            try:
+                if ptx:
+                    kir = build_ptx(dump_path.parent, dump, key, case, geometry)
+                    if geometry is None:
+                        try:
+                            pref = preferred_geometry(dump, key)
+                        except KirError as e:
+                            pref, unchecked = None, e
+                        if pref is not None:
+                            todo.append((key + geometry_suffix(pref), pref))
+                else:
+                    ttgir = (dump_path.parent / spec["ttgir"]).read_text()
+                    kir = build(ttgir, dump, key, case)
+                violations = kir_contract.validate(kir)
+                if violations:
+                    raise KirError(
+                        f"KIR contract (frontend/kir.py): {'; '.join(violations[:5])}",
+                        kind="error",
+                    )
+            except (KirError, SliceError, OpError, ParseError) as e:
+                results[name] = e
+                continue
+            (dump_path.parent / f"{name}.kir.json").write_text(json.dumps(kir))
+            results[name] = kir
+        if unchecked is not None:
+            results[key + "@cluster"] = unchecked
     return results
 
 

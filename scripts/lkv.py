@@ -356,10 +356,11 @@ def run_ttgir(case_path, root, fe, logs, sel, target):
     for line in (logs / "to_kir.log").read_text().splitlines():
         m = re.match(r"\[to_kir\] (\S+): FAILED \((gap|error)\): (.*)", line)
         if m:
+            spec = m.group(1).partition("@")[0]  # <spec>@cluster...: another geometry
             inputs = [
                 i["name"]
                 for i in dump["inputs"]
-                if any(la["spec"] == m.group(1) for la in i.get("launches", []))
+                if any(la["spec"] == spec for la in i.get("launches", []))
             ]
             failures.append(
                 {
@@ -374,6 +375,8 @@ def run_ttgir(case_path, root, fe, logs, sel, target):
         raise RuntimeError(f"TTGIR to_kir failed:\n{tail(logs / 'to_kir.log')}")
     specs = dump["specs"]
     kirs = [fe / f"{k}.kir.json" for k in specs if (fe / f"{k}.kir.json").exists()]
+    # the PTX translation's other cluster geometries of a variant (<spec>@cluster<dims>)
+    kirs += sorted(p for k in specs for p in fe.glob(f"{k}@*.kir.json"))
     failed = {f["variant"] for f in failures}
     lost = [k for k in specs if not (fe / f"{k}.kir.json").exists() and k not in failed]
     if lost:

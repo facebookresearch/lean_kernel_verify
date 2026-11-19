@@ -793,6 +793,37 @@ class Unit(unittest.TestCase):
         self.assertEqual(target, "frontend/ttgir:dump")
         self.assertEqual(args[args.index("--target") + 1], "sm_103")
 
+    def test_geometry_failure_counts_for_its_spec(self):
+        # a to_kir failure of another cluster geometry of a variant (`<spec>@cluster`:
+        # launches that disagree on the preferred dims) counts for the inputs of <spec>,
+        # next to the regular KIR
+        def buck_run(target, args, log_path):
+            args = list(map(str, args))
+            if target == "frontend/ttgir:dump":
+                la = {"spec": "s", "launch": {"grid": [4, 1, 1]}}
+                dump = {"kernel": "k", "specs": {"s": {}},
+                        "inputs": [{"name": "a", "launches": [la]}, {"name": "b", "launches": [la]}]}  # fmt: skip
+                (Path(args[args.index("--out") + 1]) / "dump.json").write_text(
+                    json.dumps(dump)
+                )
+                Path(log_path).write_text("")
+                return 0
+            (Path(args[args.index("--dump") + 1]).parent / "s.kir.json").write_text(
+                "{}"
+            )
+            Path(log_path).write_text("[to_kir] s@cluster: FAILED (gap): launches differ in "
+                                      "their (preferred) cluster dims\n")  # fmt: skip
+            return 1
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(lkv_py, "buck_run", buck_run), \
+                mock.patch.object(lkv_py, "P1_NOT_CHECKED", []):  # fmt: skip
+            kirs, failures = lkv_py.run_ttgir(Path(d) / "c.json", Path(d), Path(d),
+                                              Path(d), [], "sm_100")  # fmt: skip
+        self.assertEqual([k.name for k in kirs], ["s.kir.json"])
+        self.assertEqual([(f["variant"], f["inputs"], f["kind"]) for f in failures],
+                         [("s@cluster", ["a", "b"], "gap")])  # fmt: skip
+
     def test_run_outside_a_checkout_is_an_error(self):
         # A copy of the skill outside an fbsource checkout cannot build the frontend.
         with tempfile.TemporaryDirectory() as d:

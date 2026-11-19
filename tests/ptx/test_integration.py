@@ -69,6 +69,48 @@ def fixture(name: str, where: Path) -> Path:
     return path
 
 
+class PreferredGeometryRules(unittest.TestCase):
+    """preferred_geometry refuses (gap) launches that break a rule CUDA states for the
+    preferred cluster attribute: no regular cluster (cluster dims 1 x 1 x 1 and no
+    REQUIRED_CLUSTER), a preferred x or y that is no multiple of the regular one or a z
+    that differs from it, a grid the preferred dims do not divide."""
+
+    @staticmethod
+    def dump(*launches) -> dict:
+        return {"specs": {"s": {}},
+                "inputs": [{"name": f"i{k}", "launches": [{"spec": "s", "launch": la}]}
+                           for k, la in enumerate(launches)]}  # fmt: skip
+
+    @staticmethod
+    def launch(cluster, pref, grid, required=None) -> dict:
+        attrs = {"preferred_cluster": pref}
+        if required is not None:
+            attrs["func_attributes"] = {"required_cluster": required}
+        return {"cluster": cluster, "grid": grid, "attrs": attrs}
+
+    def test_rules(self):
+        la, geo = self.launch, ttgir_to_kir.preferred_geometry
+        self.assertEqual(
+            geo(self.dump(la([2, 1, 1], [4, 2, 1], [8, 4, 1])), "s"), (4, 2, 1)
+        )
+        required = la([1, 1, 1], [3, 1, 1], [6, 1, 1], required=[1, 1, 1])
+        self.assertEqual(geo(self.dump(required), "s"), (3, 1, 1))
+        cases = [
+            ("without a regular cluster", [la([1, 1, 1], [2, 1, 1], [4, 1, 1])]),
+            ("without a regular cluster", [la([1, 1, 1], [3, 1, 1], [6, 1, 1]), required]),
+            ("no multiple of the regular (2, 1, 1)", [la([2, 1, 1], [3, 1, 1], [6, 1, 1])]),
+            ("no multiple of the regular (2, 1, 1)", [la([2, 1, 1], [2, 1, 2], [2, 1, 2])]),
+            ("do not divide the grid of input(s) i1, i2",
+             [la([1, 1, 1], [2, 1, 1], [g, 1, 1], required=[1, 1, 1]) for g in (4, 3, 1)]),
+        ]  # fmt: skip
+        for msg, launches in cases:
+            with self.subTest(msg):
+                with self.assertRaises(ttgir_to_kir.KirError) as e:
+                    geo(self.dump(*launches), "s")
+                self.assertIn(msg, str(e.exception))
+                self.assertEqual(ttgir_to_kir.failure_kind(e.exception), "gap")
+
+
 class TtgirProbe(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -117,6 +159,96 @@ class TtgirProbe(unittest.TestCase):
              "partial_floor": (2, 300, 300), "below_block": (1, 100, 100),
              "below_block_floor": (0, 100, 100)},
         )  # fmt: skip
+
+    def test_preferred_without_regular_cluster(self):
+        """A preferred cluster beside no regular one (cluster dims 1 x 1 x 1, no
+        REQUIRED_CLUSTER): CUDA uses it only with one, so no all-preferred KIR is written,
+        each specialization has the refused `<spec>@cluster` (a gap) and keeps its
+        regular KIR."""
+        dump = json.loads(self.dump.read_text())
+        for inp in dump["inputs"]:
+            for la in inp["launches"]:
+                la["launch"]["attrs"]["preferred_cluster"] = [2, 1, 1]
+        self.dump.write_text(json.dumps(dump))
+        with mock.patch.dict(os.environ, PTX_MODE):
+            got = ttgir_to_kir.translate(self.dump, self.case)
+        self.assertEqual(list(got), ["1691f771b8a0", "1691f771b8a0@cluster",
+                                     "6614c8dcb51d", "6614c8dcb51d@cluster"])  # fmt: skip
+        for key in ("1691f771b8a0", "6614c8dcb51d"):
+            self.assertIsInstance(got[key], dict)
+            e = got[key + "@cluster"]
+            self.assertIsInstance(e, ttgir_to_kir.KirError)
+            self.assertEqual(ttgir_to_kir.failure_kind(e), "gap")
+            self.assertIn("(2, 1, 1) without a regular cluster", str(e))
+        self.assertEqual(list(self.tmp.glob("*@*.kir.json")), [])
+
+    def test_preferred_geometry_two_launches(self):
+        """An input with several launches of one specialization and a preferred cluster:
+        the all-preferred KIR names them as the regular KIR does, `<input>#<i>` by their
+        order in the input (the other specialization, a grid of whose launches the
+        preferred dims do not divide, has the refused `<spec>@cluster` instead),
+        and every KIR translates (a copy with the preferred dims used to be looked up by
+        equality, a ValueError that stopped the whole translation)."""
+        dump = json.loads(self.dump.read_text())
+        for inp in dump["inputs"]:
+            for la in inp["launches"]:
+                la["launch"]["attrs"]["preferred_cluster"] = [2, 1, 1]
+                la["launch"]["attrs"]["func_attributes"] = {
+                    "required_cluster": [1, 1, 1]
+                }
+        (inp,) = [i for i in dump["inputs"] if i["name"] == "aligned"]
+        for grid, index in (([4, 1, 1], 6), ([2, 1, 1], 7)):
+            la = json.loads(json.dumps(inp["launches"][0]))
+            la["index"], la["grid"], la["launch"]["grid"] = index, grid, grid
+            inp["launches"].append(la)
+        self.dump.write_text(json.dumps(dump))
+        with mock.patch.dict(os.environ, PTX_MODE):
+            got = ttgir_to_kir.translate(self.dump, self.case)
+        self.assertEqual(list(got), ["1691f771b8a0", "1691f771b8a0@cluster2x1x1",
+                                     "6614c8dcb51d", "6614c8dcb51d@cluster"])  # fmt: skip
+        e = got["6614c8dcb51d@cluster"]
+        self.assertIn("do not divide the grid of input(s) below_block, partial", str(e))
+        for name, k in got.items():
+            if k is not e:
+                self.assertIsInstance(k, dict, f"{name}: {k}")
+                self.assertEqual(kir.validate(k), [], name)
+        self.assertEqual(
+            [i["name"] for i in got["1691f771b8a0"]["case"]["inputs"]],
+            ["aligned#0", "aligned#1", "aligned#2", "empty"],
+        )  # fmt: skip
+        self.assertEqual(
+            [i["name"] for i in got["1691f771b8a0@cluster2x1x1"]["case"]["inputs"]],
+            ["aligned#0", "aligned#1", "aligned#2", "empty"],
+        )
+
+    def test_preferred_dims_disagree(self):
+        """Launches of a specialization that disagree on the preferred cluster dims: its
+        regular KIR is kept and written, and the all-preferred geometry is the refused
+        variant `<spec>@cluster` (a gap, no dims known); the other specialization's
+        geometries are unaffected."""
+        dump = json.loads(self.dump.read_text())
+        for inp in dump["inputs"]:
+            for la in inp["launches"]:
+                pref = [4, 1, 1] if inp["name"] == "partial" else [2, 1, 1]
+                la["launch"]["attrs"]["preferred_cluster"] = pref
+                la["launch"]["attrs"]["func_attributes"] = {
+                    "required_cluster": [1, 1, 1]
+                }
+        self.dump.write_text(json.dumps(dump))
+        with mock.patch.dict(os.environ, PTX_MODE):
+            got = ttgir_to_kir.translate(self.dump, self.case)
+        self.assertEqual(list(got), ["1691f771b8a0", "1691f771b8a0@cluster2x1x1",
+                                     "6614c8dcb51d", "6614c8dcb51d@cluster"])  # fmt: skip
+        k = got["6614c8dcb51d"]
+        self.assertIsInstance(k, dict)
+        self.assertEqual(
+            json.loads((self.tmp / "6614c8dcb51d.kir.json").read_text()), k
+        )
+        e = got["6614c8dcb51d@cluster"]
+        self.assertIsInstance(e, ttgir_to_kir.KirError)
+        self.assertEqual(ttgir_to_kir.failure_kind(e), "gap")
+        self.assertIn("differ in their (preferred) cluster dims", str(e))
+        self.assertEqual(list(self.tmp.glob("6614c8dcb51d@*.kir.json")), [])
 
 
 class CuteProbe(unittest.TestCase):

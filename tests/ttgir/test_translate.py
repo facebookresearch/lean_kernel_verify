@@ -1511,6 +1511,44 @@ class ClcScheduleTest(unittest.TestCase):
                 to_kir._with_clc(self._input(4), schedule, 0)
 
 
+class PreferredGeometryTest(unittest.TestCase):
+    """preferred_geometry: the launches' preferred cluster dims where they differ from
+    the regular ones (the PTX translation's second KIR, <spec>@cluster<dims>)."""
+
+    @staticmethod
+    def _dump(*recs) -> dict:
+        return {"inputs": [{"name": f"i{k}", "launches": [{"spec": "s", "launch": r}]}
+                           for k, r in enumerate(recs)]}  # fmt: skip
+
+    def test_preferred_geometry(self):
+        pref = {"cluster": [2, 1, 1], "grid": [8, 1, 1],
+                "attrs": {"preferred_cluster": [4, 1, 1]}}  # fmt: skip
+        self.assertEqual(
+            to_kir.preferred_geometry(self._dump(pref, pref), "s"), (4, 1, 1)
+        )
+        self.assertEqual(to_kir.geometry_suffix((4, 1, 1)), "@cluster4x1x1")
+        for attrs in (
+            {},
+            {"preferred_cluster": None},
+            {"preferred_cluster": [2, 1, 1]},
+        ):
+            rec = {"cluster": [2, 1, 1], "attrs": attrs}
+            self.assertIsNone(to_kir.preferred_geometry(self._dump(rec), "s"), attrs)
+        # regular dims 1 x 1 x 1 count as a regular cluster only as REQUIRED_CLUSTER
+        single = {"cluster": [1, 1, 1], "grid": [6, 1, 1],
+                  "attrs": {"preferred_cluster": [3, 1, 1],
+                            "func_attributes": {"required_cluster": [1, 1, 1]}}}  # fmt: skip
+        self.assertEqual(to_kir.preferred_geometry(self._dump(single), "s"), (3, 1, 1))
+        del single["attrs"]["func_attributes"]
+        with self.assertRaisesRegex(to_kir.KirError, "without a regular cluster"):
+            to_kir.preferred_geometry(self._dump(single), "s")
+        odd = {"cluster": [2, 1, 1], "attrs": {"preferred_cluster": [3, 1, 1]}}
+        with self.assertRaisesRegex(to_kir.KirError, "no multiple"):
+            to_kir.preferred_geometry(self._dump(odd), "s")
+        with self.assertRaisesRegex(to_kir.KirError, "differ"):
+            to_kir.preferred_geometry(self._dump(pref, {"cluster": [2, 1, 1]}), "s")
+
+
 class RequiredClusterTest(unittest.TestCase):
     """check_required_cluster: a launch whose function's REQUIRED_CLUSTER attribute
     (cuFuncSetAttribute) differs from its cluster dims is refused (gap)."""

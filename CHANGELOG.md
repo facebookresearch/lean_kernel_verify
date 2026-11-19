@@ -24,8 +24,9 @@ First public release.
   both frontends translate the kernel's PTX instead of their IR, with one shared core
   (`frontend/ptx/`) and one PTX op table (references/frontend_ptx.md, ir_ops_ptx.md), into
   KIR with `ir` `"ptx"`: global and metadata accesses, mbarriers, TMA and bulk copies
-  (packed sub-byte formats too), tcgen05 commits, CLC (TLX), clusters and 2-CTA kernels
-  and the P1 pass (CuTe). Refusals name the PTX instruction, its source line and its PTX
+  (packed sub-byte formats too), tcgen05 commits, CLC (TLX, also in clusters), clusters
+  and 2-CTA kernels of both families (a preferred cluster geometry as a second,
+  all-preferred KIR) and the P1 pass (CuTe). Refusals name the PTX instruction, its source line and its PTX
   line. report.json `translation` and a line of report.md name the translation of a run.
   With CuTe DSL 4.4.2 the source locations are best effort, as report.json `loc_quality`
   and report.md say.

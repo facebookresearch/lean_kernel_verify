@@ -345,6 +345,24 @@ Coordinates, footprints, transaction bytes, issuing threads, sub-byte formats:
   role, the worker regions arrive on it at their end (the padding warps too, which
   therefore keep a role, "Threads and roles"); `fence.mbarrier_init.release.cluster`
   emits nothing.
+* **Preferred cluster geometry.** A launch with a preferred cluster (Triton's
+  `preferred_ctas_per_cga`, the launch attribute
+  `cudaLaunchAttributePreferredClusterDimension`; LaunchRecord `attrs.preferred_cluster`,
+  a multiple of the regular dims, `cluster`) may get clusters of either size: the device
+  groups CTAs into preferred clusters where it can and into regular ones elsewhere, a
+  preferred cluster replacing the regular clusters of an aligned group of CTAs, and each
+  kind numbered as if the grid held only its kind (CUDA runtime API, the attribute's
+  documentation). So every CTA of such a launch runs as in one of two geometries: all
+  clusters regular (the variant's KIR, `<spec>`) or all preferred (a second KIR,
+  `<spec>@cluster<dims>`, with the inputs whose grid the preferred dims divide), and the
+  report names the geometry of each verdict. A mixed launch's clusters are each a
+  cluster of one of them, with the same CTAs, ranks and special registers, so P0-1, P0-2,
+  P0-4 and P0-5 (per access, per cluster ledger) hold for every mix if they hold in both;
+  P0-3 counts writes over the whole grid and holds for a mix only if every aligned group
+  of CTAs writes the same elements in both geometries, which is not checked (Limits).
+  CLC with a preferred geometry is refused. If the launches disagree on the preferred
+  dims, the all-preferred geometry is the refused variant `<spec>@cluster` (a gap for
+  every input of the specialization) and the regular KIR is still checked.
 * **tcgen05 in P0.** No event except `tcgen05.commit`, an asynchronous `commit_arrive` on
   its mbarrier; the P0 specs do not see tensor memory.
 * **CLC (TLX).** `try_cancel` and its queries follow the schedule model of
@@ -464,6 +482,9 @@ assembly rerolls LLVM's unrolled blocks into `for` loops (the same trace).
 * Shared memory, TMEM, MMA math, named barriers and fences are outside the P0 slice; TMEM
   accesses, `tcgen05.wait` and named barriers are P1 events (CuTe), fences and TMEM
   lifetime are not checked.
+* Preferred cluster geometries are checked all-preferred and all-regular; P0-3 of a launch
+  that mixes them is covered only where both geometries write the same elements per
+  preferred-size group of CTAs, which is not checked ("Clusters, tcgen05, CLC").
 * Refused by design: CuTe CLC, P1-1 on TLX, TMEM addresses relative
   to the allocation, multicast bulk copies, multicast or cta_group::2 TMA loads and
   shared::cluster bulk copies that several lanes of a warp may execute (issuing not
