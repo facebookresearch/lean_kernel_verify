@@ -49,6 +49,7 @@ class Block:
     # Further blocks of the same region, in textual order (unstructured control flow,
     # e.g. the cf.cond_br an early `return` lowers to). Empty for structured regions.
     more: list = field(default_factory=list)
+    line: int = 0  # 1-based TTGIR line that declares the block's arguments
 
 
 @dataclass(eq=False)
@@ -316,7 +317,7 @@ class Parser:
         open_ = ln.index("(")
         close = self._match(ln, open_)
         scope: dict[str, Value] = {}
-        block = Block(args=[], label="func")
+        block = Block(args=[], label="func", line=line_no)
         op = Op(name="tt.func", text=ln[: ln.index("(")], loc="", line=line_no)
         for k, arg in enumerate(a for a in split_top(ln[open_ + 1 : close]) if a):
             v = self._block_arg(arg, block, k)
@@ -371,7 +372,7 @@ class Parser:
         while not self._peek().startswith("}"):
             if self._peek().startswith("^"):
                 label = self._next().split("//")[0].strip().rstrip(":")
-                current = Block(args=[], label=label.split("(")[0])
+                current = Block(args=[], label=label.split("(")[0], line=self.i)
                 if "(" in label:
                     body = label[label.index("(") + 1 : label.rindex(")")]
                     current.args = [
@@ -496,9 +497,9 @@ class Parser:
         self, op: Op, op_header: str, hdr: str, scope: dict, isolated: bool
     ):
         inner = {} if isolated else scope
-        block = Block(args=[], label=hdr)
-        clean = strip_strings(op_header)
         first = not op.regions
+        block = Block(args=[], label=hdr, line=op.line if first else self.i)
+        clean = strip_strings(op_header)
         if op.name == "scf.for" and first:
             # `unsigned` (unsignedCmp) is kept in the op text; to_kir refuses it.
             m = re.match(rf"^scf\.for (?:unsigned )?({NAME}) = .* : (\w+) \{{$", clean)
@@ -511,7 +512,9 @@ class Parser:
                 args += list(zip(names, _type_list(ia.group(2))))
             block.args = [Value(n[1:], t, block, k) for k, (n, t) in enumerate(args)]
         elif op.name == "scf.while" and first:
-            m = re.match(r"^scf\.while \((.*?)\) : (\(.*?\)) ->", clean)
+            # The init list is omitted when the loop carries no values:
+            # `scf.while : () -> () {` (e.g. a spin loop on a flag).
+            m = re.match(r"^scf\.while (?:\((.*?)\) )?: (\(.*?\)) ->", clean)
             if not m:
                 raise ParseError(f"line {op.line}: unrecognized scf.while header")
             names = (
@@ -528,6 +531,7 @@ class Parser:
             ]
         elif self._peek().startswith("^"):
             label = self._next()
+            block.line = self.i
             if "(" in label:
                 body = label[label.index("(") + 1 : label.rindex(")")]
                 block.args = [

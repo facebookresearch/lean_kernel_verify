@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import kir as kir_contract
-from . import kir_build as K, op_table
+from . import kir_build as K, op_table, var_names
 from .mlir_text import (
     Block,
     Op,
@@ -134,6 +134,10 @@ class Translator:
         self.param_names = {v.name for v in module.args if v.type in K.INT_WIDTHS}
         self.captures: dict = {}
         self.work_events = 0
+        # The KIR variable of each SSA value is a token until the role is complete
+        # (_var, var_names.name_role).
+        self.var_tokens: dict[Value, str] = {}
+        self.var_values: list[Value] = []
         for op in walk(self.body):
             op_table.classify(op)
         self.slice = Slicer(self.body).run_with(self._work_roots())
@@ -223,8 +227,8 @@ class Translator:
         for arg, outer in captures:
             if arg in self.slice.needed and arg.type in K.INT_WIDTHS:
                 e = self._inline(outer)["e"]
-                body.append(self._stmt("let", None, var=arg.name, expr=e))
-                self.env[arg] = {"k": "int", "e": K.var(arg.name, e["w"])}
+                body.append(self._stmt("let", None, var=self._var(arg), expr=e))
+                self.env[arg] = {"k": "int", "e": K.var(self._var(arg), e["w"])}
         body += emit()
         if self.uses_clc:
             launched = K.cmp(
@@ -234,7 +238,26 @@ class Translator:
                 self._stmt("let", None, var="__clc_k", expr=K.const(0, 32)),
                 self._stmt("if", None, cond=launched, then=body, **{"else": []}),
             ]
+        body = self._name_vars(body)
         return {"name": name, "warps": warps, "threads_per_issue": 1, "body": body}
+
+    def _var(self, v: Value) -> str:
+        """The KIR variable of SSA value `v`: a token that _name_vars replaces once the
+        role is complete (var_names: the printed name, unless that would share a variable
+        inexactly with another value of the same printed name)."""
+        tok = self.var_tokens.get(v)
+        if tok is None:
+            tok = self.var_tokens[v] = var_names.token(len(self.var_values))
+            self.var_values.append(v)
+        return tok
+
+    def _name_vars(self, body: list) -> list:
+        printed = [v.name for v in self.var_values]
+        lines = [v.owner.line for v in self.var_values]  # defining op or block header
+        try:
+            return var_names.name_role(body, printed, lines, self.param_names)
+        except ValueError as e:
+            raise KirError(f"internal: role {self.role}: {e}", kind="error") from e
 
     # -- statements ----------------------------------------------------------------------
     @staticmethod
@@ -290,7 +313,7 @@ class Translator:
         fields = {f: self._int(d[0][1])["e"] for f, d in defs.items()}
         self.work_events += 1
         ev = self._event(anchor, "work", fields=fields)
-        names = {r.name for r in anchor.results}
+        names = {self._var(r) for r in anchor.results}
         for i, s in enumerate(stmts):
             if s.get("op") == "let" and s.get("var") in names:
                 return stmts[: i + 1] + [ev] + stmts[i + 1 :]
@@ -335,8 +358,8 @@ class Translator:
                         f"internal: {op.where()} expected an integer", kind="error"
                     )
                 expr = K.mark_addr(s["e"]) if "addr" in self.slice.needed[r] else s["e"]
-                stmts.append(self._stmt("let", op, var=r.name, expr=expr))
-                self.env[r] = {"k": "int", "e": K.var(r.name, expr["w"])}
+                stmts.append(self._stmt("let", op, var=self._var(r), expr=expr))
+                self.env[r] = {"k": "int", "e": K.var(self._var(r), expr["w"])}
         return stmts
 
     # -- structured control flow ---------------------------------------------------------
@@ -363,23 +386,26 @@ class Translator:
             pre = []
             for a, init, _ in carried:
                 e = self._int(init)["e"]
-                pre.append(self._stmt("let", op, var=a.name, expr=e))
-                self.env[a] = {"k": "int", "e": K.var(a.name, e["w"])}
-            self.env[iv] = {"k": "int", "e": K.var(iv.name, 32)}
+                pre.append(self._stmt("let", op, var=self._var(a), expr=e))
+                self.env[a] = {"k": "int", "e": K.var(self._var(a), e["w"])}
+            self.env[iv] = {"k": "int", "e": K.var(self._var(iv), 32)}
             body = self._block(body_blk.ops)
             body += self._carry(
                 op, terminator(body_blk), [(a, k) for a, _, k in carried]
             )
             stmts = pre + [
-                self._stmt("for", op, var=iv.name, lb=lb, ub=ub, step=step, body=body)
+                self._stmt(
+                    "for", op, var=self._var(iv), lb=lb, ub=ub, step=step, body=body
+                )
             ]
-            # Results get their own names: the printer numbers the args of sibling regions
-            # alike, so a later loop's pre-lets would rebind %argN (as in _while).
+            # Results get their own variables: a later sibling loop's carried args may
+            # print with this loop's arg names (var_names).
             for r in op.results:
                 if r in need:
-                    e = K.var(body_blk.args[r.index + 1].name, self._width(r))
-                    stmts.append(self._stmt("let", op, var=r.name, expr=e))
-                    self.env[r] = {"k": "int", "e": K.var(r.name, e["w"])}
+                    arg = body_blk.args[r.index + 1]
+                    e = K.var(self._var(arg), self._width(r))
+                    stmts.append(self._stmt("let", op, var=self._var(r), expr=e))
+                    self.env[r] = {"k": "int", "e": K.var(self._var(r), e["w"])}
             return stmts
         if op.name == "scf.if":
             cond = self._int(op.operands[0])["e"]
@@ -387,7 +413,7 @@ class Translator:
             # is not readable after it, so each result is declared (as 0) before the if.
             self._scalar_ints(op, [r for r in op.results if r in need])
             pre = [
-                self._stmt("let", op, var=r.name, expr=K.const(0, self._width(r)))
+                self._stmt("let", op, var=self._var(r), expr=K.const(0, self._width(r)))
                 for r in op.results
                 if r in need
             ]
@@ -401,7 +427,7 @@ class Translator:
                             self._stmt(
                                 "let",
                                 y,
-                                var=r.name,
+                                var=self._var(r),
                                 expr=self._int(y.operands[r.index])["e"],
                             )
                         )
@@ -410,7 +436,10 @@ class Translator:
                 branches.append([])
             for r in op.results:
                 if r in need:
-                    self.env[r] = {"k": "int", "e": K.var(r.name, self._width(r))}
+                    self.env[r] = {
+                        "k": "int",
+                        "e": K.var(self._var(r), self._width(r)),
+                    }
             return pre + [
                 self._stmt(
                     "if", op, cond=cond, then=branches[0], **{"else": branches[1]}
@@ -435,15 +464,13 @@ class Translator:
 
     def _carry(self, op: Op, yield_op: Op, carried: list) -> list:
         """Parallel assignment of loop-carried values at the end of an iteration."""
-        exprs = [(a, self._int(yield_op.operands[k])["e"]) for a, k in carried]
-        stmts = [
-            self._stmt("let", yield_op, var=f"{a.name}.next", expr=e) for a, e in exprs
+        exprs = [
+            (self._var(a), self._int(yield_op.operands[k])["e"]) for a, k in carried
         ]
+        stmts = [self._stmt("let", yield_op, var=f"{x}.next", expr=e) for x, e in exprs]
         stmts += [
-            self._stmt(
-                "let", yield_op, var=a.name, expr=K.var(f"{a.name}.next", e["w"])
-            )
-            for a, e in exprs
+            self._stmt("let", yield_op, var=x, expr=K.var(f"{x}.next", e["w"]))
+            for x, e in exprs
         ]
         return stmts
 
@@ -458,24 +485,27 @@ class Translator:
         pre = []
         for a, k in carried:
             e = self._int(op.operands[k])["e"]
-            pre.append(self._stmt("let", op, var=a.name, expr=e))
-            self.env[a] = {"k": "int", "e": K.var(a.name, e["w"])}
+            pre.append(self._stmt("let", op, var=self._var(a), expr=e))
+            self.env[a] = {"k": "int", "e": K.var(self._var(a), e["w"])}
         # The before region runs before every test, so it is emitted before the loop and
         # again at the end of each iteration.
         before_stmts = self._block(before.ops)
         cond = self._int(cond_op.operands[0])["e"]
-        # The after args are printed with the before args' names, so they are assigned in
-        # parallel (through `.in` temporaries): scf.condition may forward them permuted.
+        # The after args are assigned in parallel (through `.in` temporaries): they print
+        # with the before args' names (and usually share their variables, var_names), and
+        # scf.condition may forward them permuted.
         fwd = [
             (b, self._int(cond_op.operands[b.index + 1])["e"])
             for b in after.args
             if b in need
         ]
-        body = [self._stmt("let", cond_op, var=f"{b.name}.in", expr=e) for b, e in fwd]
+        body = [
+            self._stmt("let", cond_op, var=f"{self._var(b)}.in", expr=e) for b, e in fwd
+        ]
         for b, e in fwd:
-            tmp = K.var(f"{b.name}.in", e["w"])
-            body.append(self._stmt("let", cond_op, var=b.name, expr=tmp))
-            self.env[b] = {"k": "int", "e": K.var(b.name, e["w"])}
+            tmp = K.var(f"{self._var(b)}.in", e["w"])
+            body.append(self._stmt("let", cond_op, var=self._var(b), expr=tmp))
+            self.env[b] = {"k": "int", "e": K.var(self._var(b), e["w"])}
         body += self._block(after.ops)
         body += self._carry(op, terminator(after), carried)
         body += self._block(before.ops)
@@ -483,8 +513,8 @@ class Translator:
         for r in op.results:
             if r in need:
                 e = self._int(cond_op.operands[r.index + 1])["e"]
-                post.append(self._stmt("let", op, var=r.name, expr=e))
-                self.env[r] = {"k": "int", "e": K.var(r.name, e["w"])}
+                post.append(self._stmt("let", op, var=self._var(r), expr=e))
+                self.env[r] = {"k": "int", "e": K.var(self._var(r), e["w"])}
         loop = self._stmt("while", op, cond=cond, body=body, max_iters=WHILE_FUEL)
         return pre + before_stmts + [loop] + post
 
@@ -769,20 +799,21 @@ class Translator:
             ] + [K.const(1, 64)]
             return []
         stmts, rec["shape"], rec["strides"] = [], [], []
+        x = self._var(t["desc_ptr"])  # the variables of the descriptor's extents
         for i, v in enumerate(reversed(t["gdim"])):
             e = self._int(v)["e"]
-            stmts.append(self._stmt("let", op, var=f"{name}.shape.{i}", expr=e))
-            rec["shape"].append(K.var(f"{name}.shape.{i}", e["w"]))
+            stmts.append(self._stmt("let", op, var=f"{x}.shape.{i}", expr=e))
+            rec["shape"].append(K.var(f"{x}.shape.{i}", e["w"]))
         for i, v in enumerate(reversed(t["gstride"])):
             stmts.append(
                 self._stmt(
                     "let",
                     op,
-                    var=f"{name}.stride.{i}",
+                    var=f"{x}.stride.{i}",
                     expr=self._elem_stride(self._int(v)["e"], elem),
                 )
             )
-            rec["strides"].append(K.var(f"{name}.stride.{i}", 64))
+            rec["strides"].append(K.var(f"{x}.stride.{i}", 64))
         rec["strides"].append(K.const(1, 64))
         return stmts
 
@@ -976,8 +1007,8 @@ class Translator:
                         K.cmp("eq", x, K.const(-1, 32)), K.const(-1, 32), K.const(0, 32)
                     )
                 )
-                stmts.append(self._stmt("let", op, var=r.name, expr=e))
-                self.env[r] = {"k": "int", "e": K.var(r.name, 32)}
+                stmts.append(self._stmt("let", op, var=self._var(r), expr=e))
+                self.env[r] = {"k": "int", "e": K.var(self._var(r), 32)}
         stmts.append(
             self._stmt(
                 "let",

@@ -19,7 +19,7 @@ from pathlib import Path
 import torch
 
 from ...frontend import kir as kir_contract
-from ...frontend.ttgir import host_env, kir_build as K, provenance, to_kir
+from ...frontend.ttgir import host_env, kir_build as K, provenance, to_kir, var_names
 from ...frontend.ttgir.export_src import imported_modules, package_of
 from ...frontend.ttgir.host_reads import HostAliasError, HostReads
 from ...frontend.ttgir.mlir_text import parse, walk
@@ -774,6 +774,208 @@ class StructureTest(unittest.TestCase):
         self.assertEqual(kir_contract.validate(kir), [])
         stores = store_offsets(kir["roles"][0]["body"], {"n": 1})
         self.assertEqual(stores, [-1, 64, 0, 64])  # x_ptr[-1] is out of bounds
+
+    def test_while_without_carried_values(self):
+        # A loop carrying nothing prints without an init list (`scf.while : () -> ()`),
+        # e.g. a spin loop on a flag; one carrying nothing but producing a result too.
+        spin = f"""    scf.while : () -> () {{
+      %v = tt.load %flag : !tt.ptr<i32> loc(#loc2)
+      %c = arith.cmpi slt, %v, %n : i32 loc(#loc2)
+      scf.condition(%c) loc(#loc2)
+    }} do {{
+      ttng.arrive_barrier %b0, 1 : {BAR} loc(#loc3)
+      scf.yield loc(#loc3)
+    }} loc(#loc2)
+"""
+        result = """    %r = scf.while : () -> i32 {
+      %v = tt.load %flag : !tt.ptr<i32> loc(#loc2)
+      %c = arith.cmpi slt, %v, %n : i32 loc(#loc2)
+      scf.condition(%c) %v : i32 loc(#loc2)
+    } do {
+    ^bb0(%arg10: i32 loc(#loc3)):
+      %p = tt.addptr %x_ptr, %arg10 : !tt.ptr<i32>, i32 loc(#loc3)
+      tt.store %p, %c0_i32 : !tt.ptr<i32> loc(#loc3)
+      scf.yield loc(#loc3)
+    } loc(#loc2)
+    %q = tt.addptr %x_ptr, %r : !tt.ptr<i32>, i32 loc(#loc4)
+    tt.store %q, %c0_i32 : !tt.ptr<i32> loc(#loc4)
+"""
+        args = {"x_ptr": "!tt.ptr<i32>", "flag": "!tt.ptr<i32>", "n": "i32"}
+        snap = {
+            "x_ptr": tensor(8192, [64]),
+            "flag": tensor(4096, [1], values=[5]),
+            "n": scalar(3),
+        }
+        for name, body, results, after_args in (
+            ("spin", spin, 0, 0),
+            ("result", result, 1, 1),
+        ):
+            with self.subTest(name):
+                text = ttgir(args, body)
+                (loop,) = [
+                    op
+                    for op in walk(parse(text).func.regions[0])
+                    if op.name == "scf.while"
+                ]
+                self.assertEqual(
+                    (len(loop.operands), len(loop.results), len(loop.regions[0].args)),
+                    (0, results, 0),
+                )
+                self.assertEqual(len(loop.regions[1].args), after_args)
+                writes = {"x_ptr": "unchecked"} if results else {}
+                kir = build(text, snap, intended_writes=writes)
+                self.assertEqual(kir_contract.validate(kir), [])
+                body_stmts = kir["roles"][0]["body"]
+                (w,) = [s for s in body_stmts if s["op"] == "while"]
+                self.assertEqual(w["cond"], {"e": "var", "name": "c", "w": 1})
+                # The before region runs before the loop and again after each body.
+                self.assertEqual([s["var"] for s in w["body"][-2:]], ["v", "c"])
+                ev = "arrive" if name == "spin" else "gstore"
+                self.assertEqual([s["ev"] for s in events(w["body"])], [ev, "gload"])
+
+
+class VariableNamesTest(unittest.TestCase):
+    """KIR variables of SSA values whose printed names repeat in sibling regions
+    (var_names): a value keeps its printed name unless sharing that variable with
+    another value's would not be exact; then it is named `<name>@<ttgir line>`."""
+
+    ARGS = {"x_ptr": "!tt.ptr<i32>", "n": "i32"}
+    SNAP = {"x_ptr": tensor(8192, [128]), "n": scalar(3)}
+
+    @staticmethod
+    def line_of(text: str, op: str) -> int:
+        return next(i for i, ln in enumerate(text.splitlines(), 1) if op in ln)
+
+    def check(self, body: str, n: int) -> tuple[str, dict, list]:
+        text = ttgir(self.ARGS, body)
+        kir = build(text, self.SNAP, intended_writes={"x_ptr": "unchecked"})
+        self.assertEqual(kir_contract.validate(kir), [])
+        return text, kir, store_offsets(kir["roles"][0]["body"], {"n": n})
+
+    def test_while_regions_reusing_a_number_with_another_width(self):
+        # The printer numbers both regions from the same counter: the condition %0 of the
+        # before region (i1, assigned before the loop) and the after region's %0 (i32).
+        body = """    %r:2 = scf.while (%arg10 = %c0_i32, %arg11 = %c0_i32) : (i32, i32) -> (i32, i32) {
+      %0 = arith.cmpi slt, %arg10, %n : i32 loc(#loc2)
+      scf.condition(%0) %arg10, %arg11 : i32, i32 loc(#loc2)
+    } do {
+    ^bb0(%arg10: i32 loc(#loc3), %arg11: i32 loc(#loc3)):
+      %first = arith.cmpi slt, %arg10, %c1_i32 : i32 loc(#loc3)
+      %0 = scf.if %first -> (i32) {
+        scf.yield %c64_i32 : i32 loc(#loc3)
+      } else {
+        scf.yield %arg11 : i32 loc(#loc3)
+      } loc(#loc3)
+      %p = tt.addptr %x_ptr, %0 : !tt.ptr<i32>, i32 loc(#loc4)
+      tt.store %p, %c0_i32 : !tt.ptr<i32> loc(#loc4)
+      %t = arith.addi %arg10, %c1_i32 : i32 loc(#loc3)
+      %u = arith.addi %0, %c1_i32 : i32 loc(#loc3)
+      scf.yield %t, %u : i32, i32 loc(#loc3)
+    } loc(#loc2)
+"""
+        text, kir, stores = self.check(body, 3)
+        self.assertEqual(stores, [64, 65, 66])
+        names = lets(kir["roles"][0]["body"])
+        line = self.line_of(text, "%0 = scf.if")
+        self.assertEqual(names["0"]["e"], "cmp")  # the condition keeps its name
+        self.assertEqual(names[f"0@{line}"]["w"], 32)
+        # The after args share the before args' variables (exact: the carry reassigns
+        # the before args before any read).
+        self.assertNotIn(f"arg10@{self.line_of(text, '^bb0')}", names)
+
+    def test_sibling_loops_carrying_a_name_with_another_width(self):
+        # Both loops carry %arg11 (the printer numbers sibling bodies alike), assigned
+        # before each loop: an i1 in the first, an i32 in the second.
+        body = """    %r1 = scf.for %arg10 = %c0_i32 to %n step %c1_i32 iter_args(%arg11 = %true) -> (i1)  : i32 {
+      %t = arith.xori %arg11, %true : i1 loc(#loc2)
+      scf.yield %t : i1 loc(#loc2)
+    } loc(#loc2)
+    %r2 = scf.for %arg10 = %c0_i32 to %n step %c1_i32 iter_args(%arg11 = %c0_i32) -> (i32)  : i32 {
+      %p = tt.addptr %x_ptr, %arg11 : !tt.ptr<i32>, i32 loc(#loc3)
+      tt.store %p, %c0_i32 : !tt.ptr<i32> loc(#loc3)
+      %t = arith.addi %arg11, %c1_i32 : i32 loc(#loc3)
+      scf.yield %t : i32 loc(#loc3)
+    } loc(#loc3)
+    %q = arith.select %r1, %c64_i32, %c128_i32 : i32 loc(#loc4)
+    %pq = tt.addptr %x_ptr, %q : !tt.ptr<i32>, i32 loc(#loc4)
+    tt.store %pq, %c0_i32 : !tt.ptr<i32> loc(#loc4)
+"""
+        text, kir, stores = self.check(body, 2)
+        self.assertEqual(stores, [0, 1, 64])  # r1 = true xor true xor true
+        names = lets(kir["roles"][0]["body"])
+        line = self.line_of(text, "%r2 = scf.for")
+        self.assertEqual((names["arg11"]["w"], names[f"arg11@{line}"]["w"]), (1, 32))
+        loops = [s for s in kir["roles"][0]["body"] if s["op"] == "for"]
+        self.assertEqual([s["var"] for s in loops], ["arg10", "arg10"])
+
+    def test_exact_sharing_keeps_the_printed_names(self):
+        # Same widths, and the before region's %0 is dead in the after region (it is
+        # assigned again at the end of the body before the next test): one variable, as
+        # in the KIR of every TLX CLC loop.
+        body = """    %r = scf.while (%arg10 = %c0_i32) : (i32) -> i32 {
+      %0 = arith.cmpi slt, %arg10, %n : i32 loc(#loc2)
+      scf.condition(%0) %arg10 : i32 loc(#loc2)
+    } do {
+    ^bb0(%arg10: i32 loc(#loc3)):
+      %0 = arith.cmpi slt, %arg10, %c1_i32 : i32 loc(#loc3)
+      %o = arith.select %0, %c64_i32, %arg10 : i32 loc(#loc3)
+      %p = tt.addptr %x_ptr, %o : !tt.ptr<i32>, i32 loc(#loc4)
+      tt.store %p, %c0_i32 : !tt.ptr<i32> loc(#loc4)
+      %t = arith.addi %arg10, %c1_i32 : i32 loc(#loc3)
+      scf.yield %t : i32 loc(#loc3)
+    } loc(#loc2)
+"""
+        _, kir, stores = self.check(body, 3)
+        self.assertEqual(stores, [64, 1, 2])
+        self.assertFalse(any("@" in x for x in lets(kir["roles"][0]["body"])))
+
+    def test_name_role(self):
+        t0, t1 = var_names.token(0), var_names.token(1)
+
+        def let(x, e):
+            return {"op": "let", "var": x, "expr": e}
+
+        def use(x):
+            return {"op": "assert", "cond": K.var(x, 1), "msg": ""}
+
+        c1, c32 = K.const(1, 1), K.const(1, 32)
+        loop = {"op": "for", "var": t1, "lb": c32, "ub": c32, "step": c32, "body": []}
+        cases = {
+            # t0 is read after t1 is assigned: sharing would clobber it.
+            "live": ([let(t0, c1), let(t1, c1), use(t0)], ["x", "x@9"]),
+            # t0 is never read after t1 is assigned: one variable.
+            "dead": ([let(t0, c1), use(t0), let(t1, c1), use(t1)], ["x", "x"]),
+            # Visible at once with other widths.
+            "width": ([let(t0, c1), let(t1, c32)], ["x", "x@9"]),
+            # Never visible at once (t0 is local to the branch): any widths.
+            "scopes": (
+                [
+                    {"op": "if", "cond": c1, "then": [let(t0, c1)], "else": []},
+                    let(t1, c32),
+                ],
+                ["x", "x"],
+            ),
+            # A `for` variable is read-only: never shared with a visible variable.
+            "for": ([let(t0, K.const(1, 32)), dict(loop)], ["x", "x@9"]),
+            # Taken by a param.
+            "param": ([let(t1, c1)], [None, "x@9"]),
+        }
+
+        def pairs(out, body):  # (named statement, tokenized statement)
+            for s, s0 in zip(out, body):
+                yield s, s0
+                for k in ("body", "then", "else"):
+                    yield from pairs(s.get(k, []), s0.get(k, []))
+
+        for name, (body, want) in cases.items():
+            with self.subTest(name):
+                reserved = {"x"} if name == "param" else set()
+                out = var_names.name_role(body, ["x", "x"], [5, 9], reserved)
+                got = {t0: None, t1: None}
+                for s, s0 in pairs(out, body):
+                    if s0.get("var") in got:
+                        got[s0["var"]] = s["var"]
+                self.assertEqual([got[t0], got[t1]], want)
 
 
 class ErrorsTest(unittest.TestCase):

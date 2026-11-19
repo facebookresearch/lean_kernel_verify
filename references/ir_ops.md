@@ -123,7 +123,7 @@ i32 tensor terms).
 | `scf.for %iv = lb to ub step s iter_args(...)` | `let` carried values; `for iv in [lb, ub) step s` (i32 bounds only; `scf.for unsigned`, i.e. unsignedCmp, is an error since KIR `for` compares signed); carried values reassigned at the end of the body through `.next` temporaries; results bound by a `let` of their carried variable after the loop (sibling loops reuse the `%argN` names) |
 | `scf.if` | results declared `let r := 0` before, assigned in both branches |
 | pointers carried by `scf.for` / `scf.while` or yielded by `scf.if` (the `ptrs += BLOCK` idiom) | error: KIR variables are integers |
-| `scf.while (args) {before; scf.condition(c) fwd} do {after; scf.yield}` | before-region emitted before the loop and at the end of the body; `while c` with `max_iters` = 65536 fuel; after-arguments assigned from `fwd` in parallel (through `.in` temporaries: they reuse the before-arguments' names) |
+| `scf.while (args) {before; scf.condition(c) fwd} do {after; scf.yield}` | before-region emitted before the loop and at the end of the body; `while c` with `max_iters` = 65536 fuel; after-arguments assigned from `fwd` in parallel (through `.in` temporaries: they reuse the before-arguments' names). A loop that carries nothing prints without `(args)`: `scf.while : () -> () {` (e.g. a spin loop on a flag) |
 | `cf.cond_br` / `cf.br` (early `return`) in a kernel or partition body | nested `if`s over the acyclic block graph; loops or block arguments: error |
 | `scf.yield`, `scf.condition`, `ttg.warp_yield`, `ttg.warp_return`, `tt.return` | consumed by their parent |
 

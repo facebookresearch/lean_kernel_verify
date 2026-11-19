@@ -268,6 +268,18 @@ version `ptxas --version` prints (e.g. 13.3.33), which gates the TMA issuing rul
   loop and again at the end of the body; `max_iters` is a fuel of 65536 (the frontend
   does not prove loop bounds; exceeding it is a verdict error, never a pass). An early
   `return` (acyclic `cf` blocks without arguments) becomes nested `if`s.
+* Variables: each integer SSA value on the slice is one KIR variable, named by its
+  printed SSA name (`%tile_id_34` -> `tile_id_34`; its temporaries add `.next`, `.in`,
+  ...). The printer numbers sibling regions alike: an `scf.while`'s before and after
+  regions, the branches of an `scf.if` and consecutive loop bodies restart at the same
+  `%N`, `%argN` and `name_N`. The statements above also assign some values outside their
+  region (an `scf.while` before region and its arguments, loop-carried values). So
+  values with one printed name can meet. They share the variable only where that is
+  exact: wherever both are visible (kir.md scoping), they have the same width, neither is
+  a `for` variable, and neither is read after the other is assigned. For example, a
+  while's after-arguments share its before-arguments' variables, because the carry
+  reassigns those before any read. Otherwise the later value is named
+  `<name>@<TTGIR line>` (`frontend/ttgir/var_names.py`).
 * `addr` is set on every add/sub/mul/shl and trunc on an address path: the value flows
   into a pointer offset, a TMA coordinate, a descriptor's global address or a metadata
   load index through operands that carry it (not through comparisons, select/if
