@@ -158,6 +158,53 @@ def run_warmup(x, BLOCK=128):
     probe[(triton.cdiv(x.numel(), BLOCK),)](x, x.numel(), BLOCK=BLOCK)
 
 
+PER_STREAM = {}
+
+
+def run_stream(x, use, BLOCK=128):
+    # A buffer per launch stream, keyed on the stream handle; "synchronize" and "device1"
+    # need more of the stream API than a launch does.
+    stream = torch.cuda.current_stream(x.device)
+    assert stream.cuda_stream == 0 and stream is torch.cuda.current_stream()
+    if use == "synchronize":
+        stream.synchronize()
+    if use == "device1":
+        torch.cuda.current_stream(1)
+    PER_STREAM.setdefault((x.device.index, stream.cuda_stream), torch.zeros(1))
+    probe[(triton.cdiv(x.numel(), BLOCK),)](x, x.numel(), BLOCK=BLOCK)
+
+
+def run_device(x, device, BLOCK=128):
+    with torch.cuda.device(x.device if device == "own" else device):
+        probe[(triton.cdiv(x.numel(), BLOCK),)](x, x.numel(), BLOCK=BLOCK)
+
+
+import ctypes  # below the kernels: their line numbers are checked
+
+SINGLE_CTA = set()  # sizes whose compiled kernel already has its required cluster set
+
+
+def run_required_cluster(x, use, BLOCK=128):
+    # A host letting a preferred-cluster launch fall back to single CTAs: compile with
+    # warmup, give the kernel a required cluster of 1 through the driver API, launch; the
+    # kernel cache (and this host's cache of done sizes) outlives the input.
+    grid = (triton.cdiv(x.numel(), BLOCK),)
+    extra = {"ctas_per_cga": (2, 1, 1)} if use == "compile_time_cluster" else {}
+    if x.numel() not in SINGLE_CTA:
+        compiled = probe.warmup(x, x.numel(), BLOCK=BLOCK, grid=grid, **extra)
+        compiled._init_handles()
+        libcuda = ctypes.CDLL("libcuda.so.1")
+        if use == "other_function":
+            libcuda.cuFuncGetAttribute
+        for attr in (8,) if use == "other_attribute" else (11, 12, 13):
+            err = libcuda.cuFuncSetAttribute(ctypes.c_void_p(compiled.function), attr, 1)
+            if err != 0:
+                raise RuntimeError(f"cuFuncSetAttribute({attr}) failed with CUDA error {err}")
+        SINGLE_CTA.add(x.numel())
+    probe[grid](x, x.numel(), BLOCK=BLOCK, **extra)
+    probe[(triton.cdiv(x.numel(), 64),)](x, x.numel(), BLOCK=64)  # another kernel
+
+
 def run_chain(meta, buf, meta2, out, BLOCK=16):
     # Launch 0 writes buf; launch 1 reads meta2 (buf itself, or another tensor) as metadata.
     int_index[(meta.numel(),)](meta, buf, BLOCK=BLOCK)
@@ -742,6 +789,129 @@ class TtgirFrontendTest(unittest.TestCase):
         )
         d = dump.run(c, self.out / c["name"])
         self.assertEqual([la["grid"] for la in d["inputs"][0]["launches"]], [[2, 1, 1]])
+
+    def test_current_stream_is_the_default_stream_of_device_0(self):
+        # torch.cuda.current_stream answers the launch stream's handle (0, the stream the
+        # driver stand-in reports); the rest of the stream API, or another device, fails
+        # the dump.
+        def stream_case(use):
+            inputs = [
+                {
+                    "name": "n256",
+                    "args": {"x": {"dtype": "float32", "shape": [256]}, "use": use},
+                }
+            ]
+            return case(
+                self.root,
+                "lkv_test_kernels",
+                "run_stream",
+                "probe",
+                inputs,
+                intended_writes={"x_ptr": "all"},
+                name=f"test_stream_{use}",
+            )
+
+        c = stream_case("key")
+        d = dump.run(c, self.out / c["name"])
+        self.assertNotIn("host_error", d["inputs"][0])
+        self.assertEqual([la["grid"] for la in d["inputs"][0]["launches"]], [[2, 1, 1]])
+        self.assert_valid(to_kir.translate(self.out / c["name"] / "dump.json", c))
+        for use, exc, msg in (
+            (
+                "synchronize",
+                AttributeError,
+                "has only `cuda_stream`, not 'synchronize'",
+            ),
+            (
+                "device1",
+                RuntimeError,
+                r"current_stream\(1\): .* has CUDA device 0 only",
+            ),
+        ):
+            with self.subTest(use=use):
+                c = stream_case(use)
+                with self.assertRaisesRegex(exc, msg):
+                    dump.run(c, self.out / c["name"])
+
+    def test_cuda_device_context_is_a_no_op_for_device_0(self):
+        def device_case(device):
+            inputs = [
+                {
+                    "name": "n256",
+                    "args": {
+                        "x": {"dtype": "float32", "shape": [256]},
+                        "device": device,
+                    },
+                }
+            ]
+            return case(
+                self.root,
+                "lkv_test_kernels",
+                "run_device",
+                "probe",
+                inputs,
+                intended_writes={"x_ptr": "all"},
+                name=f"test_device_{device}",
+            )
+
+        c = device_case("own")
+        d = dump.run(c, self.out / c["name"])
+        self.assertEqual([la["grid"] for la in d["inputs"][0]["launches"]], [[2, 1, 1]])
+        c = device_case(1)
+        with self.assertRaisesRegex(
+            RuntimeError, r"torch.cuda.device\(1\): .* has CUDA device 0 only"
+        ):
+            dump.run(c, self.out / c["name"])
+
+    def test_function_attributes_of_a_warmup_kernel_reach_its_launches(self):
+        def attributes_case(use, sizes):
+            inputs = [
+                {
+                    "name": f"{use}{i}",
+                    "args": {"x": {"dtype": "float32", "shape": [n]}, "use": use},
+                }
+                for i, n in enumerate(sizes)
+            ]
+            return case(
+                self.root,
+                "lkv_test_kernels",
+                "run_required_cluster",
+                "probe",
+                inputs,
+                intended_writes={"x_ptr": "all"},
+                name=f"test_required_cluster_{use}",
+            )
+
+        # The second input takes the host's cached path (no warmup): its launch runs the
+        # same compiled kernel, so it has the attributes too; the BLOCK=64 kernel has none.
+        c = attributes_case("required", [256, 256])
+        d = dump.run(c, self.out / c["name"])
+        for inp in d["inputs"]:
+            main, other = (la["launch"]["attrs"] for la in inp["launches"])
+            self.assertEqual(main["func_attributes"], {"required_cluster": [1, 1, 1]})
+            self.assertNotIn("func_attributes", other)
+        self.assert_valid(to_kir.translate(self.out / c["name"] / "dump.json", c))
+        # Cluster dims fixed at compile time: the driver answers CUDA_ERROR_NOT_PERMITTED
+        # and this host refuses the input.
+        c = attributes_case("compile_time_cluster", [512])
+        d = dump.run(c, self.out / c["name"])
+        self.assertRegex(
+            d["inputs"][0]["host_error"],
+            r"cuFuncSetAttribute\(11\) failed with CUDA error 800",
+        )
+        for use, exc, msg in (
+            (
+                "other_attribute",
+                RuntimeError,
+                r"cuFuncSetAttribute\(8: CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES\) "
+                "is not modeled",
+            ),
+            ("other_function", AttributeError, "not cuFuncGetAttribute"),
+        ):
+            with self.subTest(use=use):
+                c = attributes_case(use, [1024])
+                with self.assertRaisesRegex(exc, msg):
+                    dump.run(c, self.out / c["name"])
 
     def test_metadata_written_by_an_earlier_launch_of_the_kernel_is_refused(self):
         # Launch 0 of int_index writes buf, launch 1 reads it as metadata.

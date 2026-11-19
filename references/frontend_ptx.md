@@ -55,7 +55,11 @@ parameter (kind `ptr`, `scalar`, `tensormap` or `aggregate`, size, alignment, na
 value; struct fields; a decoded CUtensorMap and the tensor its address lies in). CuTe
 records also name the kernel, its PTX file and the target, which the TLX dump keeps with
 the specialization. The parameter list is checked against the PTX `.entry` (count, kind,
-size, alignment of every parameter); any difference fails the dump.
+size, alignment of every parameter); any difference fails the dump. The launch attributes
+are `pdl`, `cooperative` and `preferred_cluster`; a TLX record also has
+`func_attributes` when the host set function attributes on the launched kernel before
+the launch: `{"required_cluster": [x, y, z]}` (frontend_ttgir.md, dump.json and patch
+13).
 
 Parameters are named by position, never by guessing from addresses: TLX by the jit
 argument names in Triton's own parameter packing (a host descriptor expands to its

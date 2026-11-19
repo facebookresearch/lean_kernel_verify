@@ -19,8 +19,12 @@ Two hooks (both documented in references/frontend_ttgir.md):
   run the config `pre_hook` (e.g. TMA descriptor block shapes), then
   `fn.run(..., **config.all_kwargs())`. Heuristics wrappers run unchanged.
 
-`warmup` calls (`kernel.warmup(...)`, preloads) compile without launching on the GPU and
-are not recorded.
+`warmup` calls (`kernel.warmup(...)`) compile without launching, here as on the GPU: they
+are not recorded as launches and return the compiled kernel, with a stand-in CUfunction
+handle (`Functions`). Host code may set function attributes on that handle through the
+driver API (`ctypes.CDLL("libcuda.so.1").cuFuncSetAttribute`, answered by `_Libcuda`);
+the attributes the CPU run models are recorded and every later launch of that kernel
+carries them in its LaunchRecord (`attrs.func_attributes`). Preloads are not recorded.
 
 Arguments are snapshotted at capture time because later pre_hooks mutate the same
 TensorDescriptor objects. The specialization (tt.divisibility of pointers and ints, ints
@@ -49,7 +53,9 @@ callable is host code and runs tracked; the binder and the argument snapshots ru
 
 import contextvars
 import copy
+import ctypes
 import math
+import os
 import re
 from dataclasses import dataclass, field
 from itertools import zip_longest
@@ -91,6 +97,8 @@ class Launch:
     sources: dict  # tensor/descriptor param -> [[storage, t], ...] its data may come from (host_reads.py)
     hinted: dict  # integer param -> storages its values point into (address hints, host_reads.py)
     values: tuple  # bound argument values as the launcher reads them (_detached)
+    # Function attributes the host set on this kernel before the launch (Functions).
+    func_attributes: dict = field(default_factory=dict)
 
     def compile(self, mode, target: str):
         """The compile JITFunction would do for this launch on the target GPU."""
@@ -103,14 +111,125 @@ class Launch:
             )
 
 
+# CUfunction_attribute values (cuda.h) that cuFuncSetAttribute may set: the ones the CPU
+# run models (CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_{WIDTH,HEIGHT,DEPTH}, by the index of the
+# LaunchRecord `func_attributes` entry `required_cluster` they set), and the others by
+# name, for the refusal.
+REQUIRED_CLUSTER = {11: 0, 12: 1, 13: 2}
+OTHER_FUNC_ATTRIBUTES = {
+    8: "CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES",
+    9: "CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT",
+    14: "CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED",
+    15: "CU_FUNC_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE",
+}
+CUDA_ERROR_NOT_PERMITTED = 800
+LIBCUDA = ("libcuda.so", "libcuda.so.1")
+
+
+@dataclass
+class Function:
+    """A kernel a `warmup` compiled: its stand-in CUfunction handle and the function
+    attributes the host set on it, by LaunchRecord `func_attributes` entry."""
+
+    handle: int
+    kernel: object  # the CompiledKernel
+    attributes: dict = field(default_factory=dict)
+
+
+@dataclass
+class Functions:
+    """The kernels of the run's warmups, by stand-in handle and by JITFunction kernel-cache
+    entry ((id(jit), device key, cache key): later launches with that entry run the same
+    compiled kernel, so they get its attributes). One for the run: host code keeps
+    handles in module-level caches across inputs."""
+
+    by_handle: dict = field(default_factory=dict)
+    by_entry: dict = field(default_factory=dict)
+
+    def add(self, entry: tuple, kernel) -> Function:
+        handle = 0x10000 + 0x100 * len(self.by_handle)
+        fn = self.by_handle[handle] = self.by_entry[entry] = Function(handle, kernel)
+
+        def init_handles():  # loads nothing: the CPU run has no device
+            kernel.function = handle
+            kernel._run = _no_launch
+
+        kernel._init_handles = init_handles
+        return fn
+
+
+def _no_launch(*args, **kwargs):
+    raise RuntimeError(
+        "the CPU-only dump does not launch a kernel through its CompiledKernel (only "
+        "JITFunction launches are captured)"
+    )
+
+
+class _Libcuda:
+    """Stand-in for `ctypes.CDLL("libcuda.so.1")` during the host run: only
+    `cuFuncSetAttribute` on a handle of `Functions`, for the attributes in
+    REQUIRED_CLUSTER. Any other driver function, attribute or handle raises."""
+
+    def __init__(self, functions: Functions):
+        self.cuFuncSetAttribute = _CuFuncSetAttribute(functions)
+
+    def __getattr__(self, name):
+        raise AttributeError(
+            f"the CPU-only stand-in of libcuda has only cuFuncSetAttribute, not {name}"
+        )
+
+
+class _CuFuncSetAttribute:
+    """CUresult cuFuncSetAttribute(CUfunction hfunc, CUfunction_attribute attrib, int value).
+    A required cluster dimension set on a kernel whose cluster dims are fixed at compile
+    time (`.reqnctapercluster`) is CUDA_ERROR_NOT_PERMITTED, as the driver documents;
+    otherwise it is recorded (unset dimensions stay 0, the driver's default)."""
+
+    argtypes = restype = None  # ctypes declarations the host may assign; not used
+
+    def __init__(self, functions: Functions):
+        self.functions = functions
+
+    def __call__(self, hfunc, attrib, value):
+        handle, attrib, value = (getattr(x, "value", x) for x in (hfunc, attrib, value))
+        fn = self.functions.by_handle.get(handle)
+        if fn is None:
+            raise RuntimeError(
+                f"cuFuncSetAttribute on {handle!r}: not the function handle of a kernel "
+                "the CPU run compiled with warmup"
+            )
+        if attrib not in REQUIRED_CLUSTER:
+            name = OTHER_FUNC_ATTRIBUTES.get(attrib, "unknown attribute")
+            raise RuntimeError(
+                f"cuFuncSetAttribute({attrib}: {name}) is not modeled by the CPU-only dump"
+            )
+        if type(value) is not int or value < 0:
+            raise RuntimeError(f"cuFuncSetAttribute({attrib}, {value!r}): not modeled")
+        if _directive(fn.kernel.asm["ptx"], "reqnctapercluster") is not None:
+            return CUDA_ERROR_NOT_PERMITTED
+        fn.attributes.setdefault("required_cluster", [0, 0, 0])[
+            REQUIRED_CLUSTER[attrib]
+        ] = value
+        return 0
+
+
 @dataclass
 class Capture:
     reads: HostReads  # the dump's source tracking (shared by every input of the run)
+    target: str = "sm_100"  # gpu_free.TARGETS key: what warmups compile for
+    # The run's warmup kernels, shared by its inputs.
+    functions: Functions = field(default_factory=Functions)
     launches: list = field(default_factory=list)
 
     def __enter__(self):
-        self._saved = (JITFunction.run, JITFunction._do_compile, Autotuner.run)
+        self._saved = (
+            JITFunction.run,
+            JITFunction._do_compile,
+            Autotuner.run,
+            ctypes.CDLL,
+        )
         orig_run = JITFunction.run
+        orig_cdll = ctypes.CDLL
         capture = self
 
         def run(jit, *args, grid, warmup, **kwargs):
@@ -127,30 +246,54 @@ class Capture:
         def do_compile(
             jit, key, signature, device, device_key, constexprs, options, attrs, warmup
         ):
-            if not warmup:
-                capture.launches.append(
-                    _record(
-                        jit,
-                        device_key,
-                        signature,
-                        constexprs,
-                        options,
-                        attrs,
-                        capture.reads,
-                    )
-                )
+            entry = (id(jit), device_key, key)
+            if warmup:
+                return capture.warmup(entry, jit, signature, constexprs, options, attrs)
+            launch = _record(
+                jit, device_key, signature, constexprs, options, attrs, capture.reads
+            )
+            fn = capture.functions.by_entry.get(entry)
+            if fn is not None:
+                launch.func_attributes = copy.deepcopy(fn.attributes)
+            capture.launches.append(launch)
             return None
+
+        def cdll(name, *args, **kwargs):
+            if isinstance(name, str) and os.path.basename(name) in LIBCUDA:
+                return _Libcuda(capture.functions)
+            return orig_cdll(name, *args, **kwargs)
 
         JITFunction.run = run
         JITFunction._do_compile = do_compile
         Autotuner.run = _autotuner_run
+        ctypes.CDLL = cdll
         self.reads.__enter__()
         return self
 
     def __exit__(self, *exc):
         self.reads.__exit__(*exc)
-        JITFunction.run, JITFunction._do_compile, Autotuner.run = self._saved
+        (
+            JITFunction.run,
+            JITFunction._do_compile,
+            Autotuner.run,
+            ctypes.CDLL,
+        ) = self._saved
         return False
+
+    def warmup(self, entry, jit, signature, constexprs, options, attrs):
+        """JITFunction.warmup: the compile a launch with these arguments would do, as on
+        the GPU, returning the compiled kernel; a second warmup of the same kernel-cache
+        entry returns the same kernel (the GPU's cache hit)."""
+        fn = self.functions.by_entry.get(entry)
+        if fn is None:
+            with self.reads.paused():
+                kernel = triton_compile(
+                    ASTSource(jit, signature, constexprs, attrs),
+                    target=gpu_free.TARGETS[self.target],
+                    options=options.__dict__,
+                )
+            fn = self.functions.add(entry, kernel)
+        return fn.kernel
 
 
 def _autotuner_run(tuner, *args, **kwargs):
@@ -325,17 +468,20 @@ def launch_record(launch: Launch, kernel) -> dict:
             )
     params = _device_params(launch, md, math.prod(launch.grid) * num_ctas)
     _check_params(launch.kernel, md.name, params, ptx_launch.ptx_params(ptx, md.name))
+    attrs = {
+        "pdl": bool(md.launch_pdl),
+        "cooperative": bool(md.launch_cooperative_grid),
+        "preferred_cluster": _plain(getattr(md, "preferred_ctas_per_cga", None)),
+    }
+    if launch.func_attributes:
+        attrs["func_attributes"] = launch.func_attributes
     return {
         "entry": md.name,
         "grid": [launch.grid[0] * num_ctas, *launch.grid[1:]],
         "block": block,
         "cluster": cluster,
         "smem_dynamic": md.shared,
-        "attrs": {
-            "pdl": bool(md.launch_pdl),
-            "cooperative": bool(md.launch_cooperative_grid),
-            "preferred_cluster": _plain(getattr(md, "preferred_ctas_per_cga", None)),
-        },
+        "attrs": attrs,
         "params": params,
     }
 

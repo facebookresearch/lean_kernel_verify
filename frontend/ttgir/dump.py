@@ -202,11 +202,13 @@ def _run(case: dict, out: Path, wanted: set | None, target: str) -> dict:
         root
     )  # one for the run: data may reach a later input (module-level caches)
     writes = []  # per launch of the run: storage -> the params that may write it
+    # The run's warmup kernels: host code keeps their handles in module-level caches.
+    functions = capture.Functions()
     for inp in case["inputs"]:
         if wanted is not None and inp["name"] not in wanted:
             continue
         rejected = None
-        with mode, capture.Capture(tracker) as cap:
+        with mode, capture.Capture(tracker, target, functions) as cap:
             call = case_args.build_call(case, inp, module)
             try:
                 entry(**call)

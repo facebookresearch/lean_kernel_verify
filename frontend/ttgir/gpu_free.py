@@ -13,7 +13,7 @@ flags, descriptor shapes) is touched. Launches are intercepted separately (captu
 
 import contextlib
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import torch
 from torch.overrides import TorchFunctionMode
@@ -110,6 +110,64 @@ def _is_cuda(x) -> bool:
     return isinstance(x, str) and x.split(":")[0] == "cuda"
 
 
+class DefaultStream:
+    """Stand-in for what `torch.cuda.current_stream()` returns: device 0's default stream,
+    the stream every launch of the CPU run is reported on (CpuOnlyCudaDriver). Host code
+    reads its handle `cuda_stream` (e.g. to key per-stream buffers); any other attribute
+    (synchronize, events, priorities, ...) raises AttributeError, so host code that needs
+    more of the stream fails loudly instead of being silently faked."""
+
+    cuda_stream = 0
+
+    def __getattr__(self, name):
+        raise AttributeError(
+            f"the CPU-only stand-in of torch.cuda.current_stream() has only `cuda_stream`, "
+            f"not {name!r}"
+        )
+
+
+DEFAULT_STREAM = DefaultStream()
+
+
+def _device0(device) -> bool:
+    """`device` names CUDA device 0, the stand-ins' only device. A `cpu` device stands for
+    it: CudaOnCpu placed that device's tensors on the CPU."""
+    dev = torch.device(device) if isinstance(device, str) else device
+    if isinstance(dev, torch.device):
+        return dev.type == "cpu" or (dev.type == "cuda" and dev.index in (None, 0))
+    return dev is None or (type(dev) is int and dev == 0)
+
+
+def current_stream(device=None) -> DefaultStream:
+    """torch.cuda.current_stream on the CPU host: device 0 has no stream but its default
+    one. Any other device raises, as on a one-GPU host."""
+    if not _device0(device):
+        raise RuntimeError(
+            f"torch.cuda.current_stream({device!r}): the CPU-only host has CUDA device 0 only"
+        )
+    return DEFAULT_STREAM
+
+
+class CudaDevice:
+    """torch.cuda.device on the CPU host: a context that makes device 0 current, which it
+    already is (device_count 1, current_device 0), so entering and leaving change nothing.
+    -1 is torch's "no device" (no change either). Any other device raises, as on a
+    one-GPU host."""
+
+    def __init__(self, device):
+        if device != -1 and not _device0(device):
+            raise RuntimeError(
+                f"torch.cuda.device({device!r}): the CPU-only host has CUDA device 0 only"
+            )
+        self.idx = -1 if device == -1 else 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
 def install(num_sms: int, target: str) -> CudaOnCpu:
     """Install the device-query shims for `target` (a TARGETS key); returns the placement
     mode (use as a context).
@@ -140,4 +198,7 @@ def install(num_sms: int, target: str) -> CudaOnCpu:
     torch.cuda.current_device = lambda: 0
     torch.cuda.get_device_capability = lambda device=None: (props.major, props.minor)
     torch.cuda.get_device_properties = lambda device=None: props
+    # Stand-ins with only the parts host code may use (see the classes), not torch's types.
+    torch.cuda.current_stream = cast(Any, current_stream)
+    torch.cuda.device = cast(Any, CudaDevice)
     return CudaOnCpu()
