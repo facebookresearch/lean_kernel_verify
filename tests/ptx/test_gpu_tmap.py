@@ -83,7 +83,9 @@ def _encode(encode, a: dict, pad: list) -> tuple:
     # a CUtensorMap is 64-byte aligned
     at = ctypes.addressof(buf) + (-ctypes.addressof(buf)) % 64
 
-    def arr(t, xs):
+    def arr(
+        t: "type[ctypes.c_uint32] | type[ctypes.c_uint64]", xs: list[int]
+    ) -> "ctypes.Array[ctypes.c_uint32] | ctypes.Array[ctypes.c_uint64]":
         return (t * 5)(*(list(xs) + pad[len(xs) : 5]))
 
     rc = encode(
