@@ -74,6 +74,19 @@ Rules of kir.md beyond its field tables, which lean/KV relies on:
   "nbar" has neither `nb_open` nor `nb_rep` events. Only a P0-6 KIR's `named_bar` may
   have "all" (a boolean; true only with "sync" true): the instruction names no thread
   count.
+* P1-2 (kir.md, change 15): a P1 KIR may name the P1 specs it is decided for in a top-level
+  "p1" (a non-empty list of distinct labels "P1-1", "P1-2"; absent: ["P1-1"]); "tmem" is
+  present iff "P1-1" is named, `tmem` and `tmem_wait` events need P1-1, `named_bar` either.
+  The P1-2 events need P1-2: `bulk_store` (kind tensor | tensor_reduce | bulk |
+  bulk_reduce; w=32 `warp`, optional w=32 `lane` (absent: the elected lane); `sym` a string,
+  `src` an Expr, `bytes` a positive int; optional `tmap` {"base": string, "addr": Expr}),
+  `bulk_commit`, `bulk_wait` (`n` a non-negative int, `read` a boolean), `smem_write` (`sym`,
+  `offsets` TExpr and `mask` TExpr or null as gstore's, `bytes` a positive int, w=32 `warp`,
+  optional w=32 `lane`, optional boolean `sync` (no `lane` with it), optional boolean
+  `async` (the landing of an asynchronous copy), optional `cta`) and
+  `tmap_write` (`base` a string, `addr` an Expr, w=32 `warp`). A P1-2 KIR may give
+  "cta_threads", the CTA's thread count (a positive multiple of 32, at least the roles'
+  threads).
 * Clusters (kir.md, change 11): an optional top-level "cluster" [x, y, z] of positive ints
   (default [1, 1, 1]). Barrier events may name another CTA of the cluster: "cta" (arrive,
   expect_tx, wait, complete_tx) is a w=32 Expr, its rank in the cluster; "cta_mask"
@@ -148,10 +161,22 @@ EVENT_FIELDS = {
     "named_bar": ({"id", "count", "sync"}, {"all"}),
     "nb_open": ({"kind", "certain", "why", "id", "count", "sync"}, set()),
     "nb_rep": ({"begin", "why"}, {"key"}),
+    "bulk_store": ({"kind", "warp", "sym", "src", "bytes"}, {"lane", "tmap"}),
+    "bulk_commit": (set(), set()),
+    "bulk_wait": ({"n", "read"}, set()),
+    "smem_write": (
+        {"sym", "offsets", "mask", "bytes", "warp"},
+        {"lane", "sync", "async", "cta"},
+    ),
+    "tmap_write": ({"base", "addr", "warp"}, set()),
 }
 P1_EVENTS = ("tmem", "tmem_wait", "named_bar")
 NB_EVENTS = ("named_bar", "nb_open", "nb_rep")
 NB_KINDS = ("lane", "cond", "loop", "operand", "dispatch")
+# P1-2 "async store sources reuse ordered" events (kir.md, change 15)
+P1_2_EVENTS = ("bulk_store", "bulk_commit", "bulk_wait", "smem_write", "tmap_write")
+BULK_KINDS = ("tensor", "tensor_reduce", "bulk", "bulk_reduce")
+P1_LABELS = ("P1-1", "P1-2")
 TMEM_INSTS = ("ld", "st", "cp", "mma")
 RECT_USES = ("data", "d", "a", "sf")
 RECT_FIELDS = {"use", "write", "lane", "nlanes", "col", "ncols"}
@@ -169,7 +194,7 @@ TOP_FIELDS = {
     "roles",
     "case",
 }
-TOP_OPTIONAL = {"target", "compiler", "tmem", "cluster", "nbar"}
+TOP_OPTIONAL = {"target", "compiler", "tmem", "cluster", "nbar", "p1", "cta_threads"}
 CLUSTER_FIELDS = ("cta", "cta_mask")
 TENSOR_FIELDS = {
     "name",
@@ -213,6 +238,8 @@ class _Checker:
         self.barriers = set()
         self.work_fields = set()
         self.p1_events = 0  # tmem, tmem_wait and named_bar events seen
+        self.tmem_events = 0  # tmem and tmem_wait events seen (P1-1)
+        self.p1_2_events = 0  # P1-2 events seen
         self.role_warps = None  # warps of the role being checked
         self.role_tpi = None  # threads_per_issue of the role being checked
         self.cluster_size = 1  # CTAs per cluster
@@ -563,6 +590,9 @@ class _Checker:
         self.string(f"{path}.loc", s["loc"])
         if "bar" in s and not (isinstance(s["bar"], str) and s["bar"] in self.barriers):
             self.err(f"{path}.bar", f"unknown barrier {s['bar']!r}")
+        if ev in P1_2_EVENTS:
+            self.p1_2_event(path, ev, s, scope)
+            return
         for f in ("idx", "count", "bytes", "parity"):
             if f in s:
                 self.expr(f"{path}.{f}", s[f], scope)
@@ -712,9 +742,66 @@ class _Checker:
         if depth:
             self.err(path, f"{depth} nb_rep begin(s) without an end")
 
+    def _who(self, path: str, s: dict, scope: dict) -> None:
+        """The issuing thread of a P1-2 event: w=32 `warp`, optional w=32 `lane`."""
+        for f in ("warp", "lane"):
+            if f in s and self.expr(f"{path}.{f}", s[f], scope) not in (32, None):
+                self.err(f"{path}.{f}", "must have w=32")
+
+    def p1_2_event(self, path, ev, s, scope):
+        """bulk_store / bulk_commit / bulk_wait / smem_write / tmap_write (kir.md, change 15)."""
+        self.p1_2_events += 1
+        if ev == "bulk_wait":
+            self.int_field(f"{path}.n", s["n"], 0)
+            self.bool_field(f"{path}.read", s["read"])
+            return
+        if ev == "bulk_commit":
+            return
+        self._who(path, s, scope)
+        if ev == "tmap_write":
+            self.string(f"{path}.base", s["base"])
+            if self.expr(f"{path}.addr", s["addr"], scope) not in (32, 64, None):
+                self.err(f"{path}.addr", "must have w=32 or 64")
+            return
+        self.string(f"{path}.sym", s["sym"])
+        self.int_field(f"{path}.bytes", s["bytes"], 1)
+        if ev == "bulk_store":
+            if s["kind"] not in BULK_KINDS:
+                self.err(f"{path}.kind", f"must be one of {BULK_KINDS}")
+            if self.expr(f"{path}.src", s["src"], scope) not in (32, 64, None):
+                self.err(f"{path}.src", "must have w=32 or 64")
+            t = s.get("tmap")
+            if t is not None and self.keys(f"{path}.tmap", t, {"base", "addr"}):
+                self.string(f"{path}.tmap.base", t["base"])
+                if self.expr(f"{path}.tmap.addr", t["addr"], scope) not in (
+                    32,
+                    64,
+                    None,
+                ):
+                    self.err(f"{path}.tmap.addr", "must have w=32 or 64")
+            return
+        self._check_cluster_fields(path, ev, s, scope)
+        if "async" in s:
+            self.bool_field(f"{path}.async", s["async"])
+        if "sync" in s:
+            self.bool_field(f"{path}.sync", s["sync"])
+            if s["sync"] is True and "lane" in s:
+                self.err(f"{path}.lane", "a warp-collective write (sync) has no lane")
+        off = self.texpr(f"{path}.offsets", s["offsets"], scope)
+        if off is not None and off[1] not in (32, 64):
+            self.err(f"{path}.offsets", "byte offsets must have w=32 or 64")
+        if s["mask"] is not None:
+            m = self.texpr(f"{path}.mask", s["mask"], scope)
+            if m is not None and m[1] != 1:
+                self.err(f"{path}.mask", "mask must have w=1")
+            if m is not None and off is not None and m[0] != off[0]:
+                self.err(f"{path}.mask", f"mask shape {m[0]} != offsets shape {off[0]}")
+
     def p1_event(self, path, ev, s, scope):
         """tmem / tmem_wait / named_bar events of a P1 KIR (kir.md, change 10)."""
         self.p1_events += 1
+        if ev != "named_bar":
+            self.tmem_events += 1
         if ev == "tmem_wait":
             self.bool_field(f"{path}.ld", s["ld"])
             return
@@ -773,25 +860,69 @@ class _Checker:
                 f"a {inst} in a role of {self.role_warps} warps (cp/mma roles must be one warp)",
             )
 
+    def p1_specs(self, k):
+        """The P1 specs of the KIR (top-level "p1", else ["P1-1"] with a "tmem", else
+        none: a P0 KIR), after checking "p1" (kir.md, change 15)."""
+        if "p1" not in k:
+            return ["P1-1"] if "tmem" in k else []
+        p = k["p1"]
+        if not (
+            isinstance(p, list)
+            and p
+            and all(x in P1_LABELS for x in p)
+            and len(set(p)) == len(p)
+        ):
+            self.err(
+                "$.p1", f"expected a non-empty list of distinct labels of {P1_LABELS}"
+            )
+            return []
+        if ("P1-1" in p) != ("tmem" in k):
+            self.err("$.p1", "names P1-1 iff the KIR has a top-level 'tmem'")
+        return p
+
     def tmem_top(self, k):
+        specs = self.p1_specs(k)
+        if self.p1_2_events and "P1-2" not in specs:
+            self.err("$", "P1-2 events in a KIR whose 'p1' does not name P1-2")
+        if "cta_threads" in k:
+            n = k["cta_threads"]
+            roles = sum(
+                r.get("warps", 0) for r in k.get("roles", []) if is_int(r.get("warps"))
+            )
+            if "P1-2" not in specs:
+                self.err("$.cta_threads", "only in a KIR whose 'p1' names P1-2")
+            elif not (is_int(n) and n > 0 and n % 32 == 0 and n >= 32 * roles):
+                self.err(
+                    "$.cta_threads",
+                    "expected a positive multiple of 32, at least the roles' threads",
+                )
+        if specs:
+            for path, n, warps in self.few_arrivals:
+                self.err(
+                    path,
+                    f"{n} arrival(s) per arrive in a role of {warps} warps: in a P1 KIR every "
+                    "warp of a role issues each mbarrier arrive (split the role by issuing warps)",
+                )
         t = k.get("tmem")
-        if t is None:
+        if "p1" in k:
+            if self.tmem_events and "P1-1" not in specs:
+                self.err(
+                    "$",
+                    "tmem or tmem_wait events in a KIR whose 'p1' does not name P1-1",
+                )
+            if t is None:
+                return
+        elif t is None:
             if self.p1_events:
                 self.err(
                     "$",
                     "tmem, tmem_wait or named_bar events without a top-level 'tmem' (P1 KIR)",
                 )
             return
-        if not self.p1_events:
+        elif not self.p1_events:
             self.err(
                 "$.tmem",
                 "a top-level 'tmem' without tmem, tmem_wait or named_bar events",
-            )
-        for path, n, warps in self.few_arrivals:
-            self.err(
-                path,
-                f"{n} arrival(s) per arrive in a role of {warps} warps: in a P1 KIR every "
-                "warp of a role issues each mbarrier arrive (split the role by issuing warps)",
             )
         if not self.keys("$.tmem", t, {"cols", "base"}):
             return
@@ -851,8 +982,8 @@ class _Checker:
         self.nbar = "nbar" in k
         if self.nbar and not isinstance(k["nbar"], dict):
             self.err("$.nbar", "expected an object")
-        if self.nbar and "tmem" in k:
-            self.err("$", "a KIR with both 'nbar' (P0-6) and 'tmem' (P1)")
+        if self.nbar and ("tmem" in k or "p1" in k):
+            self.err("$", "a KIR with both 'nbar' (P0-6) and 'tmem' or 'p1' (P1)")
         self._check_header(k)
         self._check_cluster(k)
         self._check_params(k)

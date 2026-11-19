@@ -18,6 +18,11 @@ Translation switch (the PTX translation is experimental and opt-in):
 LKV_FRONTEND=ptx translates each specialization's PTX instead (build_ptx: the PTX core's
 Facts, frontend/ptx/translate.py, with this file's naming, tensors, inputs and checks;
 KIR `ir` "ptx"); unset or "legacy" is the TTGIR translation above, unchanged.
+
+P1 pass (LKV_FRONTEND=ptx only; LKV_P1=0 skips it): the PTX core's P1-2 events
+(frontend/ptx/bulk.py; references/kir.md change 15) give a P1 KIR <spec>.p1.json per
+specialization with a bulk async store, logged as `[to_kir] <spec>: P1 (P1-2): ...`, or
+`P1 refused|error|not_applicable: <why>`; it never changes the P0 KIR or the exit status.
 """
 
 import argparse
@@ -1553,14 +1558,20 @@ def _add_clc(tensors: list, params: list) -> None:
 
 
 def build_ptx(
-    where: Path, dump: dict, key: str, case: dict, geometry: tuple | None = None
-) -> dict:
+    where: Path,
+    dump: dict,
+    key: str,
+    case: dict,
+    geometry: tuple | None = None,
+    p1: bool = False,
+) -> dict | None:
     """The KIR of a specialization from its PTX (LKV_FRONTEND=ptx): the PTX
     core's Facts (frontend/ptx/translate.py) assembled as build() assembles the
     Translator's, with the same names, tensors (host descriptors and the CLC tables
     included), params, inputs and checks. `geometry`: the cluster dims every cluster
     of the launches has instead of their regular ones (preferred_geometry), with the
-    inputs whose grid they divide."""
+    inputs whose grid they divide. With `p1` the P1 KIR of P1-2 (policy p1 ["P1-2"];
+    top-level `p1`), None if the kernel has no bulk store."""
     # Imported here: the legacy translation must not depend on the new core while both run.
     from ..ptx import anchors, parse as ptx_parse, translate as T
 
@@ -1588,10 +1599,13 @@ def build_ptx(
     pol = T.policy("ttgir", src_root=dump["src_root"], params=T.param_table(records, "ttgir", fn),
                    tensors={n: {"elem_bytes": a["elem_bytes"]} for n, a in snap0.items()
                             if a["kind"] == "tensor"}, blocks=_desc_blocks(launches),
-                   work={"fields": list(work), "mode": "gate", "per": per, "sites": sites})  # fmt: skip
+                   work={"fields": list(work), "mode": "gate", "per": per, "sites": sites},
+                   **({"p1": ["P1-2"]} if p1 else {}))  # fmt: skip
     facts = T.translate(text, fn.name, records, pol)
     if facts.refusals:
         raise KirError(facts.refusals[0]["msg"], kind=facts.refusals[0]["kind"])
+    if p1 and not facts.p1:
+        return None
     roles = [{k: r[k] for k in ("name", "warps", "threads_per_issue", "body")}
              for r in facts.roles]  # fmt: skip
     metadata = {n for n, t in facts.tensors.items() if t["metadata"]}
@@ -1627,11 +1641,14 @@ def build_ptx(
     if geometry is not None and facts.clc:
         raise KirError("CLC with a preferred cluster geometry (gap: which clusters a "
                        "try_cancel may cancel when the sizes mix is not modeled)")  # fmt: skip
-    kir = _document(dump, key, case, "ptx", facts.target, params, tensors, facts.barriers,
+    doc = _document(dump, key, case, "ptx", facts.target, params, tensors, facts.barriers,
                     roles, launches, written, {}, facts.clc, facts.cluster)  # fmt: skip
     if geometry is not None:
-        kir["case"]["name"] += geometry_suffix(geometry)
-    return kir
+        doc["case"]["name"] += geometry_suffix(geometry)
+    if p1:
+        doc["p1"] = facts.p1
+        doc["cta_threads"] = facts.cta_threads
+    return doc
 
 
 def _geometry_launches(launches: list, geometry: tuple) -> list:
@@ -2310,6 +2327,7 @@ def translate(dump_path: Path, case: dict) -> dict:
             try:
                 if ptx:
                     kir = build_ptx(dump_path.parent, dump, key, case, geometry)
+                    assert kir is not None  # None only for the P1 pass (p1=True)
                     if geometry is None:
                         try:
                             pref = preferred_geometry(dump, key)
@@ -2333,6 +2351,32 @@ def translate(dump_path: Path, case: dict) -> dict:
             results[name] = kir
         if unchecked is not None:
             results[key + "@cluster"] = unchecked
+    return results
+
+
+def translate_p1(dump_path: Path, case: dict) -> dict:
+    """The P1 pass (module doc): {spec: P1 KIR, None (no bulk store) or the exception that
+    refused it}; writes <spec>.p1.json for each P1 KIR."""
+    dump = json.loads(dump_path.read_text())
+    results: dict[str, dict | Exception | None] = {}
+    for key in dump["specs"]:
+        try:
+            kir = build_ptx(dump_path.parent, dump, key, case, p1=True)
+            violations = [] if kir is None else kir_contract.validate(kir)
+            if violations:
+                raise KirError(f"P1 KIR contract (frontend/kir.py): {'; '.join(violations[:5])}",
+                               kind="error")  # fmt: skip
+        except (KirError, SliceError, OpError, ParseError) as e:
+            results[key] = e
+            continue
+        except Exception as e:  # noqa: BLE001 - the P1 pass never stops the P0 KIR
+            results[key] = KirError(
+                f"P1 pass internal error: {type(e).__name__}: {e}", kind="error"
+            )
+            continue
+        if kir is not None:
+            (dump_path.parent / f"{key}.p1.json").write_text(json.dumps(kir))
+        results[key] = kir
     return results
 
 
@@ -2382,6 +2426,17 @@ def main() -> None:
             )
         else:
             print(f"[to_kir] {key}: P0-6 {key}.nb.json ({summary(r)})", file=sys.stderr)
+    if frontend() == "ptx" and os.environ.get("LKV_P1") != "0":
+        for key, r in translate_p1(args.dump, case).items():
+            if r is None:
+                print(f"[to_kir] {key}: P1 not_applicable: the kernel has no bulk async store",
+                      file=sys.stderr)  # fmt: skip
+            elif isinstance(r, Exception):
+                st = "error" if failure_kind(r) == "error" else "refused"
+                print(f"[to_kir] {key}: P1 {st}: {r}", file=sys.stderr)
+            else:
+                print(f"[to_kir] {key}: P1 ({', '.join(r['p1'])}): {key}.p1.json ({summary(r)})",
+                      file=sys.stderr)  # fmt: skip
     sys.exit(1 if any(isinstance(r, Exception) for r in results.values()) else 0)
 
 

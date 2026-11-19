@@ -15,11 +15,12 @@ one `KV.Input` per case input (each with the case's `elision_flags`), then
       notes with IR loc, printed before any theorem (lean/KV/Check.lean, Report.render);
   (b) one theorem `KV.Holds .<spec> kernel <input>` per (spec, input), closed by
       `native_decide`, so a failing spec fails the check.
-A P1 KIR (top-level `tmem`, file suffix .p1.json; references/kir.md change 10) emits
-`tmem := some {...}` in the kernel, `#eval KV.runP1 kernel <input>` and the P1 theorems
-(`KV.Holds .tmemReuse`) instead; the output for a P0 KIR is unchanged. A P0-6 KIR (top-level
-`nbar`, file suffix .nb.json; change 14) emits `#eval KV.runNb kernel <input>` and the P0-6
-theorems (`KV.Holds .namedBarriers`).
+A P1 KIR (top-level `tmem` or `p1`, file suffix .p1.json; references/kir.md changes 10
+and 15) emits `tmem := some {...}` and `p1 := [...]` in the kernel, `#eval KV.runP1
+kernel <input>` and the theorems of its P1 specs (`KV.Holds .tmemReuse`, `.storeReuse`)
+instead; the output for a P0 KIR is unchanged. A P0-6 KIR (top-level `nbar`, file suffix
+.nb.json; change 14) emits `#eval KV.runNb kernel <input>` and the P0-6 theorems
+(`KV.Holds .namedBarriers`).
 """
 
 import argparse
@@ -42,7 +43,8 @@ SPECS = (
     ("barrier", "P0_4"),
     ("maskElision", "P0_5"),
 )
-SPECS_P1 = (("tmemReuse", "P1_1"),)
+SPECS_P1 = (("tmemReuse", "P1_1"), ("storeReuse", "P1_2"))
+P1_LABELS = {"P1_1": "P1-1", "P1_2": "P1-2"}
 SPECS_NB = (("namedBarriers", "P0_6"),)
 KEYWORD_CTORS = {"let", "for", "while", "if"}
 
@@ -228,6 +230,22 @@ def event(s):
                     opt_expr(s["id"]), opt_expr(s["count"]), lbool(s["sync"]), loc)  # fmt: skip
     if ev == "nb_rep":
         return ctor(ev, lbool(s["begin"]), lstr(s["why"]), lstr(s.get("key", "")), loc)
+    if ev == "bulk_store":
+        t = s.get("tmap")
+        tmap = "none" if t is None else f"(some ({lstr(t['base'])}, {expr(t['addr'])}))"
+        return ctor(ev, "." + s["kind"], expr(s["warp"]), opt_expr(s.get("lane")),
+                    lstr(s["sym"]), expr(s["src"]), str(s["bytes"]), tmap, loc)  # fmt: skip
+    if ev == "bulk_commit":
+        return ctor(ev, loc)
+    if ev == "bulk_wait":
+        return ctor(ev, str(s["n"]), lbool(s["read"]), loc)
+    if ev == "smem_write":
+        mask = "none" if s["mask"] is None else f"(some {texpr(s['mask'])})"
+        return ctor(ev, lstr(s["sym"]), texpr(s["offsets"]), mask, str(s["bytes"]),
+                    expr(s["warp"]), opt_expr(s.get("lane")), lbool(s.get("sync", False)),
+                    lbool(s.get("async", False)), opt_expr(s.get("cta")), loc)  # fmt: skip
+    if ev == "tmap_write":
+        return ctor(ev, lstr(s["base"]), expr(s["addr"]), expr(s["warp"]), loc)
     raise AssertionError(ev)
 
 
@@ -377,12 +395,17 @@ def emit(k, src_name):
     ]
     if k.get("cluster", [1, 1, 1]) != [1, 1, 1]:
         out.append(f"  cluster := {llist(map(str, k['cluster']))}")
-    p1 = "tmem" in k
-    if p1:
+    p1 = "tmem" in k or "p1" in k
+    if "tmem" in k:
         t = k["tmem"]
         out.append(
             f"  tmem := some {{ cols := {t['cols']}, zeroBase := {lbool(t['base'] == 'zero')} }}"
         )
+    if "p1" in k:
+        out.append(f"  p1 := {llist(map(lstr, k['p1']))}")
+    if "cta_threads" in k:
+        out.append(f"  cta_threads := some {k['cta_threads']}")
+    labels = k.get("p1", ["P1-1"])
     out.append("")
     inputs = []
     elision = llist(map(lstr, k["case"].get("elision_flags", [])))
@@ -423,7 +446,14 @@ def emit(k, src_name):
     out += [f"#eval {run} kernel {name}" for name in inputs]
     out.append("")
     for name in inputs:
-        for spec, label in SPECS_P1 if p1 else SPECS_NB if nb else SPECS:
+        specs = (
+            [x for x in SPECS_P1 if P1_LABELS[x[1]] in labels]
+            if p1
+            else SPECS_NB
+            if nb
+            else SPECS
+        )
+        for spec, label in specs:
             out.append(
                 f"theorem {label}_{spec}__{name} : KV.Holds .{spec} kernel {name} := by native_decide"
             )

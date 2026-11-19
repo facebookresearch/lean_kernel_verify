@@ -95,8 +95,21 @@ and a CTA with no work included; `cases.md` says which inputs a case checks.
   ledger's lockstep contents order leave the input undecided. Basis: the PTX ISA's
   tcgen05 completion rules (a load or store completes at the issuing warp's
   `tcgen05.wait::ld`/`::st`, a copy or MMA at a landed `tcgen05.commit`).
-* Buffer reuse WAR/RAW across stages and persistent tiles in shared and global memory,
-  and TMEM in TTGIR/TLX kernels (E12; needs interleavings).
+* **Implemented: P1-2 async store sources reuse ordered** (the PTX translation of
+  TLX/Triton kernels, `specs.md` "P1-2"): a write of the shared memory a bulk async store
+  (TMA or bulk, store or reduce) reads, or of the tensormap of an in-kernel descriptor it
+  reads, must follow a `cp.async.bulk.wait_group{.read}` of the store's issuing thread that
+  completed its group, by sound happens-before, or precede the store. It catches the classic
+  staging-buffer race (an epilogue that rewrites its staging buffer before the previous TMA
+  store read it) and the descriptor-rebuild race (a descriptor rebuilt in its global slot per
+  work item while the previous item's stores through it may still read the tensormap).
+  Basis: the PTX ISA's completion rules for bulk asynchronous copies (modifying the source or
+  the tensor descriptor before completion is undefined behavior; `.read` waits for the reads
+  of the source and the tensormap).
+* Buffer reuse WAR/RAW across stages and persistent tiles in shared and global memory
+  beyond bulk store sources (E12: e.g. a TMA load overwriting a tile other warps still
+  read; the data-ready side of loads), and TMEM in TTGIR/TLX kernels (needs
+  interleavings).
 * Global deadlock freedom: wait cycles that depend on timing, minimum ring depth (cycles
   certain in the lockstep model are P0-2).
 * Completion/wait work-item correspondence: the k-th completion of a slot and a role's

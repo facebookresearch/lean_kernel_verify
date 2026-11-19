@@ -67,10 +67,13 @@ Policy (a dict; `policy()` fills the family defaults):
     tensors         {tensor: {"elem_bytes"}} of the tensors the pointer params name
                     (CuTe: optionally the first launch's "shape" and "strides", which
                     pick the base of a descriptor over an aliased tensor, tma.py)
-    p1              True: the P1 pass (CuTe only, tmem.py): the roles also carry the
-                    tmem, tmem_wait and named_bar events of P1-1, a role whose warps
-                    issue an mbarrier wait, arrive or commit only in part is split, and
-                    Facts.tmem is set (refusals tagged R1-R10)
+    p1              True or ["P1-1"]: the P1 pass of P1-1 (CuTe only, tmem.py): the roles
+                    also carry the tmem, tmem_wait and named_bar events of P1-1, a role
+                    whose warps issue an mbarrier wait, arrive or commit only in part is
+                    split, and Facts.tmem is set (refusals tagged R1-R10); ["P1-2"] (any
+                    family, bulk.py): the bulk store, group, write and named_bar events of
+                    P1-2, roles split alike (a split TTGIR partition's parts are named
+                    <partition>_w<first>_<last>), Facts.p1 set; both: both
     work            {"fields": [name, ...], "mode": "gate" (TTGIR) | "each" (CuTe),
                     "per": [fields naming tensor segments], "sites": anchor sites}: a
                     site is anchors.Site or a dict {field, kind: "load" | "assign" |
@@ -106,6 +109,10 @@ Facts (refusals non-empty: the variant is refused, everything else empty):
                frontend/ttgir/to_kir.py build does for its Translator's uses_clc
     tmem       the P1 pass: the P1 KIR's top-level `tmem` {"cols", "base"}, None if the
                kernel allocates and accesses no TMEM (P1-1 has nothing to check)
+    p1         the P1 pass of P1-2: the P1 KIR's top-level `p1` (kir.md change 15), [] if
+               the kernel has no bulk store (P1-2 has nothing to check) or P1-2 was not
+               asked for; then also cta_threads, the block's threads (KIR `cta_threads`: a
+               named barrier of that count has every thread of the CTA, idle warps included)
     refusals   [{"kind": "gap" | "error", "msg"}]; an exception of the core is an "error"
                refusal (at the instruction being translated, if any), never raised
 
@@ -129,6 +136,7 @@ if __package__ in (None, ""):  # python3 -I path/to/translate.py
     __package__ = "ptx"  # noqa: A001
 
 from . import (  # noqa: E402
+    bulk,
     cfg as C,
     cluster,
     interp,
@@ -153,6 +161,12 @@ DEFAULTS = {
 }  # fmt: skip
 
 
+# a bulk store (P1-2's subject): cp{.reduce}.async.bulk{.tensor.Nd}.global.shared{::cta}...
+_BULK_STORE = re.compile(
+    r"cp(\.reduce)?\.async\.bulk(\.tensor\.\dd)?\.global\.shared(::cta)?\."
+)
+
+
 def policy(family: str, **overrides) -> dict:
     return {**DEFAULTS[family], "src_root": "", "params": [], "tensors": {},
             "work": {"fields": [], "mode": "gate" if family == "ttgir" else "each",
@@ -175,6 +189,8 @@ class Facts:
     descs: dict = field(default_factory=dict)
     values: list = field(default_factory=list)
     tmem: dict | None = None
+    p1: list = field(default_factory=list)
+    cta_threads: int = 0
     refusals: list = field(default_factory=list)
 
 
@@ -190,7 +206,7 @@ def translate(ptx_text: str, entry: str, launch_records: list, pol: dict) -> Fac
         facts.refusals.append({"kind": "error", "msg": f"{type(e).__name__}: {e}"})
     if facts.refusals:
         facts.roles, facts.barriers, facts.tensors, facts.params = [], [], {}, {}
-        facts.descs, facts.values, facts.tmem = {}, [], None
+        facts.descs, facts.values, facts.tmem, facts.p1 = {}, [], None, []
     return facts
 
 
@@ -202,10 +218,14 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
     fn = module.function(entry)
     facts.target = module.target.removesuffix("a")
     facts.block, facts.cluster = _launch_dims(fn, records)
+    specs = ["P1-1"] if pol.get("p1") is True else list(pol.get("p1") or [])
     tcgen05 = any(i.opcode.startswith("tcgen05.") for i in fn.instructions())
-    p1 = tmem.P1() if pol.get("p1") and tcgen05 else None  # interp.Kernel.p1
-    if p1 is not None and pol["family"] != "cute":
-        raise interp.Unsupported("P1", fn.name, "no P1 pass for Triton kernels")
+    stores = any(_BULK_STORE.match(i.opcode) for i in fn.instructions())
+    specs = [s for s in specs if (tcgen05 if s == "P1-1" else stores)]
+    if "P1-1" in specs and pol["family"] != "cute":
+        raise interp.Unsupported("P1", fn.name, "no P1-1 pass for Triton kernels")
+    extern = {v.name for v in module.vars + fn.vars if v.space == "shared" and v.extern}
+    p1 = tmem.P1(specs, extern) if specs else None  # interp.Kernel.p1
     switches = C.lower_switches(fn)
     cfg = C.build(fn)
     roles, dispatch = C.roles(cfg, pol["family"])
@@ -251,9 +271,17 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
     facts.barriers = mem.barriers(translators)
     facts.clc = sync.finish(translators)
     facts.tmem = p1.top(translators) if p1 is not None else None
+    if p1 is not None and p1.bulk is not None and bulk.finish(p1.bulk, translators):
+        facts.p1 = ["P1-1", "P1-2"] if facts.tmem is not None else ["P1-2"]
+        facts.cta_threads = facts.block[0] * facts.block[1] * facts.block[2]
+    parts = {}  # partition -> its translators (a P1 pass splits a partition by warps)
+    for tr in translators:
+        parts[tr.name] = parts.get(tr.name, 0) + 1
     for tr in translators:
         name = (
             tr.name
+            if pol["roles"] == "partition" and parts[tr.name] == 1
+            else f"{tr.name}_w{tr.w0}_{tr.w0 + tr.nw - 1}"
             if pol["roles"] == "partition"
             else f"warps{tr.w0}_{tr.w0 + tr.nw - 1}"
         )

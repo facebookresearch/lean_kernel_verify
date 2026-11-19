@@ -22,7 +22,9 @@
 #      and notes, e.g. summaries and NOTES counts).
 # 3. The same for every tests/lean/p1/*.kir.json fixture (P1 KIR, P1-1 TMEM reuse ordered;
 #    written by p1/make_fixtures.py) against p1/expected.txt (one P1-1 column),
-#    p1/expected_messages.txt and p1/report_checks.txt.
+#    p1/expected_messages.txt and p1/report_checks.txt, and for every
+#    tests/lean/p1_2/*.kir.json fixture (P1-2 async store sources reuse ordered; written by
+#    p1_2/make_fixtures.py) against p1_2/expected.txt (one P1-2 column) and its message files.
 # 4. The same for every tests/lean/nb/*.kir.json fixture (P0-6 KIR, named barriers
 #    convergent; written by nb/make_fixtures.py) against nb/expected.txt (one P0-6 column),
 #    nb/expected_messages.txt and nb/report_checks.txt.
@@ -131,6 +133,49 @@ for f in "$P1"/*.kir.json; do
       grep -qF -- "$line" "$OUT/p1_$n.out" || bad "p1/$n: report lacks: $line"
     fi
   done < <(grep -v '^#' "$P1/report_checks.txt")
+done
+
+# P1-2 fixtures: one P1-2 verdict per input (KV.runP1, theorem KV.Holds .storeReuse).
+P12="$T/p1_2"
+for f in "$P12"/*.kir.json; do
+  n="$(basename "$f" .kir.json)"
+  nfix=$((nfix + 1))
+  python3 -I "$S/frontend/kir.py" "$f" || { bad "p1_2/$n: invalid KIR"; continue; }
+  python3 -I "$S/frontend/emit_lean.py" "$f" -o "$OUT/p1_2_$n.lean" || { bad "p1_2/$n: emit_lean.py failed"; continue; }
+  "$S/scripts/run_lean_check.sh" "$OUT/p1_2_$n.lean" >"$OUT/p1_2_$n.out" 2>&1
+  status=$?
+  want="$(awk -v f="$n" '$1 == f { printf "VERDICT %s P1-2 %s\n", $2, $3 }' "$P12/expected.txt" | sort)"
+  got="$(grep '^VERDICT ' "$OUT/p1_2_$n.out" | sort)"
+  if [[ -z "$want" ]]; then
+    bad "p1_2/$n: no rows in p1_2/expected.txt"
+    continue
+  fi
+  if [[ "$want" != "$got" ]]; then
+    bad "p1_2/$n: verdicts differ from p1_2/expected.txt (< expected, > got; output in $OUT/p1_2_$n.out)"
+    diff <(echo "$want") <(echo "$got") | grep '^[<>]' | sed 's/^/    /'
+  fi
+  nverdicts=$((nverdicts + $(grep -c . <<<"$want")))
+  want_thm="$(awk -v f="$n" '$1 == f && $3 == "FAIL" { printf "storeReuse %s\n", $2 }' "$P12/expected.txt" | sort)"
+  got_thm="$(sed -n 's/^ *KV\.Holds KV\.SpecId\.\([A-Za-z]*\) kernel input[0-9]*_\(.*\)$/\1 \2/p' "$OUT/p1_2_$n.out" | sort)"
+  nerr="$(grep -c ': error' "$OUT/p1_2_$n.out")"
+  if [[ "$want_thm" != "$got_thm" ]] || (( nerr != $(grep -c . <<<"$got_thm") )); then
+    bad "p1_2/$n: refuted theorems differ from the expected FAILs, or other Lean errors ($nerr errors; see $OUT/p1_2_$n.out)"
+  fi
+  if (( (status != 0) != ($(grep -c . <<<"$want_thm") > 0) )); then
+    bad "p1_2/$n: lean exit status $status does not match the expected verdicts"
+  fi
+  while IFS=' ' read -r fx msg; do
+    [[ "$fx" == "$n" ]] || continue
+    grep -qF -- "$msg" "$OUT/p1_2_$n.out" || bad "p1_2/$n: report lacks: $msg"
+  done < <(grep -v '^#' "$P12/expected_messages.txt")
+  while IFS=' ' read -r fx line; do
+    [[ "$fx" == "$n" ]] || continue
+    if [[ "$line" == '!'* ]]; then
+      if grep -qF -- "${line:1}" "$OUT/p1_2_$n.out"; then bad "p1_2/$n: report contains: ${line:1}"; fi
+    else
+      grep -qF -- "$line" "$OUT/p1_2_$n.out" || bad "p1_2/$n: report lacks: $line"
+    fi
+  done < <(grep -v '^#' "$P12/report_checks.txt")
 done
 
 # P0-6 fixtures: one P0-6 verdict per input (KV.runNb, theorem KV.Holds .namedBarriers).

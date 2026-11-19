@@ -257,6 +257,14 @@ it names in `elision_flags` the flags that select a mask-elided fast path.
    no arrive is a forced pairing (every warp blocks in every operation, outside every
    repeated region), or a certain divergence the model admits (strong loads may differ
    between threads; spin loops end in different iterations).
+8. For P1-2 only (`specs.md`, "P1-2"): item 6's P1 ledger and role splitting; the
+   PTX ISA reading that `cp.async.bulk.wait_group.read` also waits for the reads
+   of the store's tensormap (its `.read` text lists them); `elect.sync` electing the
+   same lane for the same membermask; the write set of the P1-2 pass (every PTX
+   instruction that writes shared memory is a `smem_write`, refused, or statically
+   disjoint from every store source; `frontend_ptx.md`, "P1-2 pass"); the
+   participants of a named barrier being its roles' threads, every thread of the
+   CTA for a barrier whose count is the CTA's (`cta_threads`).
 
 A verdict covers the inputs in the case file, not all shapes. The report says
 so.

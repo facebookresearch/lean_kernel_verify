@@ -33,6 +33,7 @@ deadlock freedom in general ([Limits](#limits)).
 | P0-5 mask-elision soundness         | an input on a host-selected mask-free fast path that violates P0-1 or P0-3                                                                                                 |
 | P0-6 named barriers convergent      | a named-barrier instance (`bar.sync`, `bar.arrive`) that the warps its count names do not all reach with one count, or a wait on one that never ends (from the PTX)       |
 | P1-1 TMEM reuse ordered (CuTe only) | two tcgen05 ld/st/cp/mma accesses of different roles to a common TMEM cell, one of them a write, that the kernel's barriers and waits do not order                         |
+| P1-2 async store sources reuse ordered (TLX/Triton, PTX translation) | a write to the shared memory or the tensormap a TMA or bulk store may still read (before its `cp.async.bulk.wait_group.read`, resp. its full wait) that the kernel's barriers and waits do not order after that read |
 
 Each (compiled variant, input, spec) gets one of four verdicts: **PASS** (the theorem
 is proved), **FAIL** (a certain counterexample, reported at the kernel's source line),

@@ -33,12 +33,16 @@ export write fbsource PATHs at REV under OUT_DIR with read-only `sl files`/`sl c
        itself by its full path).
        OUT_DIR/LKV_EXPORT.json records the revision; `run --src OUT_DIR` reports it.
 
-P1-1 (TMEM reuse ordered, CuTe only): the CuTe frontend also writes a P1 KIR per variant
-(`<kernel>__<digest>.p1.json`); run checks it like a P0 KIR (unless --no-p1) and reports
-its verdicts in a section of their own and in report.json "variants_p1" / "totals_p1" /
-"p1_not_checked" (refused, failed or not applicable P1 translations; TTGIR variants are
-"not checked"). P1-1's FAIL and UNDECIDED verdicts count toward the outcome only with
---p1-strict; its ERRORs always do (they are failures of LKV).
+P1 specs: P1-1 (TMEM reuse ordered, CuTe only) and P1-2 (async store sources reuse
+ordered, the PTX translation of TLX/Triton kernels). The CuTe frontend also writes a P1
+KIR per variant (`<kernel>__<digest>.p1.json`, P1-1), the TTGIR frontend under
+LKV_FRONTEND=ptx one per specialization with a bulk store (`<spec>.p1.json`, P1-2; its
+top-level "p1" names the specs it decides); run checks it like a P0 KIR (unless --no-p1)
+and reports its verdicts in a section of their own and in report.json "variants_p1" /
+"totals_p1" / "p1_not_checked" (refused, failed or not applicable P1 translations, each
+with the P1 specs it concerns; P1-1 of TTGIR variants is "not checked", and so is P1-2
+of the legacy TTGIR translation). The P1 specs' FAIL and UNDECIDED verdicts count toward
+the outcome only with --p1-strict; their ERRORs always do (they are failures of LKV).
 
 P0-6 (named barriers convergent, both families): to_kir also writes a P0-6 KIR per variant
 from its PTX, whatever the translation and also where the P0 translation refuses the
@@ -127,6 +131,7 @@ SPECS = {
     "maskElision": "P0-5",
     "namedBarriers": "P0-6",
     "tmemReuse": "P1-1",
+    "storeReuse": "P1-2",
 }
 EXPORT_MARK = "LKV_EXPORT.json"
 TITLES = {
@@ -137,13 +142,25 @@ TITLES = {
     "P0-5": "mask-elision soundness",
     "P0-6": "named barriers convergent",
     "P1-1": "TMEM reuse ordered",
+    "P1-2": "async store sources reuse ordered",
 }
 LABELS = ["P0-1", "P0-2", "P0-3", "P0-4", "P0-5"]
-# P1 specs: decided on the P1 KIR (`<kernel>__<digest>.p1.json`, CuTe only) and reported
-# in their own section; they never change the exit status unless --p1-strict.
-LABELS_P1 = ["P1-1"]
+# P1 specs: decided on the P1 KIR (`<kernel>__<digest>.p1.json`, `<spec>.p1.json`) and
+# reported in their own section; they never change the exit status unless --p1-strict.
+LABELS_P1 = ["P1-1", "P1-2"]
 # P0-6: decided on the P0-6 KIR (`.nb.json`) of every variant, reported with the P0 specs.
 LABELS_NB = ["P0-6"]
+
+
+def kir_labels(k):
+    """The specs a KIR is decided for: its top-level "p1" (kir.md change 15), else P1-1
+    for a P1 KIR with a "tmem" (change 10), P0-6 for a P0-6 KIR (change 14), else the P0
+    specs."""
+    if "p1" in k:
+        return k["p1"]
+    return ["P1-1"] if "tmem" in k else LABELS_NB if "nbar" in k else LABELS
+
+
 # Outcomes of a verdict and of a run (module doc), and the run's exit status.
 OUTCOMES = ("PASS", "FAIL", "ERROR", "UNDECIDED")
 EXIT_STATUS = {"PASS": 0, "UNDECIDED": 0, "FAIL": 1, "ERROR": 2}
@@ -374,7 +391,7 @@ def run_ttgir(case_path, root, fe, logs, sel, target, jobs=1):
     )
     if status != 0:
         raise RuntimeError(f"TTGIR dump failed:\n{tail(logs / 'dump.log')}")
-    for old in [*fe.glob("*.kir.json"), *fe.glob("*.nb.json")]:
+    for old in [*fe.glob("*.kir.json"), *fe.glob("*.nb.json"), *fe.glob("*.p1.json")]:
         old.unlink()
     status = buck_run(
         "frontend/ttgir:to_kir",
@@ -427,6 +444,7 @@ def run_ttgir(case_path, root, fe, logs, sel, target, jobs=1):
             "variant": k.name.removesuffix(".kir.json"),
             "status": "not_checked",
             "error": "P1-1 not checked: the TTGIR frontend has no TMEM events",
+            "specs": ["P1-1"],
         }
         for k in kirs
     )
@@ -442,7 +460,44 @@ def run_ttgir(case_path, root, fe, logs, sel, target, jobs=1):
         }
         for k in nb_lost(dump, fe, nb_failed)
     )
-    return kirs, failures
+    return kirs + ttgir_p1(dump, fe, logs), failures
+
+
+def ttgir_p1(dump, fe, logs):
+    """The P1-2 KIRs the TTGIR frontend wrote (`<spec>.p1.json`, LKV_FRONTEND=ptx); the
+    specializations without one go to P1_NOT_CHECKED with to_kir's `P1 ...` log line."""
+    lines = (logs / "to_kir.log").read_text().splitlines()
+    status = {}
+    for line in lines:
+        m = re.match(r"\[to_kir\] (\S+): P1 (refused|error|not_applicable): (.*)", line)
+        if m:
+            status[m.group(1)] = (m.group(2), m.group(3))
+    ptx = any("LKV_FRONTEND=ptx" in x for x in lines)
+    kirs = []
+    for k in dump["specs"]:
+        if (fe / f"{k}.p1.json").exists():
+            kirs.append(fe / f"{k}.p1.json")
+            continue
+        st, why = status.get(k) or (
+            ("error", "to_kir wrote neither a P1 KIR nor a P1 status")
+            if ptx
+            else (
+                "not_checked",
+                "P1-2 not checked: the legacy TTGIR translation has no P1 pass",
+            )
+        )
+        P1_NOT_CHECKED.append(
+            {
+                "variant": k,
+                "kernel": dump["kernel"],
+                "inputs": [i["name"] for i in dump["inputs"]
+                           if any(la["spec"] == k for la in i.get("launches", []))],
+                "status": st,
+                "error": why,
+                "specs": ["P1-2"],
+            }
+        )  # fmt: skip
+    return kirs
 
 
 def nb_lost(dump, fe, failed):
@@ -620,7 +675,7 @@ def parse_lean(text, k, status):
             f"Lean exited with status {status} and {len(refuted)} refuted theorem(s)"
         )
     for n, inp in inputs.items():
-        for label in labels_of(k):
+        for label in kir_labels(k):
             s = inp["specs"].setdefault(label, new_spec())
             theorem = "FAIL" if (n, label) in refuted else "PASS"
             # The theorem is the verdict; the #eval report must agree with it.
@@ -644,11 +699,6 @@ def parse_lean(text, k, status):
     return [inputs[n] for n in names]
 
 
-def labels_of(k):
-    """The specs a KIR decides: P1-1 (P1 KIR), P0-6 (P0-6 KIR) or P0-1..P0-5."""
-    return LABELS_P1 if "tmem" in k else LABELS_NB if "nbar" in k else LABELS
-
-
 def variant_name(path):
     return path.name.removesuffix(".json").removesuffix(".kir")
 
@@ -660,10 +710,12 @@ def check_kir(path, lean_dir, sources, timeout):
     entry.update(
         kernel=k.get("kernel"),
         flags=k.get("case", {}).get("inputs", [{}])[0].get("flags", {}),
-        p1="tmem" in k,
+        p1="tmem" in k or "p1" in k,
         nb="nbar" in k,
         input_names=[i.get("name") for i in k.get("case", {}).get("inputs", [])],
     )
+    if entry["p1"]:
+        entry["p1_specs"] = kir_labels(k)
     if "nbar" in k and isinstance(k["nbar"], dict):
         entry["nb_sites"] = k["nbar"].get("sites", [])
     errors = kir.validate(k)
@@ -792,7 +844,7 @@ def unchecked(report, p1=False):
             "inputs": v.get("input_names", []),
             "why": f"{v['status']}: {v.get('error', '')}",
             "outcome": "ERROR",
-            "labels": LABELS_P1 if p1 else LABELS,
+            "labels": (v.get("p1_specs") or ["P1-1"]) if p1 else LABELS,
         }
         for v in (report.get("variants_p1", []) if p1 else report["variants"])
         if v["status"] != "checked"
@@ -816,7 +868,7 @@ def unchecked(report, p1=False):
                 "inputs": x.get("inputs", []),
                 "why": f"{'P1 translation' if p1 else 'frontend'} {what}: {x['error']}",
                 "outcome": "ERROR" if err else "UNDECIDED",
-                "labels": LABELS_P1 if p1 else LABELS,
+                "labels": x.get("specs", ["P1-1"]) if p1 else LABELS,
             }
         )
     return out
@@ -950,19 +1002,14 @@ def run_reason(report):
 def result(report):
     """The run's outcome (module doc), its exit status and why, as report lines: "fail"
     (certain violations), "error" (failures to fix) and "undecided" (known limits, not
-    errors). P1-1's FAIL and UNDECIDED count only with --p1-strict (report["p1_strict"]);
-    its errors always do: they are failures of LKV."""
+    errors). The P1 specs' FAIL and UNDECIDED count only with --p1-strict
+    (report["p1_strict"]); their errors always do: they are failures of LKV."""
     lines = {"FAIL": [], "ERROR": [], "UNDECIDED": []}
+    strict = bool(report.get("p1_strict"))
     parts = [
         ("", report["variants"], unchecked(report), True),
         ("P0-6: ", report.get("variants_nb", []), unchecked_nb(report), True),
-        (
-            "P1-1: ",
-            report.get("variants_p1", []),
-            unchecked(report, p1=True),
-            bool(report.get("p1_strict")),
-        ),
-    ]
+    ] + [(f"{label}: ", *p1_part(report, label), strict) for label in LABELS_P1]
     for part in parts:
         for o, ls in reasons(*part).items():
             lines[o] += ls
@@ -976,6 +1023,20 @@ def result(report):
         "error": lines["ERROR"],
         "undecided": lines["UNDECIDED"],
     }
+
+
+def p1_part(report, label):
+    """(variants, variants without verdicts) of P1 spec `label`: the P1 variants that decide
+    it, their inputs' verdicts of it only, and the unchecked entries that concern it."""
+    vs = [
+        {**v, "inputs": [{**i, "specs": {k: s for k, s in i["specs"].items() if k == label}}
+                         for i in v.get("inputs", [])]}
+        for v in report.get("variants_p1", [])
+        if label in (v.get("p1_specs") or ["P1-1"])
+    ]  # fmt: skip
+    return vs, [
+        u for u in unchecked(report, p1=True) if label in u.get("labels", ["P1-1"])
+    ]
 
 
 def exit_status(report):
@@ -1323,56 +1384,56 @@ def md_env(report):
     return out
 
 
+P1_TEXT = {
+    "P1-1": (
+        "CuTe only",
+        [
+            "Decided on the P1 KIR (`.p1.json`) of each variant: every pair of TMEM accesses of",
+            "different roles that touch a common cell, one of them writing, must be ordered (one",
+            "completes before the other is issued) under sound mbarrier and named-barrier",
+            'happens-before (references/specs.md, "P1-1"). A FAIL is a pair unordered even under',
+            "the most generous lockstep reading of the ledger: confirm it in the source before",
+            "calling it a race. An UNDECIDED input has pairs only the lockstep contents order.",
+        ],
+        [
+            "N1 same-role hazards; N2 intra-role cross-warp pairs; N3 a blocked wait makes",
+            "happens-before vacuous.",
+        ],
+    ),
+    "P1-2": (
+        "PTX translation",
+        [
+            "Decided on the P1 KIR (`.p1.json`) of each variant: every write of shared memory",
+            "that overlaps the source of a bulk async store, and every write of the tensormap a",
+            "store reads, must happen before the store is issued or after a cp.async.bulk",
+            "wait_group of its issuing thread completed its group, under sound happens-before",
+            '(references/specs.md, "P1-2"). A FAIL is a pair unordered even under the most',
+            "generous reading; an UNDECIDED input has pairs only the lockstep reading, or a",
+            "program order of the issuing thread the KIR does not pin down, orders.",
+        ],
+        [
+            "N1 a bulk store its issuing thread never waits for; N2 a blocked wait makes",
+            "happens-before vacuous.",
+        ],
+    ),
+}
+
+
 def md_p1(report):
-    """The P1 section: P1-1 verdicts per input, FAIL, ERROR and UNDECIDED findings, notes
-    by source line, and the variants P1-1 does not check."""
+    """The P1 section: per P1 spec with verdicts or unchecked variants, its verdicts per
+    input, FAIL, ERROR and UNDECIDED findings, notes by source line; the P1 variants and
+    the variants the P1 specs do not check."""
     variants = report.get("variants_p1", [])
     nc = report.get("p1_not_checked", [])
     if not variants and not nc:
         return []
-    strict = report.get("p1_strict")
-    out = [
-        "## P1-1 TMEM reuse ordered (P1; CuTe only; "
-        + (
-            "part of the outcome: --p1-strict)"
-            if strict
-            else "its FAIL and UNDECIDED are not part of the outcome, its ERRORs are)"
-        ),
-        "",
-        "Decided on the P1 KIR (`.p1.json`) of each variant: every pair of TMEM accesses of",
-        "different roles that touch a common cell, one of them writing, must be ordered (one",
-        "completes before the other is issued) under sound mbarrier and named-barrier",
-        'happens-before (references/specs.md, "P1-1"). A FAIL is a pair unordered even under',
-        "the most generous lockstep reading of the ledger: confirm it in the source before",
-        "calling it a race. An UNDECIDED input has pairs only the lockstep contents order.",
-        "",
-    ]
+    out = []
     no_verdicts = unchecked(report, p1=True)
-    if variants or no_verdicts:
-        t = totals(variants, LABELS_P1, no_verdicts)["P1-1"]
-        bad = f" ({t['INCONSISTENT']} inconsistent)" if t["INCONSISTENT"] else ""
-        out += [
-            f"P1-1 over (variant, input) runs: {t['PASS']} PASS, {t['FAIL']} FAIL, "
-            f"{t['ERROR']} ERROR{bad}, {t['UNDECIDED']} UNDECIDED, {t['with_notes']} with "
-            "notes.",
-            "",
-        ]
-        table = md_per_input(variants, no_verdicts, LABELS_P1)
-        out += table[next(i for i, x in enumerate(table) if x.startswith("| kernel")) :]
-        out.append("")
-        out += md_fail(variants, LABELS_P1, "### P1-1 FAIL", "####")
-        out += md_errors(variants, no_verdicts, LABELS_P1, "### P1-1 ERROR", "####")
-        out += md_gaps(variants, no_verdicts, LABELS_P1, "### P1-1 UNDECIDED", "####")
-        out += md_findings(
-            variants,
-            "notes",
-            "### P1-1 notes by source line",
-            [
-                "N1 same-role hazards; N2 intra-role cross-warp pairs; N3 a blocked wait makes",
-                "happens-before vacuous.",
-            ],
-            LABELS_P1,
-        )
+    for label in LABELS_P1:
+        vs = [v for v in variants if label in (v.get("p1_specs") or ["P1-1"])]
+        nv = [u for u in no_verdicts if label in u.get("labels", ["P1-1"])]
+        if vs or nv or any(label in x.get("specs", ["P1-1"]) for x in nc):
+            out += md_p1_spec(report, label, vs, nv)
     if variants:
         out += [
             "### P1 variants",
@@ -1388,8 +1449,46 @@ def md_p1(report):
         out.append("")
     others = [x for x in nc if x["status"] not in ("refused", "error")]
     if others:
-        out += ["### Variants P1-1 does not check", ""]
+        labels = sorted({s for x in others for s in x.get("specs", ["P1-1"])})
+        out += [f"### Variants {' / '.join(labels)} does not check", ""]
         out += [f"- {code(x['variant'])}: {x['status']}: {x['error']}" for x in others]
+    return out
+
+
+def md_p1_spec(report, label, variants, no_verdicts):
+    """md_p1's part of one P1 spec."""
+    strict = report.get("p1_strict")
+    scope, intro, notes = P1_TEXT[label]
+    out = [
+        f"## {label} {TITLES[label]} (P1; {scope}; "
+        + (
+            "part of the outcome: --p1-strict)"
+            if strict
+            else "its FAIL and UNDECIDED are not part of the outcome, its ERRORs are)"
+        ),
+        "",
+        *intro,
+        "",
+    ]
+    labels = [label]
+    if variants or no_verdicts:
+        t = totals(variants, labels, no_verdicts)[label]
+        bad = f" ({t['INCONSISTENT']} inconsistent)" if t["INCONSISTENT"] else ""
+        out += [
+            f"{label} over (variant, input) runs: {t['PASS']} PASS, {t['FAIL']} FAIL, "
+            f"{t['ERROR']} ERROR{bad}, {t['UNDECIDED']} UNDECIDED, {t['with_notes']} with "
+            "notes.",
+            "",
+        ]
+        table = md_per_input(variants, no_verdicts, labels)
+        out += table[next(i for i, x in enumerate(table) if x.startswith("| kernel")) :]
+        out.append("")
+        out += md_fail(variants, labels, f"### {label} FAIL", "####")
+        out += md_errors(variants, no_verdicts, labels, f"### {label} ERROR", "####")
+        out += md_gaps(variants, no_verdicts, labels, f"### {label} UNDECIDED", "####")
+        out += md_findings(
+            variants, "notes", f"### {label} notes by source line", notes, labels
+        )
     return out
 
 
@@ -1510,12 +1609,17 @@ def write_report(report, out):
             for label in LABELS + LABELS_NB
         )
     )
-    if report["variants_p1"] or report["p1_not_checked"]:
-        t = report["totals_p1"]["P1-1"]
+    for label in LABELS_P1:
+        if not report["variants_p1"] and not report["p1_not_checked"]:
+            break
+        t = report["totals_p1"][label]
+        nc = [x for x in report["p1_not_checked"] if label in x.get("specs", ["P1-1"])]
+        if not nc and not sum(t[o] for o in OUTCOMES):
+            continue
         log(
-            f"P1-1 ({'part of the outcome: --p1-strict' if report.get('p1_strict') else 'only its ERRORs count'}): "
+            f"{label} ({'part of the outcome: --p1-strict' if report.get('p1_strict') else 'only its ERRORs count'}): "
             f"{t['PASS']} PASS / {t['FAIL']} FAIL / {t['ERROR']} ERROR / {t['UNDECIDED']} "
-            f"UNDECIDED ({t['with_notes']} with notes), {len(report['p1_not_checked'])} "
+            f"UNDECIDED ({t['with_notes']} with notes), {len(nc)} "
             "variant(s) not checked"
         )
     r = report["result"]

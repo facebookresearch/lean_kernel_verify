@@ -683,6 +683,8 @@ class Translator:
         p = self.env.get(reg, Data(f"undefined {reg}"))
         if isinstance(p, Data):
             if cls in ("value", "drop"):  # a data value, used by no root so far
+                if self.k.p1 is not None:  # P1-2: a write that may not happen (bulk.py)
+                    self.k.p1.execute(self, i, ops.mnemonic(i.opcode), maybe=True)
                 self._shared_drop(i, ops.mnemonic(i.opcode), True)
                 for r in R.dests(i):
                     self.env[r] = Data(

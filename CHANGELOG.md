@@ -10,7 +10,8 @@ First public release.
   of a case file: global accesses in bounds (P0-1), role trip-count agreement (P0-2),
   output coverage exactly once (P0-3), mbarrier protocol (P0-4), mask-elision
   soundness (P0-5) and named barriers convergent (P0-6, decided on the kernel's PTX in
-  both families). For CuTe DSL kernels, also TMEM reuse ordered (P1-1).
+  both families). For CuTe DSL kernels, also TMEM reuse ordered (P1-1); for TLX/Triton
+  kernels in the PTX translation, async store sources reuse ordered (P1-2).
 - Frontends for TLX/Triton (TTGIR) and the CuTe DSL (`nvidia-cutlass-dsl` 4.4.2 and
   4.6.1, the release a case names) that run the kernel's real host code and compiler
   on a CPU and translate the IR to KIR with a fixed op table.

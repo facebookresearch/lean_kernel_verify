@@ -1,0 +1,16 @@
+{
+ "name": "store_reuse_staging_tlx",
+ "description": "P1-2 staging-buffer reuse (tests/e2e/kernels/lkv_e2e_store_reuse_tlx.py `staging`): 64x64 fp16 tiles stored by TMA from one shared-memory staging buffer, TILES = columns / 64. drain_*: the buffer is rewritten only after `cp.async.bulk.wait_group.read 0` and a named barrier (P1-2 PASS); race_*: right away (P1-2 FAIL from the second tile on; race_one_tile has one tile, nothing to reuse: PASS). P0 must pass on every input (PTX translation). The legacy TTGIR translation refuses tlx.named_barrier_wait (ttng.user_named_barrier_id): run it with --frontend ptx, which also writes the P1-2 KIR.",
+ "src_root": "../kernels",
+ "source": "tests/e2e/kernels/lkv_e2e_store_reuse_tlx.py",
+ "module": "lkv_e2e_store_reuse_tlx",
+ "entry": "run_staging",
+ "kernel": "staging",
+ "num_sms": 2,
+ "intended_writes": {"x_desc": "all"},
+ "inputs": [
+  {"name": "drain_three_tiles", "args": {"x": {"dtype": "float16", "shape": [128, 192]}, "drain": 1}},
+  {"name": "race_one_tile", "args": {"x": {"dtype": "float16", "shape": [128, 64]}, "drain": 0}},
+  {"name": "race_three_tiles", "args": {"x": {"dtype": "float16", "shape": [128, 192]}, "drain": 0}}
+ ]
+}

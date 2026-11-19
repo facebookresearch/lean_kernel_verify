@@ -83,7 +83,7 @@ import re
 import weakref
 from dataclasses import dataclass, field
 
-from . import cluster, expr as E, interp
+from . import bulk, cluster, expr as E, interp
 
 _SYNC_EVENTS = ("arrive", "wait", "commit_arrive")  # order TMEM accesses in P1-1
 _NAMED_BARS = ("bar.sync", "bar.arrive", "barrier.sync", "barrier.arrive",
@@ -107,9 +107,12 @@ class _Role:
 
 
 class P1:
-    def __init__(self):
+    def __init__(self, specs=("P1-1",), extern=()):
+        self.specs = tuple(specs)  # the P1 specs whose events the pass adds
         self._roles: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
         self._index: dict = {}  # id(instr) -> its index in fn.instructions() (site)
+        # P1-2 (bulk.py): bulk stores, groups and writes of shared memory and tensormaps
+        self.bulk = bulk.State(extern) if "P1-2" in self.specs else None
 
     def _role(self, tr: interp.Translator) -> _Role:
         r = self._roles.get(tr)
@@ -118,7 +121,16 @@ class P1:
         return r
 
     # ------------------------------------------------------------- dispatch
-    def execute(self, tr: interp.Translator, i, mn: str) -> None:
+    def execute(self, tr: interp.Translator, i, mn: str, maybe: bool = False) -> None:
+        """`maybe`: i is under a predicate that depends on data (P1-2's writes only)."""
+        if self.bulk is not None:
+            bulk.execute(self.bulk, tr, i, mn, maybe)
+        if maybe:
+            return
+        if "P1-1" not in self.specs:
+            if mn in _NAMED_BARS or mn.startswith(("bar.red.", "barrier.red.")):
+                _named_bar(tr, i, mn)
+            return
         if mn.startswith(("tcgen05.ld.", "tcgen05.st.")):
             self._ld_st(tr, i, mn)
         elif mn.startswith("tcgen05.wait::"):
@@ -141,6 +153,13 @@ class P1:
         arrive or commit is split (SplitWarps), refused under a runtime condition (R7)."""
         if ev == "commit_arrive":
             self._role(tr).issuers.setdefault(_issuer(var, act), tr.loc())
+        if ev == "wait" and self.bulk is not None and act is not None:
+            per = {}
+            for t in act:
+                per[t // 32] = per.get(t // 32, 0) + 1
+            if any(n != 32 for n in per.values()):
+                tr.fail(tr.cur, "P1-2: an mbarrier wait executed by part of a warp (P1-2 takes "
+                                "a role's wait as every thread's)")  # fmt: skip
         if ev not in _SYNC_EVENTS or tr.nw == 1:
             return
         if act is None:
@@ -159,6 +178,8 @@ class P1:
     def top(self, translators: list):
         """The P1 KIR's top-level `tmem` from the final roles' allocations and accesses;
         None if there are neither (ops_tmem.tmem_top)."""
+        if "P1-1" not in self.specs:
+            return None
         roles = [self._role(tr) for tr in translators]
         allocs = [
             (c, loc) for r in roles for n, c, loc in r.allocs.values() for _ in range(n)

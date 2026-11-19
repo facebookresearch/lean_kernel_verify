@@ -192,6 +192,14 @@ structure Slot where
   cta : Nat := 0
   deriving Inhabited
 
+/-- The thread that executes a P1-2 event, in its CTA: lane `lane` of warp `warp`, or with
+`lane = none` the elected lane of a full-warp elect.sync in that warp (one lane, the same
+for every such election: PTX ISA elect.sync elects deterministically). -/
+structure Who where
+  warp : Int
+  lane : Option Int
+  deriving BEq, Inhabited
+
 /-- An evaluated event. Tensors are indices into `Host.tensors`; arrivals are already
 multiplied by the issuing thread count; memory offsets keep masked-in lanes only. -/
 inductive Ev where
@@ -234,6 +242,22 @@ inductive Ev where
   /-- The begin or end of a region that runs a number of times the model does not fix
   (P0-6 KIR `nb_rep`; `key`: its identity across the roles of one split role, or empty). -/
   | nbRep (isBegin : Bool) (key : String)
+  /-- A bulk asynchronous store (P1-2): its issuing thread, the shared-memory bytes
+  `[lo, hi)` of symbol `sym` it reads (in the issuing CTA), and the tensormap it reads
+  (global buffer, first byte; 128 bytes) if any. -/
+  | bulkStore (kind : BulkKind) (who : Who) (sym : String) (lo hi : Int) (tmap : Option (String × Int))
+  /-- cp.async.bulk.commit_group of every thread of the role. -/
+  | bulkCommit
+  /-- cp.async.bulk.wait_group{.read} `n` of every thread of the role. -/
+  | bulkWait (n : Int) (read : Bool)
+  /-- A shared-memory write (P1-2) by `who` (with `sync`: every lane of `who.warp`, one
+  warp-synchronizing instruction) of the byte ranges `[lo, hi)` of symbol `sym` in the
+  CTA of rank `cta` of the cluster; `async`: an asynchronous copy's landing. -/
+  | smemWrite (who : Who) (sync : Bool) (async : Bool) (cta : Nat) (sym : String)
+      (ranges : Array (Int × Int))
+  /-- A tensormap write (P1-2) by every lane of warp `warp` (tensormap.cp_fenceproxy): the
+  128 bytes from byte offset `lo` of global buffer `base`. -/
+  | tmapWrite (warp : Int) (base : String) (lo : Int)
 
 structure TEvent where
   ev : Ev
@@ -627,6 +651,24 @@ def execEvent : Event → M Unit
       | none => pure none
     emit loc (.nbOpen kind certain why i c sync)
   | .nb_rep b _ key loc => emit loc (.nbRep b key)
+  | .bulk_store kind warp lane sym src bytes tmap loc => do
+    let who : Who := { warp := ← evalInt loc warp, lane := ← lane.mapM (evalInt loc) }
+    let lo ← evalInt loc src
+    let tm ← tmap.mapM fun (base, a) => return (base, ← evalInt loc a)
+    emit loc (.bulkStore kind who sym lo (lo + bytes) tm)
+  | .bulk_commit loc => emit loc .bulkCommit
+  | .bulk_wait n read loc => emit loc (.bulkWait n read)
+  | .smem_write sym offsets mask bytes warp lane sync async cta loc => do
+    let who : Who := { warp := ← evalInt loc warp, lane := ← lane.mapM (evalInt loc) }
+    let offs ← evalTExpr loc offsets
+    let m ← match mask with
+      | none => pure none
+      | some e => some <$> evalTExpr loc e
+    let os ← activeOffsets loc offs m
+    emit loc (.smemWrite who sync async (← ctaOf loc "smem_write" cta) sym
+      (os.map fun o => (o, o + bytes)))
+  | .tmap_write base addr warp loc => do
+    emit loc (.tmapWrite (← evalInt loc warp) base (← evalInt loc addr))
 
 def setVar (x : String) (v : Val) : M Unit :=
   modify fun s => { s with env := s.env.insert x v }

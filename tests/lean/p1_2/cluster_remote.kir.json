@@ -1,0 +1,180 @@
+{
+ "kir_version": 1,
+ "kernel": "cluster_remote",
+ "source": "tests/lean/p1_2/cluster_remote.kir.json",
+ "ir": "ptx",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "w",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "bulk_store",
+     "loc": "cluster_remote.py:2",
+     "kind": "bulk",
+     "warp": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "sym": "smem",
+     "src": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "bytes": 1024,
+     "lane": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "bulk_commit",
+     "loc": "cluster_remote.py:2"
+    },
+    {
+     "op": "event",
+     "ev": "smem_write",
+     "loc": "cluster_remote.py:4",
+     "sym": "smem",
+     "offsets": {
+      "t": "splat",
+      "shape": [
+       1
+      ],
+      "w": 32,
+      "a": {
+       "e": "select",
+       "c": {
+        "e": "cmp",
+        "o": "eq",
+        "a": {
+         "e": "var",
+         "name": "MODE",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        "w": 1
+       },
+       "a": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 4096,
+        "w": 32
+       },
+       "w": 32
+      }
+     },
+     "mask": null,
+     "bytes": 16,
+     "warp": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "lane": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "async": true,
+     "cta": {
+      "e": "bin",
+      "o": "xor",
+      "a": {
+       "e": "bin",
+       "o": "urem",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "bulk_wait",
+     "loc": "cluster_remote.py:5",
+     "n": 0,
+     "read": true
+    }
+   ]
+  }
+ ],
+ "p1": [
+  "P1-2"
+ ],
+ "case": {
+  "name": "cluster_remote",
+  "inputs": [
+   {
+    "name": "into_source",
+    "params": {
+     "MODE": 0
+    }
+   },
+   {
+    "name": "elsewhere",
+    "params": {
+     "MODE": 1
+    }
+   }
+  ]
+ },
+ "cluster": [
+  2,
+  1,
+  1
+ ]
+}

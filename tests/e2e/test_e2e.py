@@ -756,6 +756,38 @@ class Unit(unittest.TestCase):
             ["P1-1: 1 variant(s) that failed to translate or check: `k__1`"],
         )
 
+    def test_p1_2_verdicts_are_labelled_per_spec(self):
+        text = (
+            "== k / input a\ngrid (1,1,1): 1 CTA(s) x 1 role(s), 9 events; P1: P1-2: 1 bulk store(s)\n"
+            "P1-2 async store sources reuse ordered: FAIL\n"
+            "  x.py:7: cta (0,0,0) roles w / w: F1: the write at x.py:7 ...: unordered.\n"
+            "VERDICT a P1-2 FAIL\n"
+            "k.lean:9:9: error: Tactic `native_decide` evaluated that the proposition\n"
+            "  KV.Holds KV.SpecId.storeReuse kernel input0_a\nis false\n"
+        )
+        kir = {**ONE_INPUT, "p1": ["P1-2"]}
+        (i,) = lkv_py.parse_lean(text, kir, 1)
+        self.assertEqual(list(i["specs"]), ["P1-2"])
+        self.assertEqual(i["specs"]["P1-2"]["outcome"], "FAIL")
+        for f in i["specs"]["P1-2"]["counterexamples"]:
+            f["source"], f["line_text"] = None, None
+        report = self.report(PASSING, 0, p1_strict=True)
+        report["variants_p1"] = [{"variant": "s.p1", "kernel": "k", "status": "checked",
+                                  "p1_specs": ["P1-2"], "inputs": [i]}]  # fmt: skip
+        report["p1_not_checked"] = [{"variant": "s", "status": "not_checked", "error": "x",
+                                     "specs": ["P1-1"]}]  # fmt: skip
+        report["totals_p1"] = lkv_py.totals(
+            report["variants_p1"], lkv_py.LABELS_P1, lkv_py.unchecked(report, p1=True)
+        )
+        self.assertEqual(
+            lkv_py.result(report)["fail"], ["P1-2: 1 certain violation(s) (P1-2: 1)"]
+        )
+        self.assertEqual(report["totals_p1"]["P1-1"]["FAIL"], 0)
+        md = lkv_py.markdown(report)
+        self.assertIn(
+            "## P1-2 async store sources reuse ordered (P1; PTX translation;", md
+        )
+
     def test_export_marker_names_the_revision(self):
         case = {"source": "k.py", "src_root": "src", "rev": "aaaaaaaaaaaa"}
         with tempfile.TemporaryDirectory() as d:

@@ -107,6 +107,21 @@ follow items 1 to 3 and 8.
     events such as `gload`, `gstore`, `gatomic` and TMA included), and checks that
     `nb_rep` events nest in each statement list. Every event of a P0-6 KIR is
     executed by every warp of its role (the pass splits roles so).
+15. **P1-2 (async store sources reuse ordered).** A P1 KIR may name the P1 specs
+    it is decided for in a top-level `p1` (`["P1-2"]`, as the TTGIR frontend's
+    PTX translation writes; absent: `["P1-1"]`, change 10, so the CuTe P1 KIRs do
+    not change): `tmem` is present iff `p1` names P1-1, the `tmem` and
+    `tmem_wait` events need P1-1 and `named_bar` either. P1-2 adds the events
+    `bulk_store`, `bulk_commit`, `bulk_wait`, `smem_write` and `tmap_write`
+    (below) and an optional top-level `cta_threads`, the CTA's thread count (idle
+    warps without a role included; a named barrier of that count has every
+    thread of the CTA). Change 10's rule holds for a P1-2 KIR too (every `wait`,
+    `arrive` and `commit_arrive` of a role of several warps is issued by all its
+    warps; the PTX translation splits roles so, a split TTGIR partition's parts
+    named `<partition>_w<first>_<last>`). `emit_lean.py` emits `p1 := [...]`,
+    `cta_threads := some n` and the theorems of the named specs
+    (`KV.Holds .storeReuse` for P1-2); a P0 KIR and a P1 KIR without `p1` emit as
+    before.
 
 ## Top level
 
@@ -178,7 +193,12 @@ follow items 1 to 3 and 8.
   TMEM allocation. `zero`: addresses are absolute (the fake-zero-base idiom,
   `cute.inttoptr(0)`), allowed only with 512 columns; `relative`: relative to
   the allocation (`retrieve_tmem_ptr`). Present iff some `tmem`, `tmem_wait` or
-  `named_bar` event exists.
+  `named_bar` event exists (in a KIR without `p1`; with `p1`, iff it names P1-1).
+- `p1` (P1 KIR only, change 15): the P1 specs the KIR is decided for, a
+  non-empty list of distinct labels `"P1-1"`, `"P1-2"`; absent: `["P1-1"]`.
+- `cta_threads` (P1-2 KIR only, change 15): the CTA's thread count, a positive
+  multiple of 32 at least the roles' threads (warps no role has, such as the
+  idle warps of a Triton warp-specialized kernel, included).
 
 ## Roles and statements
 
@@ -274,6 +294,11 @@ Tagged by `"ev"`; all carry `loc`.
 | `named_bar` (P1)               | `id`, `count` (const Exprs; count a positive multiple of 32), `sync` bool: `bar.sync` (true) or `bar.arrive` of every thread of the role on named barrier `id` (`nvvm.barrier`: id 0, count = the block's threads)                                                                                                                                                                                                                                                                |
 | `nb_open` (P0-6)               | `kind` (`lane`, `cond`, `loop`, `operand`, `dispatch`), `certain` bool, `why` string, `id`, `count` (const Exprs or null), `sync` bool: a named barrier instruction the barrier pass cannot count, reached by the role under a condition its participants may not share (references/specs.md "P0-6"); reached and certain: a certain P0-6 violation, else P0-6 is undecided                                                                                                     |
 | `nb_rep` (P0-6)                | `begin` bool, `why` string, `key` (optional string, default empty): the begin (true) or end of a region that runs a number of times the model does not fix, the same in every warp of the role; begins and ends nest within one statement list; a non-empty key names the region of the role before warp splitting whose condition is uniform over that whole role (its split roles repeat it alike)                                                                                  |
+| `bulk_store` (P1-2)            | `kind` (`tensor`, `tensor_reduce`, `bulk`, `bulk_reduce`), `warp` (w=32 Expr) and optional `lane` (w=32 Expr; absent: the elected lane of an `elect.sync` of the full warp): the issuing thread; `sym` (shared symbol) and `src` (Expr: byte offset in it) with `bytes` (positive int): the shared-memory bytes the store reads; optional `tmap` {`base` (global buffer), `addr` (Expr: byte offset)}: the 128-byte tensormap of an in-kernel descriptor it reads. Joins the issuing thread's open bulk async-group |
+| `bulk_commit` (P1-2)           | (no field) `cp.async.bulk.commit_group` of the role (every issuing thread of the role's bulk stores executes it)                                                                                                                                                                                                                                                                                                                                                                   |
+| `bulk_wait` (P1-2)             | `n` (non-negative int), `read` bool: `cp.async.bulk.wait_group{.read} n` of the role: completes the groups of all but the `n` most recent commits                                                                                                                                                                                                                                                                                                                                 |
+| `smem_write` (P1-2)            | `sym`, `offsets` TExpr (byte offsets), `mask` TExpr or null, `bytes` (positive int: bytes at each offset), `warp`, optional `lane` (as `bulk_store`'s), optional `sync` bool (a warp-synchronizing write of every lane of `warp`, no `lane`), optional `async` bool (the landing of an asynchronous copy issued here), optional `cta` (w=32 Expr: another CTA of the cluster)                                                                                              |
+| `tmap_write` (P1-2)            | `base` (global buffer), `addr` (Expr: byte offset), `warp` (w=32 Expr): the 128-byte tensormap written by every lane of `warp` in one warp-synchronizing instruction (`tensormap.cp_fenceproxy`)                                                                                                                                                                                                                                                                                 |
 
 ## Inputs
 

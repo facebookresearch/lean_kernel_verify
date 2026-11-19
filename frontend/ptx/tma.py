@@ -129,11 +129,12 @@ gather4 are refused by the op table.
 """
 
 import itertools
+import math
 import re
 import struct
 from dataclasses import dataclass, field
 
-from . import cluster, expr as E, launch, ops
+from . import bulk, cluster, expr as E, launch, ops
 from .interp import Data, Translator
 
 PREFIXES = ("cp.async.bulk", "cp.reduce.async.bulk", "tensormap.")  # mem.py routes here
@@ -308,6 +309,13 @@ class Tma:
             )
         coords = self._coords(tr, i, d, i.operands[1])
         sym, off, extra = cluster.load_slot(tr, i)  # its cta_mask and leader
+        if tr.k.p1 is not None and tr.k.p1.bulk is not None:  # P1-2: its landing
+            if "cta_mask" in extra:
+                tr.fail(
+                    i,
+                    "P1-2: a multicast TMA load (it writes other CTAs' shared memory)",
+                )
+            bulk.landing(tr.k.p1.bulk, tr, i, i.operands[0], _hw_bytes(tr, i, d))
         lanes = self._lanes(tr, i, "TMA load") or _one_thread(tr)
         if d.msg is not None and not self._message(tr, i, d, d.msg, coords, (sym, off)):
             return  # a later message of a block: its first stands for it
@@ -324,6 +332,10 @@ class Tma:
         ops_ = i.operands
         d = self._desc(tr, i, ops_[0])
         coords = self._coords(tr, i, d, ops_[0])
+        if tr.k.p1 is not None and tr.k.p1.bulk is not None:  # P1-2: the store's source
+            tmap = tr.operand_value(ops_[0][1], 64) if d.kind == "kernel" else None
+            bulk.store(tr.k.p1.bulk, tr, i, "tensor_reduce" if reduce else "tensor",
+                       ops_[1], _hw_bytes(tr, i, d), tmap)  # fmt: skip
         if d.packed and ("reduce" if reduce else "store") not in _PACKED[d.packed][1]:
             tr.require(E.const(0, 1), f"TMA {'reduce' if reduce else 'store'} through "
                        f"{d.name}, a {d.packed} descriptor: the hardware traps")  # fmt: skip
@@ -765,6 +777,9 @@ class Tma:
                        "descriptor edited in place are not known)")  # fmt: skip
         _key, st = self._stage(tr, i, i.operands[0], f"tensormap.replace.{what}")
         self._active(tr, i, f"tensormap.replace.{what}")
+        if tr.k.p1 is not None and tr.k.p1.bulk is not None:  # P1-2: not an event
+            bulk.fixed(tr.k.p1.bulk, tr, self.mem.address(tr, i.operands[0]), 128,
+                       "a tensormap staging buffer (tensormap.replace)")  # fmt: skip
         dim = None
         if len(i.operands) == 3:
             if i.operands[1][0] != "imm":
@@ -798,6 +813,8 @@ class Tma:
             tr.fail(
                 i, "tensormap.cp_fenceproxy to an address that varies across the role"
             )
+        if tr.k.p1 is not None and tr.k.p1.bulk is not None:  # P1-2: a tensormap write
+            bulk.tmap(tr.k.p1.bulk, tr, i, dst)
         name = f"tmap_{key[0]}_{key[1]}_line{i.line}"
         self._dyn(tr)["descs"][dst] = (
             self._kernel_desc(tr, i, name, st.fields),
@@ -928,6 +945,15 @@ class Tma:
 
 
 # ------------------------------------------------------------------- helpers
+
+
+def _hw_bytes(tr: Translator, i, d: Desc) -> int:
+    """Shared-memory bytes one TMA instruction through d moves: its hardware box (dense
+    in shared memory: element stride 1, no interleave) times the element bytes (P1-2)."""
+    if d.packed:
+        tr.fail(i, f"P1-2: TMA through {d.name}, a packed sub-byte descriptor (its shared-"
+                   "memory footprint is not modeled)")  # fmt: skip
+    return math.prod(d.msg if d.msg is not None else d.box) * d.elem_bytes
 
 
 def _peel(e):

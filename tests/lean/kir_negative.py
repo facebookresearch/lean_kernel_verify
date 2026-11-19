@@ -163,6 +163,12 @@ NB_MUTATIONS = [
         "gatomic in a P0-6 KIR",
     ),
     (
+        "uniform",
+        "a P0-6 KIR naming P1 specs",
+        lambda k: k.update(p1=["P1-2"]),
+        "both 'nbar'",
+    ),
+    (
         "all_exit",
         "named_bar all not a boolean",
         lambda k: nb_body(k)[0].update({"all": 1}),
@@ -175,6 +181,26 @@ NB_MUTATIONS = [
         "always names a thread count",
     ),
 ]
+
+
+# P1-2 KIR fixtures (tests/lean/p1_2, references/kir.md change 15)
+def p1_2(name):
+    with open(os.path.join(HERE, "p1_2", f"{name}.kir.json")) as f:
+        return json.load(f)
+
+
+def first(k, ev):  # the first event `ev` of the KIR (depth first)
+    def walk(stmts):
+        for x in stmts:
+            if x["op"] == "event" and x["ev"] == ev:
+                return x
+            for key in ("then", "else", "body"):
+                got = walk(x.get(key, []))
+                if got is not None:
+                    return got
+        return None
+
+    return next(e for r in k["roles"] if (e := walk(r["body"])) is not None)
 
 
 def p1_event_in_p0(k):  # a P1 event in a P0 KIR (no top-level tmem)
@@ -627,8 +653,70 @@ P1_MUTATIONS = [
 ]
 
 
+P1_2_MUTATIONS = [
+    (
+        "same_thread",
+        "P1-2 events without p1",
+        lambda k: k.pop("p1"),
+        "P1-2 events in a KIR whose 'p1' does not name P1-2",
+    ),
+    (
+        "same_thread",
+        "p1 naming P1-1 without tmem",
+        lambda k: k.update(p1=["P1-1", "P1-2"]),
+        "names P1-1 iff the KIR has a top-level 'tmem'",
+    ),
+    (
+        "same_thread",
+        "unknown p1 label",
+        lambda k: k.update(p1=["P1-3"]),
+        "expected a non-empty list of distinct labels",
+    ),
+    (
+        "same_thread",
+        "bulk_store of an unknown kind",
+        lambda k: first(k, "bulk_store").update(kind="gather"),
+        "must be one of ('tensor'",
+    ),
+    (
+        "same_thread",
+        "a warp-collective write with a lane",
+        lambda k: first(k, "smem_write").update(sync=True, lane=c(3)),
+        "a warp-collective write (sync) has no lane",
+    ),
+    (
+        "same_thread",
+        "bulk_wait with a negative count",
+        lambda k: first(k, "bulk_wait").update(n=-1),
+        ".n: must be >= 0",
+    ),
+    (
+        "staging",
+        "cta_threads not a multiple of 32",
+        lambda k: k.update(cta_threads=100),
+        "positive multiple of 32",
+    ),
+    (
+        "staging",
+        "cta_threads below the roles' threads",
+        lambda k: k.update(cta_threads=64),
+        "at least the roles' threads",
+    ),
+]
+
+
 def main():
     failed = 0
+    for name, what, mutate, expect in P1_2_MUTATIONS:
+        k = copy.deepcopy(p1_2(name))
+        assert not kir.validate(k), f"p1_2/{name} must be valid before mutation"
+        mutate(k)
+        errors = kir.validate(k)
+        if not any(expect in e for e in errors):
+            failed += 1
+            print(
+                f"kir_negative: NOT REJECTED as expected: p1_2/{name}: {what}: want {expect!r}, got {errors}"
+            )
     k = copy.deepcopy(fixture("pipeline_ok"))
     p1_event_in_p0(k)
     if not any("without a top-level 'tmem'" in e for e in kir.validate(k)):
@@ -673,7 +761,9 @@ def main():
             print(
                 f"kir_negative: NOT REJECTED as expected: {name}: {what}: want {expect!r}, got {errors}"
             )
-    nmut = len(MUTATIONS) + len(P1_MUTATIONS) + len(NB_MUTATIONS) + 1
+    nmut = (
+        len(MUTATIONS) + len(P1_MUTATIONS) + len(P1_2_MUTATIONS) + len(NB_MUTATIONS) + 1
+    )
     print(
         f"kir_negative: {nmut + len(ACCEPTED) - failed}/{nmut + len(ACCEPTED)} as expected"
         f" ({nmut} invalid KIR variants rejected with the expected error, {len(ACCEPTED)} valid ones accepted)"

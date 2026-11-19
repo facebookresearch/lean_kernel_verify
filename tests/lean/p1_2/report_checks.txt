@@ -1,0 +1,14 @@
+# Report lines run_all.sh checks for the P1-2 fixtures besides expected_messages.txt:
+# <fixture> <text> must occur in the fixture's Lean output, <fixture> !<text> must not.
+staging P1: P1-2: 3 bulk store(s), 384 write(s), 0 unordered conflicting pair(s) (0 undecided), 1 named-barrier slot(s), 0 blocked wait(s)
+staging P1: P1-2: 2 bulk store(s), 256 write(s), 128 unordered conflicting pair(s) (32 undecided), 1 named-barrier slot(s), 0 blocked wait(s)
+staging 1 named-barrier slot(s) (inconsistent: ids [1])
+staging !TMEM accesses
+tmap_rebuild NOTES unfixed_1 P1-2 1
+tmap_rebuild NOTES fixed_3 P1-2 1
+tmap_rebuild P1: P1-2: 2 bulk store(s), 258 write(s), 1 unordered conflicting pair(s) (1 undecided)
+handoff 2 named-barrier slot(s), 0 blocked wait(s)
+same_thread NOTES never_completed P1-2 1
+same_thread !F1: the write at same_thread.py:8
+same_thread !F1: the write at same_thread.py:23
+same_thread !NOTES lane0_lane0 P1-2

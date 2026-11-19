@@ -180,7 +180,7 @@ load's cycle, whose transaction bytes P0-4 checks).
 | multicast bulk g2s, im2col / gather4 / scatter4 modes | refused |
 | `tensormap.replace.*.shared`, `tensormap.cp_fenceproxy` | an in-kernel descriptor (`frontend_ptx.md`, "TMA descriptors") |
 | `tensormap.replace.*.global` | refused (a descriptor edited in global memory: its other fields are not known) |
-| `prefetch.tensormap`, commit/wait groups | drop |
+| `prefetch.tensormap`, commit/wait groups | drop (P1-2: `bulk_commit`, `bulk_wait`, below) |
 
 Descriptors, coordinates and footprints: `frontend_ptx.md`, "TMA descriptors". PTX lists
 coordinates innermost first. A footprint is exactly the elements the copy moves: element
@@ -228,6 +228,22 @@ hardware traps on a dim-0 coordinate that is not a multiple of 32 elements
 reached). A packed TLX host or in-kernel descriptor is refused. A byte format traps too
 at a dim-0 coordinate off its 16-byte grid (measured); that is not asserted: such a copy
 is modeled as performed.
+
+P1-2 (TLX/Triton, `frontend_ptx.md`, "P1-2 pass"): the same instructions, and the
+writes of shared memory, also give these events in the P1 KIR:
+
+| Instruction | P1-2 event |
+|---|---|
+| `cp.async.bulk.tensor...global.shared.bulk_group`, `cp.reduce.async.bulk.tensor...` | `bulk_store` (`tensor`, `tensor_reduce`) of the hardware box from `[src]`; `tmap` through an in-kernel descriptor |
+| `cp.async.bulk.global.shared.bulk_group`, `cp.reduce.async.bulk.global.shared.bulk_group.<op>` | `bulk_store` (`bulk`, `bulk_reduce`) of n bytes from `[src]` |
+| `cp.async.bulk.commit_group` | `bulk_commit` |
+| `cp.async.bulk.wait_group{.read} N` | `bulk_wait` (n, read); `.sync_restrict::proxy::async` refused |
+| `st.shared`, generic `st`/`atom`/`red` on a shared address, `atom.shared`, `red.shared` | `smem_write` per thread |
+| `stmatrix.sync.aligned.m8n8.x{1,2,4}{.trans}.shared.b16` | `smem_write` (`sync`) of 16 bytes per address-providing lane |
+| TMA load, bulk g2s, `cp.async.{ca,cg}` | `smem_write` (`async`) of the landing |
+| `tensormap.cp_fenceproxy` | `tmap_write` per executing warp |
+| `st.async`, `red.async`, `cp{.reduce}.async.bulk.shared::cluster.shared` into another CTA | `smem_write` (`async`, `cta`: the destination's rank) |
+| `mbarrier.*`, `tensormap.replace.*.shared`, `tcgen05.alloc`, `clusterlaunchcontrol.try_cancel` | no event: their bytes must be disjoint from every store source |
 
 ## Thread barriers and clusters
 

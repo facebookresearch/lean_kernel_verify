@@ -97,6 +97,7 @@ def kir_errors(facts) -> list:
             metadata[n] = [0] * 4 ** len(strides)
     obj = {"kir_version": 1, "kernel": "k", "source": "k.py", "ir": "ptx", "target": "sm_100",
            **({"tmem": facts.tmem} if facts.tmem else {}),  # a P1 pass's (tmem.py)
+           **({"p1": facts.p1, "cta_threads": facts.cta_threads} if facts.p1 else {}),  # P1-2's
            **({"cluster": list(facts.cluster)} if facts.cluster != (1, 1, 1) else {}),
            "grid": [{"e": "const", "w": 32, "v": 1}] * 3,
            "params": [{"name": n, "type": f"i{w}"} for n, w in facts.params.items()],

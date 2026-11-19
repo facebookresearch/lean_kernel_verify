@@ -431,7 +431,61 @@ legacy CuTe P1 pass's where the reason is the same (`frontend_cute.md`); R10 is 
 | R7 | a named barrier or `tcgen05.wait` reached by part of the role, a named-barrier id or count that is not constant (one uniform per warp splits the role), a count that is not a positive multiple of 32; an mbarrier wait, arrive or commit under a runtime lane condition in a role of several warps |
 | R10 | a role whose cp/mma and commits are not all issued alike (an elected lane, or one fixed thread): P1-1 takes a commit to cover the same thread's earlier cp/mma |
 
-TLX/Triton kernels have no P1 pass: report.json lists their variants as `not_checked`.
+TLX/Triton kernels have no P1-1 pass: report.json lists their variants' P1-1 as
+`not_checked`.
+
+## P1-2 pass (TLX/Triton)
+
+Under LKV_FRONTEND=ptx the TTGIR frontend translates every specialization's PTX a second
+time with policy `p1` `["P1-2"]` (`frontend/ptx/bulk.py`, `ir_ops_ptx.md`, "P1-2") into
+the P1 KIR `<spec>.p1.json`: the P0 events plus the P1-2 events and `named_bar`
+(`kir.md` change 15: top-level `p1: ["P1-2"]` and `cta_threads`, the block's threads).
+A specialization without a bulk store is `not_applicable`; a refusal or failure is
+logged as `P1 refused|error: <why>` and leaves its P1-2 "not checked"; the P0 KIR and
+its verdicts never change (`LKV_P1=0` skips the pass). The roles are split as the CuTe
+pass splits them (a role whose warps issue an mbarrier wait, arrive or commit only in
+part; a TTGIR partition's parts are named `<partition>_w<first>_<last>`), since the P1
+ledger takes a role's mbarrier event as every warp's.
+
+Events. A bulk store (TMA or non-tensor, store or reduce) is a `bulk_store` per
+issuing thread: its warp, its lane (absent for the elected lane of a full-warp
+`elect.sync`), the shared source (symbol, byte offset, bytes: a TMA store's hardware box
+times the element bytes, a bulk store's size) and, through an in-kernel descriptor, the
+128-byte tensormap it reads (`tmap`: Triton's scratch and the slot's byte offset).
+`cp.async.bulk.commit_group` and `cp.async.bulk.wait_group{.read} N` are `bulk_commit`
+and `bulk_wait` events of the role. Writes of shared memory are `smem_write` events per
+executing thread (in a thread loop): st.shared and generic st to a shared address
+(vector width times element size), atom and red on shared memory, stmatrix (m8n8
+.x1/.x2/.x4: each address-providing lane writes a 16-byte row; `sync`: one
+warp-synchronizing instruction), and with `async` the landings of TMA loads (the
+hardware box), bulk g2s copies (their size) and cp.async (its copy size), and of
+writes into another CTA (st.async, red.async, shared::cluster bulk copies and reduces
+through a mapa address: `async` with `cta`, the destination's rank).
+`tensormap.cp_fenceproxy` is a `tmap_write` of each executing warp. Shared symbols:
+every `.extern .shared` variable starts at the dynamic shared memory, so all of them are
+the first one.
+
+Pruning and disjointness. The byte interval each write, store and fixed object covers
+is bounded statically over its executing threads (`expr.interval`, plus urem and srem
+by a positive constant, the ring index of a loop-carried counter; P0 keeps
+`expr.interval`). A `smem_write` that cannot meet any store source of its symbol is
+dropped. Shared bytes written outside the events must not meet a store source: the
+mbarrier objects (8 bytes per initialized slot), tensormap staging buffers
+(`tensormap.replace`, 128 bytes), tcgen05.alloc's address slot (4 bytes) and CLC
+responses (16 bytes); a write under a predicate that depends on data must not meet one
+either. (The pruning compares offsets across CTAs: every CTA has the same shared-memory
+layout.) An
+interval that cannot be bounded counts as meeting everything.
+
+Refusals (`P1-2: ...`; P0 is unaffected): a store, write or group under a lane
+condition that depends on runtime values; a store several lanes of a warp may execute
+(its issuers are run-time values); a commit or wait that a bulk store issuer of its role
+does not execute (warp 0 alone executing one covers its elected lane, as Triton emits
+around a descriptor copy); `wait_group.sync_restrict::proxy::async`; an mbarrier wait
+executed by part of a warp; an address that is no shared symbol plus an offset, a
+tensormap address of unknown provenance; a packed sub-byte descriptor; a multicast TMA
+load; stmatrix shapes other than m8n8; the fixed objects and data-predicated writes
+above meeting a store source; `mbarrier.inval` (as P1-1's pass).
 
 ## The P0-6 barrier pass (both families)
 

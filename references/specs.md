@@ -620,6 +620,127 @@ them: FAIL from the second m-block on), `s2t_drain` (a drain barrier orders them
 PASS), and the persistent-handoff and split-role variants around them
 (`tests/lean/p1/expected.txt`).
 
+## P1-2 async store sources reuse ordered (`KV.StoreReuse.Holds`)
+
+Decided on a P1 KIR whose top-level `p1` names P1-2 (`kir.md` change 15; the
+TTGIR frontend writes `<spec>.p1.json` under LKV_FRONTEND=ptx for every
+specialization with a bulk store, `frontend_ptx.md` "P1-2 pass") per input, over
+the clusters (a CTA without clusters) whose role traces are all complete.
+`#eval KV.runP1 kernel input` prints the report; the theorem is
+`KV.Holds .storeReuse kernel input`. Like P1-1 it never changes a P0 verdict, is
+reported in its own section, and counts toward `lkv.py`'s outcome only with
+`--p1-strict` (its ERRORs always count). The legacy TTGIR translation and the
+CuTe frontend do not check it ("not checked").
+
+**Model** (PTX ISA 8.7 to 9.5, identical wording; sections "Completion Mechanisms
+for Asynchronous Copy Operations", "Bulk async-group completion mechanism",
+`cp.async.bulk.commit_group`, `cp.async.bulk.wait_group`). Once a bulk
+asynchronous copy is initiated, modifying its source or its tensor descriptor
+before it completes is undefined behavior. A bulk store S is a
+`cp.async.bulk.tensor.Nd.global.shared::cta.bulk_group` or
+`cp.reduce.async.bulk.tensor` (TMA store or reduce) or a non-tensor
+`cp{.reduce}.async.bulk.global.shared::cta.bulk_group`, issued by one thread t
+(`bulk_store`: t's warp and lane, or the elected lane of an `elect.sync`). S
+joins t's open bulk async-group, which t's next `cp.async.bulk.commit_group`
+closes (groups are per thread and complete in commit order). t's
+`cp.async.bulk.wait_group{.read} N` returns once all but the N most recent of t's
+committed groups completed; with `.read`, once their operations "completed
+reading from their source locations" and the ISA's `.read` text also lists
+"reading from the tensormap" (`wait_group` section). So both the source and the
+tensormap of S are free at the first wait W of t after S that follows at least
+N + 1 of t's commits after S (`Store.done`, `.read` or not), or never. The
+frontend checks that every issuing thread of a role's bulk stores executes each
+commit and wait event of the role (a wait or commit of warp 0 only covers its
+elected lane, as Triton emits around a descriptor copy), so t's events are the
+role's; `wait_group.sync_restrict::proxy::async` (PTX 9.5: orders only
+async-proxy accesses) is refused.
+
+**Conflicts.** A write X conflicts with S if it writes shared memory of S's CTA
+that overlaps S's source bytes (F1: `smem_write`, the bytes of st.shared,
+stmatrix, atom/red on shared memory, generic stores to it, the landing of a
+TMA, bulk or cp.async load, and st.async or a shared::cluster copy from another CTA
+of the cluster), or writes the 128-byte tensormap S reads (F2:
+`tmap_write`, the warp-collective `tensormap.cp_fenceproxy` into the global slot
+of an in-kernel descriptor; a host descriptor lives in param space, which the
+kernel cannot write). The pair is ordered if S completes before X (W happens
+before X in every thread executing X) or X happens before S is issued. An
+asynchronous write (a load's landing) counts only in the first direction: its
+data may land after a later store reads (that race is a data-ready hazard, not
+P1-2's).
+
+**Happens-before** over the cluster's role traces, per role the trace prefix
+some thread surely passed (`done`) and the one every thread surely passed
+(`all`), saturated from the waits before a point (`StoreReuse.saturate`, the P1
+ledger `Run.ledgersP1` as P1-1's). Every mbarrier wait and named barrier of a
+P1-2 role is executed by every thread of it (the frontend splits a role whose
+warps issue an mbarrier event in part, and refuses a wait of part of a warp), so
+a thread that passed a position passed the waits before it and they returned.
+A wait that returned for phase k (sound lower bound) needs of each arriving role
+`k x count` minus the other roles' arrivals that may precede its return
+(`needsWith`); the arrive event holding the last needed arrival was issued by
+some thread: it raises that role's `done`, never its `all` (the KIR does not say
+which threads issue an arrive). A named barrier is exact if every participant
+uses bar.sync with one count and their threads sum to it, or its count is the
+CTA's thread count (`cta_threads`: every thread takes part, idle warps without a
+role included); its k-th phase is then exactly the k-th bar.sync of every
+participating thread, which raises every participant's `all`. Another named
+barrier orders nothing in the sound reading (threads outside the roles may take
+part, so what a phase needs of a role is unknown). The issuing thread's own
+program order orders W before X if X is t's own write (the same lane, or both the
+elected lane of the warp: `elect.sync` elects the same leader for the same
+membermask), and X before S if X is t's own or a warp-synchronizing write of t's
+warp (stmatrix, the warp-collective cp_fenceproxy: t leaves it only after every
+lane executed it).
+
+The lock reading separates FAIL from undecided as P1-1's: waits at `lockPhase`,
+needs of at least the largest fitting lockstep share, named barriers that are
+not exact needing what the other roles' arrivals leave of the count, and every
+credited arrival taken as every thread's of its role.
+
+**Decision.** P1-2 holds (the theorem) iff every conflicting pair is ordered in
+the sound reading and no tensormap a store of one cluster reads is written by
+another cluster.
+
+| Kind      | Condition |
+| --------- | --------- |
+| FAIL F1   | a shared-memory write overlapping a store's source, unordered even in the lock reading, that no same-thread order the KIR cannot pin down might order |
+| FAIL F2   | the same for a write of the tensormap a store reads; also a tensormap that a store of one cluster reads and another cluster writes (no happens-before across clusters) |
+| undecided | U1 a pair ordered only in the lock reading; U2 a pair the issuing thread's own program order might order, which the KIR cannot pin down (a fixed lane of the issuer's warp and the elected issuer, or a warp-synchronizing write of its warp after the completing wait); F pairs while a named barrier id is used with two counts or in a cluster whose ledger does not converge; a stopped role trace. First line `not decided on this input` |
+| NOTE N1   | a bulk store no wait of its issuing thread completes before its role ends |
+| NOTE N2   | the P1 ledger finds a blocked wait: happens-before after it is vacuous |
+
+Lines are located at the write, with the store, its source bytes (and
+tensormap), the issuing thread and why neither direction is ordered; one line
+per (write line, store line) and CTA with a count of the other pairs there.
+
+**What a PASS means**: in the extracted model every write of shared memory that
+overlaps the source of a bulk store, and every write of the tensormap it reads,
+is issued after a `cp.async.bulk.wait_group{.read}` of the store's issuing thread
+completed its group and that wait happens before the write (mbarrier and exact
+named-barrier happens-before, the issuing thread's program order), or happens
+before the store is issued. Trust items: the `.read` reading above (a reading of
+the ISA text, `wait_group` section: if a `.read` wait did not cover the
+tensormap read, a fix that waits with `.read` before a descriptor rebuild would
+PASS wrongly); `elect.sync` electing the same lane for the same membermask (ISA
+`elect.sync`); the frontend's write set (`frontend_ptx.md`, "P1-2 pass": every
+instruction that writes shared memory is an event, refused, or provably disjoint
+from every store source); the named-barrier participants being the KIR roles'
+threads, idle warps only in a CTA-wide barrier. Not checked: the source of a
+`cp.async.bulk.shared::cluster.shared` copy into another CTA (completed through the
+destination's mbarrier, not a bulk group), TMA loads through in-kernel
+descriptors (refused by P0), multicast loads into a store source (refused), the
+data-ready (RAW) side of an asynchronous write. Write "P1-2 holds for case C, inputs I, at REV".
+
+**Evidence.** The fixtures in `tests/lean/p1_2` model the patterns P1-2 was
+written for: `staging` (an epilogue writing a staging buffer and storing it with
+TMA, single and double buffered, with and without the `.read` wait and the named
+barrier), `tmap_rebuild` (a descriptor rebuilt in its scratch slot per work
+item: unfixed FAIL F2, fixed with `wait_group 0` + bar.sync PASS, a shared slot
+across CTAs FAIL), `handoff` (cross-role through mbarriers: undecided; through a
+named barrier: PASS) and `same_thread` (`tests/lean/p1_2/expected.txt`). The
+end-to-end TLX cases `tests/e2e/cases/store_reuse_{staging,rebuild}_tlx.json` run
+the same races through the real frontend.
+
 ## Undecided specs: out-of-bounds metadata loads
 
 A role whose metadata `load` index lies outside the tensor stops at that load:
@@ -737,7 +858,7 @@ the other keys say why.
 | `variants`, `variants_p1` | the P0 and the P1 KIRs Lean checked or tried to (below) |
 | `variants_nb` | the P0-6 KIRs Lean checked or tried to (variant names end in `.nb`); each also has `nb_sites`, the barrier pass's classification of every site (`{role, op, id, count, loc, ptx_line, status (counted, open), kind, certain, rep, why}`, the KIR's `nbar.sites`), for audit, and `nb_held`, the most arrivals the pairing held under the warp-ahead reading on one input (0: the verdicts do not rest on it; report.md lists the others in "P0-6 under the warp-ahead reading") |
 | `nb_not_checked` | `[{variant, kernel, inputs, kind, error}]`: the variants without a P0-6 KIR; `kind` is `gap` (the barrier pass refuses the variant by design: UNDECIDED) or `error` (ERROR) |
-| `p1_not_checked` | `[{variant, status, error}]` (CuTe adds `kernel`, `inputs`): the variants without a P1 KIR; `status` is `refused` (UNDECIDED; the outcome counts it only with `--p1-strict`), `error` (ERROR), `not_applicable` (no TMEM) or `not_checked` (TTGIR) |
+| `p1_not_checked` | `[{variant, status, error, specs}]` (CuTe and P1-2 add `kernel`, `inputs`; `specs`: the P1 specs it concerns, `["P1-1"]` if absent): the variants without a P1 KIR; `status` is `refused` (UNDECIDED; the outcome counts it only with `--p1-strict`), `error` (ERROR), `not_applicable` (no TMEM; for P1-2 no bulk store) or `not_checked` (TTGIR for P1-1; the legacy TTGIR translation for P1-2) |
 | `totals`, `totals_p1` | per spec label, counts over (variant, input) runs (below); `totals` has `P0-6` (from `variants_nb` and `nb_not_checked`) |
 
 A variant is `{variant, kir, kernel, flags, p1, input_names, status, ...}`: `variant` is
@@ -748,7 +869,7 @@ failed or timed out, or its output does not agree with itself); the last two car
 `error`, and every spec of each of `input_names` is an ERROR. An entry of `inputs` is
 `{name, eval_error, eval_kind, specs}`: `eval_error` is null or the error that stopped
 the input's evaluation, `eval_kind` its kind (`kernel`, `limit` or `unexpected`;
-"Evaluation errors"). `specs` maps each label (`P0-1`..`P0-5`; `P1-1` in `variants_p1`)
+"Evaluation errors"). `specs` maps each label (`P0-1`..`P0-5`; in `variants_p1` the labels of the KIR's `p1_specs`, `P1-1` and/or `P1-2`)
 to:
 
 - `verdict`: `PASS` or `FAIL` as the theorem is proved or refuted, or `INCONSISTENT` if
@@ -804,12 +925,14 @@ with at least one note, whatever their outcome (a PASS can have notes).
   completion that the waits absorb in order (an MMA commit for a zero-length Q
   tile the consumer skips) looks like a trailing completion, a note. Only two
   such completions on one CTA give a P0-2 hang.
-- **P1 classes other than P1-1 are not covered**: shared- and global-memory
-  buffer reuse WAR/RAW, deadlocks that depend on timing or ring depth, TMEM
-  allocation lifetime and tcgen05 fences, proxy fences, TMA descriptor legality,
-  writer/reader layout agreement, numerics and scale factors
-  (`bug_taxonomy.md`). P1-1 (TMEM reuse ordering) is CuTe only; named barriers
-  and CTA syncs are modeled for P1-1 only.
+- **P1 classes other than P1-1 and P1-2 are not covered**: shared- and
+  global-memory buffer reuse WAR/RAW beyond bulk store sources (e.g. a TMA load
+  overwriting a tile other warps still read), deadlocks that depend on timing or
+  ring depth, TMEM allocation lifetime and tcgen05 fences, proxy fences, TMA
+  descriptor legality, writer/reader layout agreement, numerics and scale factors
+  (`bug_taxonomy.md`). P1-1 (TMEM reuse ordering) is CuTe only, P1-2 (bulk store
+  sources) the PTX translation of TLX/Triton kernels only; named barriers and CTA
+  syncs are modeled for P1 only.
 - Only concrete inputs are checked. CLC is analyzed under 3 schedules. Variants
   selected only for huge inputs (i64 indexing) or by non-default environment
   switches are checked only where a case selects them. Ping-pong consumers that

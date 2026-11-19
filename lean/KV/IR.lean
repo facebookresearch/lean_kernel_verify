@@ -86,6 +86,13 @@ structure TmemRect where
   ncols : Nat
   deriving Repr, Inhabited
 
+/-- What a bulk asynchronous store reads and writes (P1 KIR, P1-2): a TMA tensor store or
+reduce (`cp{.reduce}.async.bulk.tensor`, which also reads its tensormap), or a non-tensor
+bulk store or reduce (`cp{.reduce}.async.bulk.global.shared`). -/
+inductive BulkKind where
+  | tensor | tensor_reduce | bulk | bulk_reduce
+  deriving Repr, BEq, DecidableEq, Inhabited
+
 /-- The tensor-memory allocation of a P1 KIR: `cols` columns; `zeroBase`: addresses are
 absolute (the fake-zero-base idiom, only with a 512-column allocation), else relative to
 the allocation. -/
@@ -139,6 +146,28 @@ inductive Event where
   not fix, the same in every warp of the role; `key` (or empty): the region of the role before
   warp splitting whose condition is uniform over that role, the same in its split roles. -/
   | nb_rep (isBegin : Bool) (why : String) (key : String) (loc : Loc)
+  /-- A bulk asynchronous store (P1 KIR, P1-2) issued by one thread: lane `lane` of warp
+  `warp` (`lane = none`: the elected lane of a full-warp elect.sync), reading `bytes` bytes
+  of shared memory symbol `sym` from byte offset `src`, and with `tmap = some (base, addr)`
+  the 128-byte tensormap at byte offset `addr` of global buffer `base`. It joins its
+  thread's open bulk async-group. -/
+  | bulk_store (kind : BulkKind) (warp : Expr) (lane : Option Expr) (sym : String) (src : Expr)
+      (bytes : Nat) (tmap : Option (String × Expr)) (loc : Loc)
+  /-- cp.async.bulk.commit_group of every thread of the role (P1-2). -/
+  | bulk_commit (loc : Loc)
+  /-- cp.async.bulk.wait_group{.read} `n` of every thread of the role (P1-2). -/
+  | bulk_wait (n : Nat) (read : Bool) (loc : Loc)
+  /-- A write of shared memory (P1-2) by one thread (lane `lane` of warp `warp`, `none`: the
+  elected lane), or with `sync` by every lane of warp `warp` in one warp-synchronizing
+  instruction (`.sync.aligned`): `bytes` bytes at each masked-in byte offset of `offsets` in
+  symbol `sym`, in the shared memory of CTA `cta` of the cluster (`none`: the issuing CTA);
+  `async`: the landing of an asynchronous copy issued here (it may land later). -/
+  | smem_write (sym : String) (offsets : TExpr) (mask : Option TExpr) (bytes : Nat) (warp : Expr)
+      (lane : Option Expr) (sync : Bool) (async : Bool) (cta : Option Expr) (loc : Loc)
+  /-- A write of the 128-byte tensormap at byte offset `addr` of global buffer `base` by
+  every lane of warp `warp` in one warp-synchronizing instruction (`tensormap.cp_fenceproxy`,
+  P1-2). -/
+  | tmap_write (base : String) (addr : Expr) (warp : Expr) (loc : Loc)
   deriving Repr, Inhabited
 
 inductive Stmt where
@@ -224,6 +253,10 @@ structure Kernel where
   /-- Thread-block cluster dims (x, y, z): consecutive CTAs form a cluster; `[1, 1, 1]`
   without clusters. -/
   cluster : List Nat := [1, 1, 1]
+  /-- The P1 specs a P1 KIR is decided for, by label (KIR `p1`; `[]`: P1-1 iff `tmem`). -/
+  p1 : List String := []
+  /-- P1-2 KIRs: the CTA's thread count, idle warps included (KIR change 15). -/
+  cta_threads : Option Nat := none
   deriving Repr
 
 /-- P0-3 target region of one output tensor: rows of its segment dim (dim 0 without

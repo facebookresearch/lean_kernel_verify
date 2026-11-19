@@ -1,0 +1,17 @@
+{
+ "name": "store_reuse_rebuild_tlx",
+ "description": "P1-2 tensormap reuse (tests/e2e/kernels/lkv_e2e_store_reuse_tlx.py `rebuild`): each work item rebuilds an in-kernel descriptor in the CTA's scratch slot and TMA-stores one 64x64 fp16 tile through it, ITEMS = columns / 64. rebuild_race: the rebuild precedes every wait of the item, so the previous item's store may still read the tensormap (P1-2 FAIL, F2); rebuild_drained: `cp.async.bulk.wait_group 0` + named barrier first (PASS); rebuild_read_drained: `cp.async.bulk.wait_group.read 0` + named barrier first (PASS: .read covers the tensormap read, PTX ISA); one_item: nothing to reuse (PASS). P0 must pass on every input (PTX translation). The legacy TTGIR translation refuses tlx.named_barrier_wait (ttng.user_named_barrier_id): run it with --frontend ptx, which also writes the P1-2 KIR.",
+ "src_root": "../kernels",
+ "source": "tests/e2e/kernels/lkv_e2e_store_reuse_tlx.py",
+ "module": "lkv_e2e_store_reuse_tlx",
+ "entry": "run_rebuild",
+ "kernel": "rebuild",
+ "num_sms": 2,
+ "intended_writes": {"out_ptr": "all"},
+ "inputs": [
+  {"name": "rebuild_race", "args": {"out": {"dtype": "float16", "shape": [128, 128]}, "drain": 0}},
+  {"name": "rebuild_drained", "args": {"out": {"dtype": "float16", "shape": [128, 128]}, "drain": 1}},
+  {"name": "rebuild_read_drained", "args": {"out": {"dtype": "float16", "shape": [128, 128]}, "drain": 2}},
+  {"name": "one_item", "args": {"out": {"dtype": "float16", "shape": [128, 64]}, "drain": 0}}
+ ]
+}

@@ -40,6 +40,7 @@ import KV.Spec.Barrier
 import KV.Spec.MaskElision
 import KV.Spec.TmemReuse
 import KV.Spec.NamedBarriers
+import KV.Spec.StoreReuse
 
 namespace KV
 
@@ -51,6 +52,7 @@ def SpecId.Holds : SpecId → Run → Prop
   | .maskElision, r => r.complete ∧ MaskElision.Holds r
   | .namedBarriers, r => r.complete ∧ NamedBarriers.Holds r
   | .tmemReuse, r => r.complete ∧ TmemReuse.Holds r
+  | .storeReuse, r => r.complete ∧ StoreReuse.Holds r
 
 instance : (s : SpecId) → (r : Run) → Decidable (s.Holds r)
   | .bounds, r => inferInstanceAs (Decidable (Bounds.Holds r))
@@ -60,6 +62,7 @@ instance : (s : SpecId) → (r : Run) → Decidable (s.Holds r)
   | .maskElision, r => inferInstanceAs (Decidable (r.complete ∧ MaskElision.Holds r))
   | .namedBarriers, r => inferInstanceAs (Decidable (r.complete ∧ NamedBarriers.Holds r))
   | .tmemReuse, r => inferInstanceAs (Decidable (r.complete ∧ TmemReuse.Holds r))
+  | .storeReuse, r => inferInstanceAs (Decidable (r.complete ∧ StoreReuse.Holds r))
 
 def RunHolds (s : SpecId) : Except EvalError Run → Prop
   | .ok r => s.Holds r
@@ -121,6 +124,9 @@ def SpecId.result (s : SpecId) (r : Run) (Ls : Ledgers) : SpecResult :=
   | .tmemReuse =>
     let o := TmemReuse.analyze r r.ledgersP1
     { spec := s, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }
+  | .storeReuse =>
+    let o := StoreReuse.analyze r r.ledgersP1
+    { spec := s, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }
 
 structure Report where
   kernel : String
@@ -150,27 +156,44 @@ def runCase (k : Kernel) (i : Input) : Report :=
          | fs => s!"; elision flag(s) {", ".intercalate fs} set: the P0-1 and P0-3 checks of this input are reported under P0-5"),
       results := SpecId.all.map (·.result r Ls) }
 
-/-- P1 specs of a P1 KIR (references/specs.md, "P1-1") on input `i`: the P1 summary line
-(accesses, conflicting pairs, named barriers, blocked waits), then the P1-1 verdict,
-counterexamples and notes. -/
+/-- The P1 specs a P1 KIR is decided for: those its `p1` names, else P1-1 iff it has a TMEM
+allocation (KIR change 10). -/
+def Kernel.p1Specs (k : Kernel) : List SpecId :=
+  if k.p1.isEmpty then (if k.tmem.isSome then [.tmemReuse] else [])
+  else SpecId.p1.filter fun s => k.p1.contains s.label
+
+/-- P1 specs of a P1 KIR (references/specs.md, "P1-1", "P1-2") on input `i`: the P1 summary
+line (P1-1: accesses, conflicting pairs, named barriers, blocked waits; P1-2: bulk stores,
+writes, unordered pairs), then each P1 spec's verdict, counterexamples and notes. -/
 def runP1 (k : Kernel) (i : Input) : Report :=
+  let specs := k.p1Specs
   match eval k i with
   | .error e =>
     { kernel := k.kernel, input := i, error := some e, summary := "",
-      results := SpecId.p1.map fun s =>
+      results := specs.map fun s =>
         { spec := s, holds := false, issues := #[], notes := #[], certain := e.kind == .kernel } }
-  | .ok r =>
-    let events := r.ctas.foldl (fun n c => c.roles.foldl (fun n t => n + t.events.size) n) 0
-    let stops := r.ctas.foldl (fun n c => n + (c.roles.filter (·.stopped)).size) 0
-    let o := TmemReuse.analyze r r.ledgersP1
-    let res := [{ spec := .tmemReuse, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }]
-    { kernel := k.kernel, input := i, error := none,
-      summary := s!"grid {pidStr r.host.grid}{clusterStr r.host}: {r.ctas.size} CTA(s) x {k.roles.length} role(s), {events} events; P1: " ++
-        s!"{o.accesses} TMEM accesses, {o.pairs} conflicting pair(s) classified ({o.lockOnly} ordered only under the lockstep contents), {o.named} named-barrier slot(s)" ++
+  | .ok r => Id.run do
+    let events : Nat := r.ctas.foldl (fun n c => c.roles.foldl (fun n t => n + t.events.size) n) 0
+    let stops : Nat := r.ctas.foldl (fun n c => n + (c.roles.filter (·.stopped)).size) 0
+    let Ls := r.ledgersP1
+    let mut summary := s!"grid {pidStr r.host.grid}{clusterStr r.host}: {r.ctas.size} CTA(s) x {k.roles.length} role(s), {events} events; P1: "
+    let mut res : List SpecResult := []
+    let mut stats : List String := []
+    if specs.contains .tmemReuse then
+      let o := TmemReuse.analyze r Ls
+      res := res ++ [{ spec := .tmemReuse, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }]
+      stats := stats ++ [s!"{o.accesses} TMEM accesses, {o.pairs} conflicting pair(s) classified ({o.lockOnly} ordered only under the lockstep contents), {o.named} named-barrier slot(s)" ++
         (if o.inconsistent.isEmpty then "" else s!" (inconsistent: ids {o.inconsistent.toList})") ++
-        s!", {o.blocked} blocked wait(s)" ++
-        (if stops = 0 then "" else s!"; {stops} role trace(s) stop at an out-of-bounds metadata load, so P1-1 is not decided"),
-      results := res }
+        s!", {o.blocked} blocked wait(s)"]
+    if specs.contains .storeReuse then
+      let o := StoreReuse.analyze r Ls
+      res := res ++ [{ spec := .storeReuse, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }]
+      stats := stats ++ [s!"P1-2: {o.stores} bulk store(s), {o.writes} write(s), {o.pairs} unordered conflicting pair(s) ({o.undecided} undecided), {o.named} named-barrier slot(s)" ++
+        (if o.inconsistent.isEmpty then "" else s!" (inconsistent: ids {o.inconsistent.toList})") ++
+        s!", {o.blocked} blocked wait(s)"]
+    summary := summary ++ "; ".intercalate stats ++
+      (if stops = 0 then "" else s!"; {stops} role trace(s) stop at an out-of-bounds metadata load, so {", ".intercalate (specs.map (·.label))} {if specs.length = 1 then "is" else "are"} not decided")
+    return { kernel := k.kernel, input := i, error := none, summary, results := res }
 
 /-- P0-6 on a P0-6 KIR (references/specs.md, "P0-6") on input `i`: the summary line (named
 barrier operations, `nb_open` events, `nb_rep` regions reached), then the P0-6 verdict and

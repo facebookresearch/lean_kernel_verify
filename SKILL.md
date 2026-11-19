@@ -54,10 +54,12 @@ KIR JSON per compiled flag set: roles, structured control flow, exact-width inte
   |   events, inputs; frontend/kir.py (contract check) -> frontend/emit_lean.py
   |   CuTe: a second pass with the P1 slice writes <kernel>__<digest>.p1.json (+ TMEM,
   |   tcgen05.wait and named-barrier events); the P0 KIR does not change
+  |   TLX/Triton --frontend ptx: a second pass writes <spec>.p1.json (+ bulk store,
+  |   group, shared-memory and tensormap write and named-barrier events; P1-2)
   v
 Layer 2: lean/KV evaluates every role of every CTA per input -> event traces
   |   theorem : KV.Holds .<spec> kernel input := by native_decide   (5 specs x inputs;
-  |             P1 KIR: .tmemReuse x inputs)
+  |             P1 KIR: .tmemReuse / .storeReuse x inputs)
   v
 report.md / report.json: verdict per (variant, input, spec), findings at source file:line;
   P1-1 in a section of its own
@@ -186,6 +188,18 @@ arrive only if they take more of its arrivals than all warps but one give
 arrive or commit only in part (a thread-0 arrive or wait), so each such event of
 a role is issued by all its warps.
 
+### P1-2 async store sources reuse ordered (PTX translation; `references/specs.md`, "P1-2")
+
+| P1  | Spec | FAIL / undecided | NOTE |
+| --- | ---- | ---------------- | ---- |
+| 2   | Async store sources reuse ordered: every write of shared memory overlapping the source of a bulk async store (`cp.async.bulk.tensor` / `cp.reduce.async.bulk.tensor` / `cp{.reduce}.async.bulk` global <- shared::cta, bulk_group), and every write of the tensormap of an in-kernel descriptor it reads (`tensormap.cp_fenceproxy`), is ordered: issued after a `cp.async.bulk.wait_group{.read}` of the store's issuing thread completed its group (`.read` covers the tensormap read: PTX ISA, `wait_group`) and that wait happens before it (mbarrier and exact named-barrier happens-before, the issuer's program order), or happens before the store is issued | F1 a shared-memory write, F2 a tensormap write (also one by another cluster), unordered even in the lockstep reading; undecided: U1 ordered only in the lockstep reading, U2 by an issuer program order the KIR does not pin down, U3 a load's landing issued before the store | N1 a store its issuer never waits for; N2 a blocked wait |
+
+Decided on the P1 KIR `<spec>.p1.json` the TTGIR frontend writes under
+LKV_FRONTEND=ptx for a specialization with a bulk store (`frontend_ptx.md`, "P1-2
+pass"; top-level `p1: ["P1-2"]`), reported with P1-1 in the P1 section (FAIL and
+UNDECIDED count only with `--p1-strict`). A refused P1-2 translation is "not checked"
+with its reason; the legacy TTGIR translation and the CuTe frontend do not check it.
+
 **How a verdict is decided.** Each host flag set compiles to its own KIR
 variant, paired with the inputs that select it. For each (variant, input, spec),
 lkv proves or refutes `KV.Holds .<spec> kernel input` by `native_decide`, over
@@ -250,6 +264,15 @@ A verdict depends on exactly these items (`design.md`, "Trust base"):
    splitting (copies of PTX blocks), the recorded contents of metadata tensors, and
    for arrive-based protocols the warp-ahead reading (no role runs a whole instance
    of a named barrier ahead of the others; the report counts the arrivals it held).
+8. **P1-2 only:** the P1 ledger and the role splitting of item 6; the PTX ISA
+   reading that `cp.async.bulk.wait_group.read` also covers the store's tensormap
+   read; `elect.sync` electing the same lane for the same membermask (a store and a
+   write of one elected lane are one thread's); the frontend's write set (every PTX
+   instruction that writes shared memory is a `smem_write`, refused, or provably
+   disjoint from every store source, `frontend_ptx.md` "P1-2 pass"); and the
+   participants of a named barrier being its roles' threads, all of the CTA's for a
+   barrier whose count is the CTA's (idle warps included). A load's landing issued
+   before the store is never taken as ordered (U3).
 
 The case file decides what is checked: its inputs, and annotations that name
 segments, work items, intended regions and elision flags. Review them like code.
@@ -288,7 +311,9 @@ loop-carried value changing structure, e.g. a pointer into another tensor),
 side-effecting inline asm, a value that reaches an event through register
 memory (CuTe) and a per-CTA tile count the partitions capture from an `scf.if`
 (TTGIR). Not covered: completion/wait
-work-item correspondence, P1 bug classes other than P1-1 (and P1-1 on TTGIR/TLX,
+work-item correspondence, P1 bug classes other than P1-1 and P1-2 (P1-1 on TTGIR/TLX,
+P1-2 on CuTe and on the legacy TTGIR translation, the source of a DSMEM copy into
+another CTA,
 TMEM lifetime, tcgen05 fences, a warp of one role running ahead so that its
 arrivals stand in for another's), inputs and variants no case selects. CuTe
 supports sm_100 with DSL 4.4.2 and 4.6.1. Details and the spec-model limits:
@@ -332,7 +357,7 @@ table says when to read each):
 ## Tests
 
 ```bash
-$S/tests/lean/run_all.sh                    # Layer 2: positive/negative controls per spec (tests/lean/p1: P1-1)
+$S/tests/lean/run_all.sh                    # Layer 2: positive/negative controls per spec (tests/lean/p1: P1-1, p1_2: P1-2)
 python3 -I $S/tests/e2e/test_e2e.py         # lkv.py end to end, ~2 min (frontends + Lean, no GPU)
 python3 -I $S/tests/cute/test_core.py       # CuTe translation, pure Python
 python3 -I $S/tests/ptx/test_translate.py   # PTX translation, pure Python (and tests/ptx/test_*.py)

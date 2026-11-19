@@ -1,0 +1,23 @@
+# Counterexample and note texts tests/lean/run_all.sh expects in the P1-2 fixtures' Lean
+# output: <fixture> <text>.
+staging F1: the write at staging.py:10 (role epi, lane 0 of warp 1) writes smem [512, 528) while the TMA store at staging.py:13 (role epi, the elected lane of warp 0) reading smem[0, 2048) may still read it: unordered, even under the lockstep reading
+staging no cp.async.bulk.wait_group of epi completes it
+staging it completes at the wait at staging.py:4, which is not surely before the write in every thread executing it
+staging not decided on this input: named barrier(s) [1] are used with two counts
+staging note: staging.py:13: cta (0,0,0) role epi: the TMA store at staging.py:13 (role epi, the elected lane of warp 0) reading smem[0, 2048) is never completed by a cp.async.bulk.wait_group of its issuing thread before its role ends
+tmap_rebuild F2: the write at tmap_rebuild.py:8 (role ln, every lane of warp 0) writes the tensormap at scratch+0 while the TMA store at tmap_rebuild.py:12 (role ln, the elected lane of warp 0) reading smem[0, 2048) and the tensormap at scratch+0 may still read it
+tmap_rebuild F2: the write at tmap_rebuild.py:7 (role ln, every lane of warp 1) writes the tensormap at scratch+0
+tmap_rebuild ordered only if the store's issuing thread itself executes the write in program order
+tmap_rebuild may still read it: no happens-before across clusters
+handoff not decided on this input: 128 conflicting pair(s) of a bulk store and a write are ordered only under the lockstep reading or by a same-thread program order the KIR does not pin down
+handoff ordered only under the lockstep reading (the ledger's lockstep contents, or mbarrier arrivals taken as every thread's), not by sound happens-before
+handoff F1: the write at handoff.py:5 (role fill, lane 0 of warp 0) writes smem [0, 16) while the TMA store at handoff.py:10 (role store, the elected lane of warp 0) reading smem[0, 2048) may still read it
+same_thread the write at same_thread.py:8 (role w, lane 5 of warp 0) writes smem [0, 16) and the bulk store at same_thread.py:2 (role w, lane 0 of warp 0) reading smem[0, 1024): ordered only if a bar.warp.sync of their warp orders the write with the store's issuing thread
+same_thread the write at same_thread.py:23 (role w, lane 1 of warp 0) writes smem [16, 32) and the bulk store at same_thread.py:21 (role w, lane 0 of warp 0) reading smem[0, 1024): ordered only if a bar.warp.sync of their warp orders the write with the store's issuing thread (another lane of its warp), which the KIR does not keep (bar.warp.sync orders the memory accesses of the lanes taking part) (30 more pair(s) at these two lines in this CTA)
+same_thread the write at same_thread.py:9 (role w, lane 3 of warp 0) writes smem [0, 16) and the bulk store at same_thread.py:3 (role w, the elected lane of warp 0) reading smem[0, 1024): ordered only if the store's issuing thread itself executes the write in program order
+same_thread the write at same_thread.py:13 (role w, lane 7 of warp 0) writes smem [0, 16) and the bulk store at same_thread.py:14
+same_thread F1: the write at same_thread.py:10 (role w, the elected lane of warp 0) writes smem [0, 16) while the bulk store at same_thread.py:3 (role w, the elected lane of warp 0) reading smem[0, 1024) may still read it
+same_thread note: same_thread.py:4: cta (0,0,0) role w: the bulk reduce at same_thread.py:4
+staging_wide not decided on this input
+same_thread lands in smem [0, 1024) and the bulk store at same_thread.py:17 (role w, the elected lane of warp 0) reading smem[0, 1024): the asynchronous copy is issued before the store, but may land after the store reads
+cluster_remote F1: the write at cluster_remote.py:4 (role w of cta (1,0,0), lane 0 of warp 0) lands in smem [0, 16) while the bulk store at cluster_remote.py:2 (role w of cta (0,0,0), lane 0 of warp 0) reading smem[0, 1024) may still read it
