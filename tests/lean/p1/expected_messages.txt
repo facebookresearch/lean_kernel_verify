@@ -1,6 +1,7 @@
 # Counterexample and note text each P1 fixture's report must contain: <fixture> <substring>.
 s2t_race s2t_race.py:15: cta (0,0,0) roles mma / compute: tcgen05.cp at s2t_race.py:15 (role mma, warp 0) writes lanes [0,128) x cols [80,84); tcgen05.ld at s2t_race.py:21 (role compute, warp 2) reads lanes [64,96) x cols [64,96): unordered, even under the lockstep reading.
 s2t_race the latest commit whose landing the waits before tcgen05.ld need is at s2t_race.py:12
+s2t_race more pair(s) at these two lines in this CTA)
 s2t_race note: s2t_race.py:15: cta (0,0,0) roles mma / mma: tcgen05.mma at s2t_race.py:11 (role mma, warp 0) writes D lanes [0,128) x cols [0,128)
 drain_before_wait_ld drain_before_wait_ld.py:15: cta (0,0,0) roles mma / compute: tcgen05.cp at drain_before_wait_ld.py:15
 handoff tcgen05.ld never completes (no tcgen05.wait::ld follows it in reader)
@@ -33,6 +34,7 @@ hang_vacuous note: hang_vacuous.py:10: cta (0,0,0) role w: the P1 ledger finds 1
 cluster_pair cluster_pair.py:21: cluster (0,0,0) roles mma of cta (0,0,0) / drain of cta (0,0,0): tcgen05.ld at cluster_pair.py:21 (role drain of cta (0,0,0), warp 1) in the TMEM of cta (0,0,0) reads lanes [32,64) x cols [64,96); tcgen05.mma at cluster_pair.py:12 (role mma of cta (0,0,0), warp 0) in the TMEM of cta (0,0,0), cta (1,0,0) writes D lanes [0,128) x cols [64,128): unordered, even under the lockstep reading.
 cluster_pair cluster_pair.py:21: cluster (0,0,0) roles mma of cta (0,0,0) / drain of cta (1,0,0): tcgen05.ld at cluster_pair.py:21 (role drain of cta (1,0,0), warp 1) in the TMEM of cta (1,0,0) reads lanes [32,64) x cols [64,96)
 cluster_pair and the latest drain of cta (1,0,0) event surely before tcgen05.mma is none
+cluster_pair is at cluster_pair.py:23 (1 more pair(s) at these two lines in this cluster)
 ledger_cycle ?: cta (0,0,0): not decided on this input: the barrier ledger of this CTA does not converge
 ledger_cycle lc.py:40: cta (0,0,0) roles a / e: tcgen05.st at lc.py:40 (role a, warp 0) writes lanes [0,32) x cols [0,4); tcgen05.ld at lc.py:52 (role e, warp 4) reads lanes [0,32) x cols [0,4): unordered, even under the lockstep reading
 named_idle named_idle.py:22: cta (0,0,0) roles a / b: tcgen05.st at named_idle.py:22 (role b, warp 4) writes lanes [0,32) x cols [0,32); tcgen05.ld at named_idle.py:10 (role a, warp 0) reads lanes [0,32) x cols [0,32): unordered, even under the lockstep reading

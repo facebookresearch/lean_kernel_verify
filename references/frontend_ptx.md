@@ -572,7 +572,8 @@ above meeting a store source; `mbarrier.inval` (as P1-1's pass).
 barriers convergent" (`specs.md` "P0-6"), into the P0-6 KIR (`<spec>.nb.json` next to
 the TTGIR dump, `<Kernel>__<digest>.nb.json` in the CuTe `kir/`; `kir.md` change 14):
 in both families, whatever `LKV_FRONTEND` selects (also `legacy`), and also for variants
-whose P0 translation is refused. It reuses this frontend's parser, CFG, regions, roles
+whose P0 translation is refused, but for a cluster geometry LKV does not check ("Launch
+records", "Clusters, tcgen05, CLC"). It reuses this frontend's parser, CFG, regions, roles
 and exact interpreter (`interp.Translator` subclassed), and emits no P0 event: its slice
 is the control flow, the named barriers and the values that decide them.
 

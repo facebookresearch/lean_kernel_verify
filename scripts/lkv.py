@@ -481,7 +481,9 @@ def run_ttgir(case_path, root, fe, logs, sel, target, jobs=1):
 def ttgir_p1(dump, fe, logs):
     """The P1-2 KIRs the TTGIR frontend wrote (`<spec>.p1.json`, LKV_FRONTEND=ptx; with a
     preferred cluster geometry also `<spec>@cluster<dims>.p1.json`); the specializations
-    (geometries) without one go to P1_NOT_CHECKED with to_kir's `P1 ...` log line."""
+    (geometries) without one go to P1_NOT_CHECKED with to_kir's `P1 ...` log line and
+    the inputs they concern (variant_inputs: for a geometry, those whose grid it
+    divides)."""
     lines = (logs / "to_kir.log").read_text().splitlines()
     status = {}
     for line in lines:
@@ -514,13 +516,12 @@ def ttgir_p1(dump, fe, logs):
             {
                 "variant": k,
                 "kernel": dump["kernel"],
-                "inputs": [i["name"] for i in dump["inputs"]
-                           if any(la["spec"] == k.split("@")[0] for la in i.get("launches", []))],
+                "inputs": variant_inputs(dump, k),
                 "status": st,
                 "error": why,
                 "specs": ["P1-2"],
             }
-        )  # fmt: skip
+        )
     return kirs
 
 

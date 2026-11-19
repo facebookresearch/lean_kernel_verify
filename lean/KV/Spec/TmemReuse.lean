@@ -509,7 +509,7 @@ def pairIssue (h : Host) (C : P1Cta) (i j : Nat) (k : PairKind) (extra : Nat) : 
   let (pi, qi) := if swap then (j, i) else (i, j)
   let p := C.accesses[pi]!
   let q := C.accesses[qi]!
-  let more := if extra = 0 then "" else s!" ({extra} more pair(s) at these two lines in this CTA)"
+  let more := if extra = 0 then "" else s!" ({extra} more pair(s) at these two lines in this {if h.csize ≤ 1 then "CTA" else "cluster"})"
   let d (x : Access) := x.describe h C.pid
   let msg := match k with
     | .fail => s!"{d p}; {d q}: unordered, even under the lockstep reading. {whyNot h C q p C.lock.get[pi]!}. {whyNot h C p q C.lock.get[qi]!}"

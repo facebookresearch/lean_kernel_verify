@@ -364,6 +364,37 @@ class TtgirP1Geometry(unittest.TestCase):
         written = json.loads((tmp / "s@cluster4x1x1.p1.json").read_text())
         self.assertEqual(written["geometry"], [4, 1, 1])
 
+    def test_p1_preferred_dims_disagree(self):
+        # launches that disagree on the preferred dims: the regular P1 KIR is checked and
+        # the all-preferred one is a refused entry, `<spec>@cluster` (gap), as P0's is
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        recs = [{"cluster": [2, 1, 1], "grid": [8, 1, 1], "attrs": {"preferred_cluster": p}}
+                for p in ([4, 1, 1], [8, 1, 1])]  # fmt: skip
+        dump = {"specs": {"s": {}},
+                "inputs": [{"name": f"i{k}", "launches": [{"spec": "s", "launch": r}]}
+                           for k, r in enumerate(recs)]}  # fmt: skip
+        (tmp / "dump.json").write_text(json.dumps(dump))
+        calls = []
+
+        def build(where, d, key, case, geometry=None, p1=False):
+            calls.append((key, geometry, p1))
+            return {"p1": ["P1-2"], "geometry": geometry}
+
+        with (
+            mock.patch.object(ttgir_to_kir, "build_ptx", build),
+            mock.patch.object(ttgir_to_kir.kir_contract, "validate", lambda k: []),
+        ):
+            results = ttgir_to_kir.translate_p1(tmp / "dump.json", {})
+        self.assertEqual(calls, [("s", None, True)])
+        self.assertEqual(list(results), ["s", "s@cluster"])
+        self.assertEqual(results["s"], {"p1": ["P1-2"], "geometry": None})
+        e = results["s@cluster"]
+        self.assertIsInstance(e, ttgir_to_kir.KirError)
+        self.assertEqual(ttgir_to_kir.failure_kind(e), "gap")
+        self.assertIn("differ", str(e))
+        self.assertEqual(sorted(p.name for p in tmp.glob("*.p1.json")), ["s.p1.json"])
+
 
 class CuteProbe(unittest.TestCase):
     def setUp(self):
@@ -405,6 +436,26 @@ class CuteProbe(unittest.TestCase):
         self.assertEqual([e["ev"] for e in evs], ["gload", "gstore"])
         # DSL 4.4.2: lines only, the library line 847 (a float add) leaves no trace
         self.assertEqual({e["loc"] for e in evs}, {"lkv_e2e_probe_cute.py:23"})
+
+    def test_preferred_cluster_refuses_p0_6(self):
+        # a launch with a preferred cluster other than its cluster: the P0-6 KIR is
+        # refused as the P0 one is (gap, the same reason), not checked in one geometry
+        dump = json.loads((self.tmp / "dump.json").read_text())
+        for inp in dump["inputs"]:
+            for la in inp["launches"]:
+                for r in la["launch_records"]:
+                    r["attrs"]["preferred_cluster"] = [2, 1, 1]
+        (self.tmp / "dump.json").write_text(json.dumps(dump))
+        variant, _host = self.run_kir()
+        self.assertNotIn("kir", variant)
+        self.assertEqual(variant["kind"], "gap")
+        self.assertIn(
+            "a preferred cluster (2, 1, 1) beside the cluster dims", variant["error"]
+        )
+        self.assertEqual(
+            variant["nb"], {"status": "refused", "error": variant["error"]}
+        )
+        self.assertEqual(list((self.tmp / "kir").glob("*.nb.json")), [])
 
     def test_write_set(self):
         dump = json.loads((self.tmp / "dump.json").read_text())

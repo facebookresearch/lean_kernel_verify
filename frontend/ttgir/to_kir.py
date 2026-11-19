@@ -17,7 +17,8 @@ kind "gap" (refused by design) or "error" (the case or LKV must be fixed; `KirEr
 Translation switch: LKV_FRONTEND=ptx, the default (unset or empty), translates each
 specialization's PTX instead (build_ptx: the PTX core's Facts, frontend/ptx/translate.py,
 with this file's naming, tensors, inputs and checks; KIR `ir` "ptx"); "legacy" is the
-TTGIR translation above.
+TTGIR translation above, which refuses such a
+specialization (check_preferred_cluster: it checks one geometry).
 
 P1 pass (LKV_FRONTEND=ptx only; LKV_P1=0 skips it): the PTX core's P1-2 events
 (frontend/ptx/bulk.py; references/kir.md change 15) give a P1 KIR <spec>.p1.json per
@@ -1517,6 +1518,7 @@ def build(ttgir: str, dump: dict, key: str, case: dict) -> dict:
         {"name": b, "count": K.const(c["count"], 32), "num": K.const(c["num"], 32)}
         for b, c in tr.barriers.items()
     ]
+    check_preferred_cluster(dump, key)  # last: a refused construct is reported first
     return _document(dump, key, case, "ttgir", target["name"], params, tensors,
                      barriers, roles, launches, tr.written, tr.desc_bases, tr.uses_clc)  # fmt: skip
 
@@ -1681,6 +1683,22 @@ def check_required_cluster(dump: dict, key: str) -> None:
                            f"but its function's required cluster (cuFuncSetAttribute "
                            f"REQUIRED_CLUSTER) is {tuple(req)} (gap: which one the "
                            "hardware uses is not modeled)")  # fmt: skip
+
+
+def check_preferred_cluster(dump: dict, key: str) -> None:
+    """The TTGIR translation's (build) KirError (gap) if a launch of the specialization
+    asks for a preferred cluster (LaunchRecord attrs.preferred_cluster) other than its
+    cluster dims: the device may then run clusters of either size, and this translation
+    checks one geometry (the PTX translation checks both: preferred_geometry)."""
+    for inp, la in _launches(dump, key):
+        rec = la.get("launch") or {}  # (a dump without launch records: no preference)
+        pref = (rec.get("attrs") or {}).get("preferred_cluster")
+        cluster = tuple(rec.get("cluster") or (1, 1, 1))
+        if pref and tuple(pref) != cluster:
+            raise KirError(f"the launch of input {inp['name']} asks for a preferred cluster "
+                           f"{tuple(pref)} beside its cluster dims {cluster} (gap: a preferred "
+                           "cluster geometry: the TTGIR translation checks one geometry; the "
+                           "PTX translation checks both)")  # fmt: skip
 
 
 def preferred_geometry(dump: dict, key: str) -> tuple | None:
@@ -2362,23 +2380,19 @@ def translate(dump_path: Path, case: dict) -> dict:
     return results
 
 
-def _preferred_or_none(dump: dict, key: str) -> tuple | None:
-    """preferred_geometry, None where it fails (the P0 KIR's translation reports why)."""
-    try:
-        return preferred_geometry(dump, key)
-    except KirError:
-        return None
-
-
 def translate_p1(dump_path: Path, case: dict) -> dict:
     """The P1 pass (module doc): {name: P1 KIR, None (no bulk store) or the exception that
     refused it} per specialization and, with a preferred cluster geometry, also for the
-    all-preferred geometry (`<spec>@cluster<dims>`, as translate); writes <name>.p1.json
-    for each P1 KIR."""
+    all-preferred geometry (`<spec>@cluster<dims>`, as translate; `<spec>@cluster` with
+    preferred_geometry's KirError where it fails, e.g. launches that disagree on the
+    preferred dims, as translate records it); writes <name>.p1.json for each P1 KIR."""
     dump = json.loads(dump_path.read_text())
     results: dict[str, dict | Exception | None] = {}
     for key in dump["specs"]:
-        pref = _preferred_or_none(dump, key)
+        try:
+            pref, unchecked = preferred_geometry(dump, key), None
+        except KirError as e:  # the preferred geometry is never silently unchecked
+            pref, unchecked = None, e
         todo = [(key, None)] + (
             [] if pref is None else [(key + geometry_suffix(pref), pref)]
         )
@@ -2400,6 +2414,8 @@ def translate_p1(dump_path: Path, case: dict) -> dict:
             if kir is not None:
                 (dump_path.parent / f"{name}.p1.json").write_text(json.dumps(kir))
             results[name] = kir
+        if unchecked is not None:
+            results[key + "@cluster"] = unchecked
     return results
 
 

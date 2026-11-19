@@ -49,7 +49,10 @@ Every normalized mnemonic has exactly one class. A mnemonic without a row is an 
 * **control**: `bra` (guarded: the branch of an if or loop), `brx.idx` (the Triton
   warp-specialize dispatch, or a switch: rewritten into a compare chain whose index must
   be provably in range, `frontend_ptx.md` "Control flow"), `ret` (exactly one per
-  kernel);
+  kernel; `cfg.py` also takes an `exit` as it, but `exit` has no row, so the PTX write
+  set of such a kernel, `translate.writes`, is unknown: the stale-data checks of a
+  refused CuTe variant then take every tensor it may address as written, and P0-6 reads
+  no weak global load as uniform or as metadata);
 * **drop**: affects no spec; its results are Data, and Data that reaches a root (an event
   operand, a branch condition, an address, a predicate, a barrier field, a work anchor)
   is the slice soundness refusal naming its origin, so a wrong drop cannot hide an event;

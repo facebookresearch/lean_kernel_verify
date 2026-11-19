@@ -583,9 +583,10 @@ class Unit(unittest.TestCase):
         # the P1-2 KIR of a preferred cluster geometry (<spec>@cluster<dims>.p1.json) is
         # checked as its own variant, and a refused one is not checked, with its inputs
         self.addCleanup(lkv_py.P1_NOT_CHECKED.clear)
+        la = lambda spec: {"spec": spec, "launch": {"grid": [8, 1, 1]}}  # noqa: E731
         dump = {"kernel": "k", "specs": {"s": {}, "t": {}},
-                "inputs": [{"name": "i", "launches": [{"spec": "s"}]},
-                           {"name": "j", "launches": [{"spec": "t"}]}]}  # fmt: skip
+                "inputs": [{"name": "i", "launches": [la("s")]},
+                           {"name": "j", "launches": [la("t")]}]}  # fmt: skip
         with tempfile.TemporaryDirectory() as d:
             fe, logs = Path(d) / "fe", Path(d) / "logs"
             fe.mkdir()
@@ -604,6 +605,33 @@ class Unit(unittest.TestCase):
             [(x["variant"], x["status"], x["inputs"]) for x in lkv_py.P1_NOT_CHECKED],
             [("t@cluster4x1x1", "refused", ["j"])],
         )
+
+    def test_ttgir_p1_geometry_inputs(self):
+        # a refused all-preferred P1-2 KIR counts for the inputs whose grid its dims
+        # divide (as a failed P0 KIR of that geometry, variant_inputs); one refused because
+        # the launches disagree on the preferred dims (`<spec>@cluster`) for every input
+        self.addCleanup(lkv_py.P1_NOT_CHECKED.clear)
+        la = lambda grid: {"spec": "s", "launch": {"grid": grid}}  # noqa: E731
+        dump = {"kernel": "k", "specs": {"s": {}},
+                "inputs": [{"name": "a", "launches": [la([8, 1, 1])]},
+                           {"name": "b", "launches": [la([6, 1, 1])]}]}  # fmt: skip
+        with tempfile.TemporaryDirectory() as d:
+            fe, logs = Path(d) / "fe", Path(d) / "logs"
+            fe.mkdir()
+            logs.mkdir()
+            (fe / "s.p1.json").write_text("{}")
+            (logs / "to_kir.log").write_text(
+                "[to_kir] LKV_FRONTEND=ptx: translating the PTX\n"
+                "[to_kir] s@cluster4x1x1: P1 refused: a gap\n"
+                "[to_kir] s@cluster: P1 refused: launches differ\n"
+            )
+            kirs = lkv_py.ttgir_p1(dump, fe, logs)
+        self.assertEqual([k.name for k in kirs], ["s.p1.json"])
+        self.assertEqual(
+            [(x["variant"], x["status"], x["inputs"]) for x in lkv_py.P1_NOT_CHECKED],
+            [("s@cluster", "refused", ["a", "b"]),
+             ("s@cluster4x1x1", "refused", ["a"])],
+        )  # fmt: skip
 
     def test_variants_without_verdicts_by_kind(self):
         refused = {

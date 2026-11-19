@@ -341,7 +341,8 @@ change 14) is made from the variant's PTX by the barrier pass of the PTX fronten
 (`frontend/ptx/nbar.py`, frontend_ptx.md "The P0-6 barrier pass"), for every variant of
 both families, whatever the Layer-1 translation (`--frontend legacy` too) and also where
 the P0 translation refuses the variant (e.g. the global-memory synchronization of a
-Triton kernel across CTAs). Its roles are the warp-specialize roles (TLX/Triton:
+Triton kernel across CTAs), but not for a cluster geometry LKV does not check (below).
+Its roles are the warp-specialize roles (TLX/Triton:
 `default`, `partition<k>`, padding states' roles included; CuTe: the block), split into
 warp ranges wherever a deciding condition is uniform within each warp but not over the
 role, so every event is executed by every warp of its role:
@@ -898,8 +899,8 @@ the other keys say why.
 | `frontend_failures` | `[{variant, kernel, inputs, kind, error}]`: the P0 variants the frontend made no KIR for, with the inputs that launched them; `kind` is `gap` (refused by design: UNDECIDED) or `error` (ERROR) |
 | `variants`, `variants_p1` | the P0 and the P1 KIRs Lean checked or tried to (below) |
 | `variants_nb` | the P0-6 KIRs Lean checked or tried to (variant names end in `.nb`); each also has `nb_sites`, the barrier pass's classification of every site (`{role, op, id, count, loc, ptx_line, status (counted, open), kind, certain, rep, why}`, the KIR's `nbar.sites`), for audit, and `nb_held`, the most arrivals the pairing held under the warp-ahead reading on one input (0: the verdicts do not rest on it; report.md lists the others in "P0-6 under the warp-ahead reading") |
-| `nb_not_checked` | `[{variant, kernel, inputs, kind, error}]`: the variants without a P0-6 KIR; `kind` is `gap` (the barrier pass refuses the variant by design: UNDECIDED) or `error` (ERROR) |
-| `p1_not_checked` | `[{variant, status, error, specs}]` (CuTe and P1-2 add `kernel`, `inputs`; `specs`: the P1 specs it concerns, `["P1-1"]` if absent): the variants without a P1 KIR; `status` is `refused` (UNDECIDED; the outcome counts it only with `--p1-strict`), `error` (ERROR), `not_applicable` (no TMEM; for P1-2 no bulk store) or `not_checked` (TTGIR for P1-1; the legacy TTGIR translation for P1-2) |
+| `nb_not_checked` | `[{variant, kernel, inputs, kind, error}]` (`inputs` as in `frontend_failures`): the variants without a P0-6 KIR; `kind` is `gap` (the barrier pass refuses the variant by design: UNDECIDED) or `error` (ERROR) |
+| `p1_not_checked` | `[{variant, status, error, specs}]` (CuTe and P1-2 add `kernel`, `inputs`, as in `frontend_failures`; `specs`: the P1 specs it concerns, `["P1-1"]` if absent): the variants without a P1 KIR; `status` is `refused` (UNDECIDED; the outcome counts it only with `--p1-strict`), `error` (ERROR), `not_applicable` (no TMEM; for P1-2 no bulk store) or `not_checked` (TTGIR for P1-1; the legacy TTGIR translation for P1-2) |
 | `totals`, `totals_p1` | per spec label, counts over (variant, input) runs (below); `totals` has `P0-6` (from `variants_nb` and `nb_not_checked`) |
 
 A variant is `{variant, kir, kernel, flags, p1, input_names, status, ...}`: `variant` is

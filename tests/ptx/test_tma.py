@@ -25,13 +25,16 @@ per-warp operand splits the role; tkinfo_version); bulk copies
 (g2s: gload + tma_load of bulk_<T>_<n>; s2g; reduce, its type checked); in-kernel descriptors (zeroed staging buffer, replace under a thread mask,
 cp_fenceproxy to the scratch, a store through it clipped at the extents, one buffer reused
 for two descriptors, other shared-memory writes closing the buffer (generic st/atom/red
-through cvta.shared unless of static bytes outside it, stmatrix, cp.async, mbarrier),
+through cvta.shared unless of static bytes outside it, stmatrix, cp.async, mbarrier, a
+bulk reduce into this or the peer CTA's shared memory; every shared-memory writer of the
+op table),
 and the refusals, a replace under a branch on data among them); the write set through
 descriptors; clusters, multicast and generic access to a descriptor refused; desc_base
 and segment_dims.
 """
 
 import math
+import re
 import struct
 import sys
 import unittest
@@ -46,7 +49,7 @@ if __package__ in (None, ""):
     __package__ = "lkv_root.tests.ptx"  # noqa: A001
 
 from ...frontend import kir  # noqa: E402
-from ...frontend.ptx import tma, translate as T  # noqa: E402
+from ...frontend.ptx import interp, ops, tma, translate as T  # noqa: E402
 
 SRC = "/src"
 _DECL = {
@@ -80,8 +83,11 @@ def kernel(body: str, params: list, threads: int) -> str:
 """
 
 
-def records(params: list, family: str, threads: int, n: int = 1) -> list:
-    """LaunchRecords: a value given as a list has one entry per launch."""
+def records(
+    params: list, family: str, threads: int, n: int = 1, cluster=(1, 1, 1)
+) -> list:
+    """LaunchRecords (one cluster of `cluster` CTAs): a value given as a list has one
+    entry per launch."""
     out = []
     for r in range(n):
         ps = []
@@ -104,16 +110,17 @@ def records(params: list, family: str, threads: int, n: int = 1) -> list:
         out.append(
             {
                 "block": [threads, 1, 1],
-                "cluster": [1, 1, 1],
-                "grid": [1, 1, 1],
+                "cluster": list(cluster),
+                "grid": list(cluster),
                 "params": ps,
             }
         )
     return out
 
 
-def run(body, params, family="ttgir", tensors=None, threads=32, launches=1, **pol):
-    recs = records(params, family, threads, launches)
+def run(body, params, family="ttgir", tensors=None, threads=32, launches=1,
+        cluster=(1, 1, 1), **pol):  # fmt: skip
+    recs = records(params, family, threads, launches, cluster)
     table = T.param_table(recs, family, None, [])
     pol = T.policy(family, src_root=SRC, params=table,
                    tensors={n: {"elem_bytes": b} for n, b in (tensors or {}).items()}, **pol)  # fmt: skip
@@ -1156,6 +1163,42 @@ class InKernel(unittest.TestCase):
                     self.assertEqual(f.refusals, [])
                 else:
                     self.assertIn("not zeroed by one warp first", f.refusals[0]["msg"])
+
+    def test_bulk_reduce_closes_the_buffer(self):
+        # a bulk reduce into shared memory (cp.reduce.async.bulk .shared::cluster, here
+        # into this CTA's or the peer's shared memory of a cluster of two) closes the open
+        # buffers whatever its bytes, as a bulk copy does; before the zeroing it closes
+        # nothing (the zeroing opens the buffer)
+        init = "    @%p1 mbarrier.init.shared::cta.b64 [%r2+64], 1;\n"
+        red = ("    mov.u32 %r70, %cluster_ctarank;\n    xor.b32 %r71, %r70, PEER;\n"
+               "    add.s32 %r72, %r2, 1024;\n    mapa.shared::cluster.u32 %r73, %r72, %r71;\n"
+               "    add.s32 %r74, %r2, 64;\n    mapa.shared::cluster.u32 %r75, %r74, %r71;\n"
+               "    add.s32 %r76, %r2, 2048;\n    @%p2 cp.reduce.async.bulk.shared::cluster."
+               "shared::cta.mbarrier::complete_tx::bytes.add.u32 [%r73], [%r76], 16, [%r75];\n")  # fmt: skip
+        zero = "    st.shared.b32 [%r42], %r43;\n"
+        for peer in ("0", "1"):
+            r = red.replace("PEER", peer)
+            body = (
+                STAGE + init + fill(0, 0, 20, 0).replace(zero, zero + r) + use(20, 21)
+            )
+            f = run(body, KP, tensors=KT, cluster=(2, 1, 1))
+            self.assertIn("not zeroed by one warp first", f.refusals[0]["msg"], peer)
+            body = STAGE + init + r + fill(0, 0, 20, 0) + use(20, 21)
+            self.assertEqual(run(body, KP, tensors=KT, cluster=(2, 1, 1)).refusals, [])
+
+    def test_every_shared_writer_closes_the_buffer(self):
+        # every op-table row that writes shared memory (interp.CAPTURE_WRITERS) closes the
+        # open buffers: by tma.SHARED_WRITES (whatever its bytes), as a write whose bytes
+        # are compared with them (st.shared, generic st/atom/red, atom/red.shared), or as
+        # the buffer's own tensormap.replace
+        writers = [re.compile(p) for p in interp.CAPTURE_WRITERS]
+        compared = re.compile(r"st(\.shared)?$|(atom|red)(\.shared)?\."
+                              r"(add|and|cas|dec|exch|inc|max|min|or|xor)$"
+                              r"|tensormap\.replace\.\w+\.shared$")  # fmt: skip
+        missing = [k for k, (cls, _r) in ops.TABLE.items()
+                   if cls != "refuse" and any(w.match(k) for w in writers)
+                   and not k.startswith(tma.SHARED_WRITES) and not compared.match(k)]  # fmt: skip
+        self.assertEqual(missing, [])
 
     def test_zeroed_through_a_register_known_zero(self):
         # LLVM zeroes the buffer with a register an earlier loop's body sets to 0, read

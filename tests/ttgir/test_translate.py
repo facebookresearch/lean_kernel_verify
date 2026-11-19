@@ -1582,6 +1582,36 @@ class RequiredClusterTest(unittest.TestCase):
         self.assertEqual(to_kir.failure_kind(e.exception), "gap")
 
 
+class PreferredClusterTest(unittest.TestCase):
+    """check_preferred_cluster: the TTGIR translation refuses a launch with a preferred
+    cluster other than its cluster dims (gap: it checks one geometry, the PTX
+    translation both), after its own refusals."""
+
+    def test_preferred_cluster(self):
+        dump = dump_of({})
+        la = dump["inputs"][0]["launches"][0]
+        case = {"inputs": [{"name": "i"}]}
+        for attrs in (
+            {},
+            {"preferred_cluster": None},
+            {"preferred_cluster": [1, 1, 1]},
+        ):
+            la["launch"] = {"cluster": [1, 1, 1], "attrs": attrs}
+            to_kir.build(ttgir({}, ""), dump, "s", case)
+        la["launch"] = {"cluster": [1, 1, 1], "attrs": {"preferred_cluster": [3, 1, 1]}}
+        with self.assertRaises(to_kir.KirError) as e:
+            to_kir.build(ttgir({}, ""), dump, "s", case)
+        self.assertIn(
+            "asks for a preferred cluster (3, 1, 1) beside its cluster dims (1, 1, 1)",
+            str(e.exception),
+        )
+        self.assertIn("the PTX translation checks both", str(e.exception))
+        self.assertEqual(to_kir.failure_kind(e.exception), "gap")
+        no_warps = ATTRS.replace('"ttg.num-warps" = 4 : i32, ', "")
+        with self.assertRaisesRegex(to_kir.KirError, "ttg.num-warps"):
+            to_kir.build(ttgir({}, "", no_warps), dump, "s", case)
+
+
 class TmemRectTest(unittest.TestCase):
     """A tmem event's rects validate through frontend/kir.py."""
 

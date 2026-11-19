@@ -151,12 +151,12 @@ from .interp import _any_elected, Data, Translator
 PREFIXES = ("cp.async.bulk", "cp.reduce.async.bulk", "tensormap.")  # mem.py routes here
 # The writes of shared memory but st.shared, generic st/atom/red and tensormap.replace,
 # each closing every open staging buffer of its role (mem.Memory.execute, interp.py):
-# stmatrix, cp.async, TMA and bulk copies into shared memory, mbarrier objects (a
-# tcgen05.commit arrives on one), tcgen05.alloc's address, a CLC response.
+# stmatrix, cp.async, TMA and bulk copies and bulk reduces into shared memory, mbarrier
+# objects (a tcgen05.commit arrives on one), tcgen05.alloc's address, a CLC response.
 SHARED_WRITES = (
     "stmatrix", "cp.async.ca", "cp.async.cg", "cp.async.bulk.shared", "mbarrier.",
     "tcgen05.alloc", "tcgen05.commit", "clusterlaunchcontrol.try_cancel",
-    "st.async.shared::cluster", "red.async.shared::cluster",
+    "st.async.shared::cluster", "red.async.shared::cluster", "cp.reduce.async.bulk.shared",
 ) + tuple(f"cp.async.bulk.tensor.{d}d.shared" for d in range(1, 6))  # fmt: skip
 # The compilers whose TMA / bulk issuing (module doc) was measured on hardware: CuTe DSL
 # 4.4.2's embedded nvPTXCompiler, DSL 4.6.1's, Triton's ptxas-blackwell (CUDA 13.3), CUDA

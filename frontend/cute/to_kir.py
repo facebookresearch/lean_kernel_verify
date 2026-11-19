@@ -968,10 +968,14 @@ def translate_nb(case: dict, dump: dict, recs: list, launches: list, las: list,
                  path: Path) -> dict:  # fmt: skip
     """The P0-6 KIR of a variant (frontend/ptx/nbar.py) from its PTX, whatever the
     translation, written to `path`: its report entry, {"status": "checked", "kir"} or
-    {"status": "refused" | "error", "error"}. Integer loads of 1-D contiguous tensors whose
+    {"status": "refused" | "error", "error"} (refused as the P0 KIR is for a preferred
+    cluster, preferred_cluster_gap). Integer loads of 1-D contiguous tensors whose
     contents every launch recorded, that the kernel never writes and that share no storage
     with a tensor it writes, are exact metadata loads (flat buffers, as in the P0
     translation)."""
+    gap = preferred_cluster_gap(las)
+    if gap is not None:  # one geometry would be checked, as for the P0 KIR
+        return {"status": "refused", "error": gap}
     nbar, T = _ptx("nbar"), _ptx("translate")
     locs = PTX_LOCS.get(dump["dsl"]["version"])
     if locs is None:
@@ -1590,10 +1594,10 @@ def _writes(variant, launch: dict) -> list:
 def preferred_cluster_gap(las: list) -> str | None:
     """The refusal (gap) of a variant some launch of which asks for a preferred cluster
     shape (cudaLaunchAttributePreferredClusterDimension, recorded by host_patches as
-    attrs.preferred_cluster) other than its cluster dims: the device may then run
-    clusters of either size, and the CuTe translations check one geometry (the PTX
-    translation of TLX/Triton kernels checks both, references/frontend_ptx.md
-    "Clusters"); None otherwise."""
+    attrs.preferred_cluster) other than its cluster dims, and of its P0-6 KIR: the
+    device may then run clusters of either size, and the CuTe frontend checks one
+    geometry (the PTX translation of TLX/Triton kernels checks both,
+    references/frontend_ptx.md "Clusters"); None otherwise."""
     for la in las:
         for r in la.get("launch_records", []):
             pref = (r.get("attrs") or {}).get("preferred_cluster")
@@ -1601,7 +1605,7 @@ def preferred_cluster_gap(las: list) -> str | None:
             if pref and tuple(pref) != cluster:
                 return (f"cuda.launch_ex: a preferred cluster {tuple(pref)} beside the cluster "
                         f"dims {cluster} (gap: clusters of either size may run; the CuTe "
-                        "translations check only the regular geometry)")  # fmt: skip
+                        "frontend checks only the regular geometry)")  # fmt: skip
     return None
 
 
