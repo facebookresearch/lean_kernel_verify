@@ -1,0 +1,69 @@
+{
+ "kir_version": 1,
+ "kernel": "short",
+ "source": "nb.py",
+ "ir": "ptx",
+ "grid": [
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  },
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  },
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  }
+ ],
+ "params": [],
+ "tensors": [],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "w0",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "named_bar",
+     "id": {
+      "e": "const",
+      "w": 32,
+      "v": 1
+     },
+     "count": {
+      "e": "const",
+      "w": 32,
+      "v": 128
+     },
+     "sync": true,
+     "loc": "nb.py:7"
+    }
+   ]
+  },
+  {
+   "name": "w1_3",
+   "warps": 3,
+   "threads_per_issue": 1,
+   "body": []
+  }
+ ],
+ "nbar": {
+  "sites": []
+ },
+ "case": {
+  "name": "nb/short",
+  "inputs": [
+   {
+    "name": "one",
+    "params": {}
+   }
+  ]
+ }
+}

@@ -35,6 +35,148 @@ def p1(name):
         return json.load(f)
 
 
+# P0-6 KIR fixtures (tests/lean/nb, references/kir.md change 14)
+def nb(name):
+    with open(os.path.join(HERE, "nb", f"{name}.kir.json")) as f:
+        return json.load(f)
+
+
+def nb_body(k):
+    return k["roles"][0]["body"]
+
+
+NB_MUTATIONS = [
+    (
+        "uniform",
+        "nb_open outside a P0-6 KIR",
+        lambda k: (
+            k.pop("nbar"),
+            nb_body(k).append(
+                {
+                    "op": "event",
+                    "ev": "nb_open",
+                    "kind": "cond",
+                    "certain": True,
+                    "why": "w",
+                    "id": None,
+                    "count": None,
+                    "sync": True,
+                    "loc": "x.py:1",
+                }
+            ),
+        ),
+        "outside a P0-6 KIR",
+    ),  # fmt: skip
+    (
+        "uniform",
+        "an mbarrier event in a P0-6 KIR",
+        lambda k: nb_body(k).append(
+            {"op": "event", "ev": "tmem_wait", "ld": True, "loc": "x.py:1"}
+        ),
+        "in a P0-6 KIR",
+    ),  # fmt: skip
+    (
+        "rep_private",
+        "nb_rep begin without its end",
+        lambda k: nb_body(k).pop(2),
+        "without an end",
+    ),
+    (
+        "open_certain",
+        "nb_open kind",
+        lambda k: nb_body(k)[0].update(kind="spin"),
+        "must be one of",
+    ),
+    (
+        "open_certain",
+        "nb_open id not const",
+        lambda k: nb_body(k)[0].update(id={"e": "var", "w": 32, "name": "x"}),
+        "null or a const Expr",
+    ),  # fmt: skip
+    (
+        "uniform",
+        "named_bar count 100",
+        lambda k: nb_body(k)[0]["body"][0].update(count=c(100)),
+        "positive multiple of 32",
+    ),
+    (
+        "uniform",
+        "a declared barrier in a P0-6 KIR",
+        lambda k: k["barriers"].append({"name": "b", "count": c(1), "num": c(1)}),
+        "declares no barriers",
+    ),
+    (
+        "meta_stop",
+        "a non-metadata tensor in a P0-6 KIR",
+        lambda k: k["tensors"][0].update(metadata=False),
+        "only 1-D metadata tensors",
+    ),
+    (
+        "meta_stop",
+        "a 2-D metadata tensor in a P0-6 KIR",
+        lambda k: k["tensors"][0].update(shape=[c(2), c(1)], strides=[c(1), c(1)]),
+        "only 1-D metadata tensors",
+    ),  # fmt: skip
+    (
+        "meta_stop",
+        "a gload in a P0-6 KIR",
+        lambda k: nb_body(k).append(
+            {
+                "op": "event",
+                "ev": "gload",
+                "tensor": "meta",
+                "offsets": c(0),
+                "mask": None,
+                "loc": "x.py:1",
+            }
+        ),  # fmt: skip
+        "gload in a P0-6 KIR",
+    ),
+    (
+        "meta_stop",
+        "a gstore in a P0-6 KIR",
+        lambda k: nb_body(k).append(
+            {
+                "op": "event",
+                "ev": "gstore",
+                "tensor": "meta",
+                "offsets": c(0),
+                "mask": None,
+                "loc": "x.py:1",
+            }
+        ),  # fmt: skip
+        "gstore in a P0-6 KIR",
+    ),
+    (
+        "meta_stop",
+        "a gatomic in a P0-6 KIR",
+        lambda k: nb_body(k).append(
+            {
+                "op": "event",
+                "ev": "gatomic",
+                "tensor": "meta",
+                "offsets": c(0),
+                "mask": None,
+                "loc": "x.py:1",
+            }
+        ),  # fmt: skip
+        "gatomic in a P0-6 KIR",
+    ),
+    (
+        "all_exit",
+        "named_bar all not a boolean",
+        lambda k: nb_body(k)[0].update({"all": 1}),
+        "expected a boolean",
+    ),
+    (
+        "all_exit",
+        "an arrive without a thread count",
+        lambda k: nb_body(k)[0].update(sync=False),
+        "always names a thread count",
+    ),
+]
+
+
 def p1_event_in_p0(k):  # a P1 event in a P0 KIR (no top-level tmem)
     k["roles"][0]["body"].append(
         {"op": "event", "ev": "tmem_wait", "ld": True, "loc": "x.py:1"}
@@ -476,6 +618,12 @@ P1_MUTATIONS = [
         lambda k: k["roles"][0]["body"][2]["then"][0].update(count=c(48)),
         "positive multiple of 32",
     ),
+    (
+        "named_bars",
+        "named_bar all in a P1 KIR",
+        lambda k: k["roles"][0]["body"][2]["then"][0].update({"all": True}),
+        "only in a P0-6 KIR",
+    ),
 ]
 
 
@@ -498,6 +646,16 @@ def main():
             print(
                 f"kir_negative: NOT REJECTED as expected: p1/{name}: {what}: want {expect!r}, got {errors}"
             )
+    for name, what, mutate, expect in NB_MUTATIONS:
+        k = copy.deepcopy(nb(name))
+        assert not kir.validate(k), f"nb/{name} must be valid before mutation"
+        mutate(k)
+        errors = kir.validate(k)
+        if not any(expect in e for e in errors):
+            failed += 1
+            print(
+                f"kir_negative: NOT REJECTED as expected: nb/{name}: {what}: want {expect!r}, got {errors}"
+            )
     for name, what, mutate in ACCEPTED:
         k = copy.deepcopy(fixture(name))
         mutate(k)
@@ -515,7 +673,7 @@ def main():
             print(
                 f"kir_negative: NOT REJECTED as expected: {name}: {what}: want {expect!r}, got {errors}"
             )
-    nmut = len(MUTATIONS) + len(P1_MUTATIONS) + 1
+    nmut = len(MUTATIONS) + len(P1_MUTATIONS) + len(NB_MUTATIONS) + 1
     print(
         f"kir_negative: {nmut + len(ACCEPTED) - failed}/{nmut + len(ACCEPTED)} as expected"
         f" ({nmut} invalid KIR variants rejected with the expected error, {len(ACCEPTED)} valid ones accepted)"

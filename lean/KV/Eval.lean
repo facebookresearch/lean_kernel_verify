@@ -225,6 +225,15 @@ inductive Ev where
   /-- bar.sync (`sync`) or bar.arrive on named barrier `id` with `count` threads, by all
   `threads` threads of the role. -/
   | namedBar (id count : Int) (sync : Bool) (threads : Int)
+  /-- bar.sync or bar.red without a thread count (P0-6 KIR `named_bar` with `all`): named
+  barrier `id` for all `count` threads of the CTA, which threads that exit release, by all
+  `threads` threads of the role. -/
+  | namedBarAll (id count : Int) (sync : Bool) (threads : Int)
+  /-- A named barrier P0-6 cannot count, reached by the role (P0-6 KIR `nb_open`). -/
+  | nbOpen (kind : String) (certain : Bool) (why : String) (id count : Option Int) (sync : Bool)
+  /-- The begin or end of a region that runs a number of times the model does not fix
+  (P0-6 KIR `nb_rep`; `key`: its identity across the roles of one split role, or empty). -/
+  | nbRep (isBegin : Bool) (key : String)
 
 structure TEvent where
   ev : Ev
@@ -604,9 +613,20 @@ def execEvent : Event → M Unit
       pure (r.use, r.write, l, l + r.nlanes, c, c + r.ncols)
     emit loc (.tmem inst w (← ctasOf loc "tmem" mask) rs site)
   | .tmem_wait ld loc => emit loc (.tmemWait ld)
-  | .named_bar id count sync loc => do
+  | .named_bar id count sync all loc => do
     let r := (← read).role
-    emit loc (.namedBar (← evalInt loc id) (← evalInt loc count) sync (r.warps * 32))
+    let i ← evalInt loc id
+    let c ← evalInt loc count
+    emit loc (if all then .namedBarAll i c sync (r.warps * 32) else .namedBar i c sync (r.warps * 32))
+  | .nb_open kind certain why id count sync loc => do
+    let i ← match id with
+      | some e => some <$> evalInt loc e
+      | none => pure none
+    let c ← match count with
+      | some e => some <$> evalInt loc e
+      | none => pure none
+    emit loc (.nbOpen kind certain why i c sync)
+  | .nb_rep b _ key loc => emit loc (.nbRep b key)
 
 def setVar (x : String) (v : Val) : M Unit :=
   modify fun s => { s with env := s.env.insert x v }

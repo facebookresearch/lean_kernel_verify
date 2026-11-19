@@ -1,0 +1,118 @@
+{
+ "kir_version": 1,
+ "kernel": "arrive_twice",
+ "source": "nb.py",
+ "ir": "ptx",
+ "grid": [
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  },
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  },
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  }
+ ],
+ "params": [],
+ "tensors": [],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "a",
+   "warps": 2,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "named_bar",
+     "id": {
+      "e": "const",
+      "w": 32,
+      "v": 1
+     },
+     "count": {
+      "e": "const",
+      "w": 32,
+      "v": 128
+     },
+     "sync": false,
+     "loc": "nb.py:1"
+    },
+    {
+     "op": "event",
+     "ev": "named_bar",
+     "id": {
+      "e": "const",
+      "w": 32,
+      "v": 1
+     },
+     "count": {
+      "e": "const",
+      "w": 32,
+      "v": 128
+     },
+     "sync": false,
+     "loc": "nb.py:6"
+    }
+   ]
+  },
+  {
+   "name": "b",
+   "warps": 2,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "named_bar",
+     "id": {
+      "e": "const",
+      "w": 32,
+      "v": 2
+     },
+     "count": {
+      "e": "const",
+      "w": 32,
+      "v": 64
+     },
+     "sync": true,
+     "loc": "nb.py:1"
+    },
+    {
+     "op": "event",
+     "ev": "named_bar",
+     "id": {
+      "e": "const",
+      "w": 32,
+      "v": 1
+     },
+     "count": {
+      "e": "const",
+      "w": 32,
+      "v": 128
+     },
+     "sync": true,
+     "loc": "nb.py:1"
+    }
+   ]
+  }
+ ],
+ "nbar": {
+  "sites": []
+ },
+ "case": {
+  "name": "nb/arrive_twice",
+  "inputs": [
+   {
+    "name": "one",
+    "params": {}
+   }
+  ]
+ }
+}

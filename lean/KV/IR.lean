@@ -126,8 +126,19 @@ inductive Event where
   /-- tcgen05.wait::ld (`ld = true`) or wait::st of the role (P1 KIR). -/
   | tmem_wait (ld : Bool) (loc : Loc)
   /-- bar.sync (`sync = true`) or bar.arrive of the whole role on named barrier `id` with
-  `count` threads (P1 KIR). -/
-  | named_bar (id count : Expr) (sync : Bool) (loc : Loc)
+  `count` threads (P1 KIR, P0-6 KIR); `all` (P0-6 KIR only): the instruction names
+  no thread count, a barrier for all threads of the CTA (`count`), which threads that exit
+  release (PTX ISA `exit`). -/
+  | named_bar (id count : Expr) (sync : Bool) (all : Bool) (loc : Loc)
+  /-- A named barrier instruction P0-6 cannot count (P0-6 KIR): reached under a condition
+  its participants may not share (`kind`; `certain`: the model admits participants that
+  certainly diverge; `why`), with its id and count where constant. -/
+  | nb_open (kind : String) (certain : Bool) (why : String) (id count : Option Expr)
+      (sync : Bool) (loc : Loc)
+  /-- The begin or end of a region of a P0-6 KIR that runs a number of times the model does
+  not fix, the same in every warp of the role; `key` (or empty): the region of the role before
+  warp splitting whose condition is uniform over that role, the same in its split roles. -/
+  | nb_rep (isBegin : Bool) (why : String) (key : String) (loc : Loc)
   deriving Repr, Inhabited
 
 inductive Stmt where

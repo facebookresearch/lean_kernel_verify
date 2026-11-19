@@ -34,7 +34,8 @@ Normalization (the spellings of LLVM, NVVM 20 and NVVM 23 meet on one mnemonic):
     collapses to `<op>.f` (all of them are drop);
   - .shared::cta is .shared and .param::entry is .param; mbarrier's default .sem.scope
     (.release.cta for arrive, .acquire.cta for test/try_wait, .relaxed.cta for
-    expect_tx/complete_tx) is dropped; tcgen05.mma's .scale_vec::1X/2X/4X is
+    expect_tx/complete_tx) is dropped, and so is bar/barrier's optional .cta (ISA: it
+    does not change the instruction's semantics); tcgen05.mma's .scale_vec::1X/2X/4X is
     .block32/.block32/.block16; tcgen05.cp's .warpx* follows the shape;
   - ld/st/atom/red drop memory ordering, scope, .volatile, cache operators and .noftz,
     and put the state space first (_memory_op); strong(opcode) keeps what a load's
@@ -96,6 +97,8 @@ def mnemonic(opcode):
         if (base in ("setp", "set") and t in _CMP) or (base in _UNI and t == "uni"):
             continue
         out.append(t)
+    if base in ("bar", "barrier") and out[1:2] == ["cta"]:
+        del out[1]
     if base == "mbarrier" and len(out) > 1 and out[1] in _MBAR_DEFAULT:
         default = _MBAR_DEFAULT[out[1]].split(".")
         for i in range(2, len(out) - 1):
@@ -205,7 +208,18 @@ _ROWS = [
         "value",
         "comparison, selection, moves and integer conversion, saturating or not (ISA: "
         "Comparison and Selection, Data Movement and Conversion Instructions)",
-        ["setp", "selp", "mov", "cvt", "cvt.sat", "cvta.param", "cvta.global"],
+        [
+            "setp",
+            "setp.and",
+            "setp.or",
+            "setp.xor",
+            "selp",
+            "mov",
+            "cvt",
+            "cvt.sat",
+            "cvta.param",
+            "cvta.global",
+        ],
     ),
     (
         "value",
@@ -518,8 +532,8 @@ _FAMILIES = [
     ),
     (
         "drop",
-        "no effect on any spec (ISA: griddepcontrol, setmaxnreg, prefetch)",
-        ["griddepcontrol", "setmaxnreg", "prefetch"],
+        "no effect on any spec (ISA: griddepcontrol, setmaxnreg, prefetch, nanosleep)",
+        ["griddepcontrol", "setmaxnreg", "prefetch", "nanosleep"],
     ),
     (
         "drop",

@@ -31,6 +31,7 @@ deadlock freedom in general ([Limits](#limits)).
 | P0-3 output coverage exactly once   | an intended output element that plain stores write zero times or more than once, or a plain store outside the intended region                                             |
 | P0-4 mbarrier protocol              | a parity other than 0 or 1 or a stale one, expect_tx bytes that differ from the TMA bytes landing in a waited phase, TMA bytes landing where nobody waits                  |
 | P0-5 mask-elision soundness         | an input on a host-selected mask-free fast path that violates P0-1 or P0-3                                                                                                 |
+| P0-6 named barriers convergent      | a named-barrier instance (`bar.sync`, `bar.arrive`) that the warps its count names do not all reach with one count, or a wait on one that never ends (from the PTX)       |
 | P1-1 TMEM reuse ordered (CuTe only) | two tcgen05 ld/st/cp/mma accesses of different roles to a common TMEM cell, one of them a write, that the kernel's barriers and waits do not order                         |
 
 Each (compiled variant, input, spec) gets one of four verdicts: **PASS** (the theorem

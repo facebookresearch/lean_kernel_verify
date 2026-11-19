@@ -964,6 +964,74 @@ def translate_p1_ptx(
     return obj if "tmem" in obj else None
 
 
+def translate_nb(case: dict, dump: dict, recs: list, launches: list, las: list,
+                 path: Path) -> dict:  # fmt: skip
+    """The P0-6 KIR of a variant (frontend/ptx/nbar.py) from its PTX, whatever the
+    translation, written to `path`: its report entry, {"status": "checked", "kir"} or
+    {"status": "refused" | "error", "error"}. Integer loads of 1-D contiguous tensors whose
+    contents every launch recorded, that the kernel never writes and that share no storage
+    with a tensor it writes, are exact metadata loads (flat buffers, as in the P0
+    translation)."""
+    nbar, T = _ptx("nbar"), _ptx("translate")
+    locs = PTX_LOCS.get(dump["dsl"]["version"])
+    if locs is None:
+        return {"status": "error", "error": f"CuTe DSL {dump['dsl']['version']}: the PTX "
+                                            f"frontend knows the locations of {sorted(PTX_LOCS)}"}  # fmt: skip
+    try:
+        v, text, fn, records, table = _ptx_variant(case, dump, recs, launches, las)
+        args = [{n: a for (n, kind, _i), a in zip(v.host_args, _flatten(la_args)) if kind == "tensor"}
+                for _n, la_args in launches]  # fmt: skip
+        meta = {n for n in args[0] if all(
+            n in a and "data" in a[n] and len(a[n]["shape"]) == 1
+            and (a[n]["shape"][0] <= 1 or list(a[n]["stride"]) == [1]) for a in args)}  # fmt: skip
+        while True:
+            pol = T.policy("cute", src_root=dump["source"]["src"], params=table, **locs,
+                           tensors={n: {"elem_bytes": t["elem_bytes"], **t["first"]}
+                                    for n, t in v.k.tensors.items()},
+                           max_iters=int(case.get("max_iters", 4096)))  # fmt: skip
+            pol["nb_meta"] = frozenset(meta)
+            facts = nbar.translate(text, fn.name, records, pol)
+            if facts.refusals:
+                r = facts.refusals[0]
+                return {
+                    "status": "error" if r["kind"] == "error" else "refused",
+                    "error": r["msg"],
+                }
+            written = set(facts.written or ())
+            shared = {m for m in facts.meta for a in args for w in written & set(a)
+                      if _overlap(_byte_span(a[m]), _byte_span(a[w]))}  # fmt: skip
+            if not shared:
+                break
+            meta -= shared
+        tensors = [{"name": n, "kind": "global", "elem_bytes": eb,
+                    "shape": [{"e": "var", "w": 64, "name": f"{n}.nb_len"}],
+                    "strides": [{"e": "const", "w": 64, "v": 1}], "segments": None,
+                    "role": "input", "metadata": True} for n, eb in facts.meta.items()]  # fmt: skip
+        tparams = {f"{n}.nb_len": 64 for n in facts.meta}
+        inputs = [{"name": n, "grid": r["grid"], "flags": recs[0].get("flags", {}),
+                   "params": {**_record_values(table, r, facts.params),
+                              **{f"{m}.nb_len": len(a[m]["data"]) for m in facts.meta}},
+                   "metadata": {m: list(a[m]["data"]) for m in facts.meta}}
+                  for (n, _a), r, a in zip(launches, records, args)]  # fmt: skip
+        obj = nbar.document(facts, recs[0]["callable"].rsplit(".", 1)[-1],
+                            recs[0]["callable"].rsplit(".", 1)[0].replace(".", "/") + ".py",
+                            case["name"], inputs,
+                            {"name": "nvidia-cutlass-dsl", "version": dump["dsl"]["version"]},
+                            tensors, tparams)  # fmt: skip
+    except Unsupported as e:
+        return {"status": "error" if e.kind == "error" else "refused", "error": str(e)}
+    except Exception as e:  # noqa: BLE001 - the P0-6 pass must never stop the P0 KIR
+        return {"status": "error", "error": f"P0-6 pass: {type(e).__name__}: {e}"}
+    errors = validate(obj)
+    if errors:
+        return {
+            "status": "error",
+            "error": "invalid P0-6 KIR (frontend/kir.py): " + "; ".join(errors[:20]),
+        }
+    path.write_text(json.dumps(obj, separators=(",", ":")))
+    return {"status": "checked", "kir": str(path)}
+
+
 def _ptx_variant(case: dict, dump: dict, recs: list, launches: list, las: list):
     """(PtxVariant, PTX text, parsed entry, LaunchRecord per launch, param_table)."""
     T, parse = _ptx("translate"), _ptx("parse")
@@ -1552,7 +1620,7 @@ def run(case_path: Path, out: Path, p1: bool = True) -> list:
     ptx = frontend() == "ptx"
     if ptx:  # shows in lkv.py's logs/frontend.log that the switch arrived
         print("[to_kir] LKV_FRONTEND=ptx: translating the PTX", file=sys.stderr)
-    report, results, writers = [], {}, {}
+    report, results, writers, nb_todo = [], {}, {}, []
     for digest, recs in by_digest.items():
         rec = recs[0]
         cls = rec["callable"].rsplit(".", 1)[-1]
@@ -1575,6 +1643,10 @@ def run(case_path: Path, out: Path, p1: bool = True) -> list:
             "dsl": dump["dsl"]["version"],
         }
         report.append(entry)
+        if launches:  # P0-6 from the PTX, after the loop, whatever the translation does
+            nb_todo.append(
+                (entry, recs, launches, las, kir_dir / f"{cls}__{digest}.nb.json")
+            )
         # "kind" of a variant that gets no KIR: "gap", a construct the frontend refuses by
         # design (not an error), or "error", a failure the case, the DSL or LKV must fix.
         if "stage" not in rec and not ptx:
@@ -1625,6 +1697,8 @@ def run(case_path: Path, out: Path, p1: bool = True) -> list:
                     "status": "error",
                     "error": f"P1 pass internal error: {type(e).__name__}: {e}",
                 }
+    for entry, recs, launches, las, nb_path in nb_todo:
+        entry["nb"] = translate_nb(case, dump, recs, launches, las, nb_path)
     for inp in dump["inputs"]:
         if "host_error" in inp:
             report.append({"kernel": "(host)", "digest": "-", "inputs": [inp["name"]], "dsl": dump["dsl"]["version"],

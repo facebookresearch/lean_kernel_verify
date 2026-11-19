@@ -164,6 +164,17 @@ constructs (e.g. lane-divergent barrier ops, indirect calls) are hard errors.
 | 4   | mbarrier protocol         | a parity other than 0/1; a stale parity (a repeated parity that neither provably re-checks the previous phase nor provably skips one, nor skips one under the lockstep credit); a first wait at phase 0 (parity 1 on the fresh barrier) on a slot that receives TMA bytes; under every fitting share assignment: in a waited phase, expect_tx bytes != bytes landing in it, TMA bytes landing in a phase nobody waits for or on a slot nobody waits on, a load not covered by an earlier expect_tx of its role in its phase (or by none at all), or transaction bytes that cannot be attributed to a phase                                     | a lap (a wait synchronizing with a later phase than the one after its previous wait); expect_tx bytes pending in a phase nobody waits for, or on a slot nobody waits on                                     |
 | 5   | Mask-elision soundness    | an elided input (it sets one of the case's `elision_flags`, e.g. FULL_TILES) violates P0-1 or P0-3: its P0-1/P0-3 violations are reported here, not there                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | the P0-1/P0-3 notes of an elided input                                                                                                                                                                      |
 
+**P0-6 named barriers convergent** (`lean/KV/Spec/NamedBarriers.lean`, P0-6 KIR
+only: `frontend/ptx/nbar.py` makes it from every variant's PTX, both families, whatever
+the translation): holds iff no `nb_open` event is reached (a named barrier the frontend
+cannot count because a deciding condition may differ between its participants) and, per
+CTA, the lockstep pairing of the roles' named-barrier operations completes every
+instance with matching counts and no role waiting forever. FAIL on a reached certain
+`nb_open` (thread-index divergence, a spin loop on a strong load), on a count no warps
+meet, and on a mismatch or a wait forever when every operation is a `sync` (the pairing
+is then forced); UNDECIDED otherwise (`specs.md`, "P0-6"). A P0 spec: part of the
+outcome and exit status; its own KIR, so P0-1..P0-5 KIRs and verdicts do not change.
+
 **P1-1 TMEM reuse ordered** (`lean/KV/Spec/TmemReuse.lean`, P1 KIR only): holds
 iff every pair of TMEM accesses of different roles that touch a common cell, one
 writing, has one completing before the other is issued under sound mbarrier and
@@ -234,6 +245,18 @@ it names in `elision_flags` the flags that select a mask-elided fast path.
    Intra-role cross-warp pairs are notes. A P1-1 PASS uses no lockstep contents;
    they only tell F1 from undecided. tcgen05 fences and TMEM lifetime are not
    checked.
+7. For P0-6 only: the barrier pass's uniformity rules (`frontend/ptx/nbar.py`,
+   `specs.md` "P0-6": exact thread-index instances; shared-memory data at a
+   uniform address assumed written before a synchronization every reader passed;
+   a value a spin loop accepted assumed published once by its producer; weak loads
+   of tensors the kernel never writes), its node splitting (copies of PTX blocks,
+   the same instructions), the recorded contents of metadata tensors (as for P0), and
+   for arrive-based protocols the lockstep pairing of barrier instances with the
+   warp-ahead reading (no role runs a whole instance ahead of the others on a named
+   barrier; the summary line counts the arrivals that reading held). A FAIL that needs
+   no arrive is a forced pairing (every warp blocks in every operation, outside every
+   repeated region), or a certain divergence the model admits (strong loads may differ
+   between threads; spin loops end in different iterations).
 
 A verdict covers the inputs in the case file, not all shapes. The report says
 so.

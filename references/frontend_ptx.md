@@ -359,9 +359,13 @@ Coordinates, footprints, transaction bytes, issuing threads, sub-byte formats:
   documentation). So every CTA of such a launch runs as in one of two geometries: all
   clusters regular (the variant's KIR, `<spec>`) or all preferred (a second KIR,
   `<spec>@cluster<dims>`, with the inputs whose grid the preferred dims divide), and the
-  report names the geometry of each verdict. A mixed launch's clusters are each a
-  cluster of one of them, with the same CTAs, ranks and special registers, so P0-1, P0-2,
-  P0-4 and P0-5 (per access, per cluster ledger) hold for every mix if they hold in both;
+  report names the geometry of each verdict. The P0-6 barrier pass writes both
+  geometries too (`<spec>.nb.json`, `<spec>@cluster<dims>.nb.json`, whatever the
+  translation): the rank and the cluster special registers may decide which warps reach a
+  barrier (a `rank == 0` branch), and they differ by geometry. A mixed launch's clusters
+  are each a cluster of one of them, with the same CTAs, ranks and special registers, so
+  P0-1, P0-2, P0-4, P0-5 and P0-6 (per access, per cluster ledger, per CTA) hold for every
+  mix if they hold in both;
   P0-3 counts writes over the whole grid and holds for a mix only if every aligned group
   of CTAs writes the same elements in both geometries, which is not checked (Limits).
   CLC with a preferred geometry is refused. If the launches disagree on the preferred
@@ -429,6 +433,83 @@ legacy CuTe P1 pass's where the reason is the same (`frontend_cute.md`); R10 is 
 
 TLX/Triton kernels have no P1 pass: report.json lists their variants as `not_checked`.
 
+## The P0-6 barrier pass (both families)
+
+`frontend/ptx/nbar.py` translates every variant's PTX once more, for P0-6 "named
+barriers convergent" (`specs.md` "P0-6"), into the P0-6 KIR (`<spec>.nb.json` next to
+the TTGIR dump, `<Kernel>__<digest>.nb.json` in the CuTe `kir/`; `kir.md` change 14):
+in both families, whatever `LKV_FRONTEND` selects (also `legacy`), and also for variants
+whose P0 translation is refused. It reuses this frontend's parser, CFG, regions, roles
+and exact interpreter (`interp.Translator` subclassed), and emits no P0 event: its slice
+is the control flow, the named barriers and the values that decide them.
+
+- **Roles.** The roles above, a padding state's role included whether or not it emits
+  an event (its warps run the code before the dispatch too); split into warp ranges (SplitWarps) at every
+  barrier-deciding condition that is uniform within each warp but differs over the role
+  (`partition1:w12-12`, `warps4_7`). The dispatch's fork barriers (`barrier.sync 1`
+  without a count) are skipped: cfg.py checks their protocol.
+- **Values.** Exact expressions as above; data carries a class over the role's threads,
+  `u` (one value), `l` (per lane, the same in every warp), `w` (per warp), `t` (any),
+  `nondet` (strong loads, atomics, timers, test/try_wait outside the wait idiom) and the
+  strong loads it comes from. Class-`u` data without a strong load becomes a fresh
+  uniform symbol, so arithmetic on it stays exact (an address keeps its base tensor, a
+  condition on it its comparison); a KIR expression never reads one (a branch on it is
+  an `nb_rep` region). Loads by address class: shared memory (`ld.shared`, generic,
+  `::cluster`, `ldmatrix`: per lane), weak loads of tensors the kernel never writes;
+  collectives (`redux`, `vote`, `shfl.idx` from one lane) of per-lane data are uniform.
+  A weak integer load of a 1-D tensor whose contents the dump recorded and the kernel
+  never writes is an exact metadata `load` (mem.py, as in the P0 translation): the TTGIR
+  hook declares such tensors with their `<t>.shape.0`/`<t>.stride.0` params and
+  `_input`'s checks (recorded, no view, contiguous, not stale, no storage shared with a
+  written tensor; a tensor that fails them is translated again as uniform data), the
+  CuTe hook as flat buffers of `<t>.nb_len` elements (every launch recorded the contents,
+  1-D contiguous, no storage shared with a written tensor).
+  A spin loop's accepted value (every source a strong load of a uniform address its exit
+  test accepted; also LLVM's rotated `if accept(v0) skip; else spin`) is published
+  (`u`). An instruction without an op table row computes `t` data unless it may be a
+  barrier or a branch (error).
+- **Control flow.** An If deciding no barrier runs both arms for their values; one
+  deciding a barrier is a KIR `if` (exact uniform), a split (per warp), two `nb_rep`
+  regions (class-u data or a symbol), or divergent: both arms translated with every
+  barrier in them an `nb_open` whose reason is the innermost certain enclosing
+  condition. A loop is exact (KIR `for`/`while`) if interp's `run_loop` takes it, else
+  iterated to a class fixed point (at most 8 rounds) and translated once more: an
+  `nb_rep` region if its exit is uniform, divergent (`nb_open` kind `loop`) if not. Each
+  class also records whether the value is uniform over the role before warp splitting
+  (thread-index instances over all its warps; symbols and loads inherit it); an `nb_rep`
+  region whose condition is gets the key `<role>@<PTX line>`, the same in every split
+  role, so Lean may pair a barrier the split roles share in it (`specs.md` "P0-6").
+  Classes also record whether a value is alike in corresponding lanes of every warp of
+  that role, so a warp collective (`vote`, `redux`, `shfl.idx` from one lane) of such
+  per-lane data (e.g. a varlen tile scheduler's warp scan of sequence lengths) keys too.
+  A barrier-free If on an exact condition uniform over the role around a loop is
+  interp's KIR `if` (else its arms run under the mask), so the loop can be exact.
+- **Shape.** cfg.build's refusal of irreducible flow is answered by node splitting (the
+  blocks entered from outside a cycle other than at its header are copied for those
+  entries, up to the header) and a loop with exits to several blocks by copying a path
+  that only returns to its header (a test LLVM rotated into one path) into the loop; the
+  copies are counted in the KIR's `nbar.split_blocks`. The P0 translation keeps
+  cfg.build's refusals.
+- **Refusals** (P0-6 UNDECIDED for the variant, `nb_not_checked`): what cfg.py and
+  regions.py still refuse (several dispatches, a loop with exits to two blocks, several
+  rets; a switch `brx.idx` is `cfg.lower_switches`' compare chain as in the P0
+  translation, refused only if its index is not provably in range), a call, roles that
+  are not warp ranges, a parameter the launches do not give; failures are ERRORs (`kind`
+  `error`).
+- **Audit.** The KIR's `nbar.sites` (copied into report.json `variants_nb[].nb_sites`)
+  lists every barrier instruction reached with its role, PTX line, loc, status
+  (`counted` or `open`), kind, certainty and reason.
+- **Cost.** Classifying a value enumerates its thread-index instances, so the pass
+  classifies only what can decide a barrier: a class fixed point classifies the registers
+  live at the loop's header or after its exit (regions.py liveness; a register the loop
+  writes and nothing reads later reaches no decision) and a weak load's address only if
+  the loaded value's class depends on it (shared memory, a tensor the kernel never
+  writes). The substitutions are memoized per translator across
+  expressions (interp's `memo`; the values of a role share their thread-dependent
+  subexpressions). The TTGIR hook translates the specializations in up to `--jobs`
+  forked processes (`to_kir --jobs`, which `lkv.py run` passes; the results and files are
+  the same in any order).
+
 ## Refusals
 
 A construct the frontend cannot translate exactly stops its variant with a message naming
@@ -486,7 +567,7 @@ assembly rerolls LLVM's unrolled blocks into `for` loops (the same trace).
 * Shared memory, TMEM, MMA math, named barriers and fences are outside the P0 slice; TMEM
   accesses, `tcgen05.wait` and named barriers are P1 events (CuTe), fences and TMEM
   lifetime are not checked.
-* Preferred cluster geometries are checked all-preferred and all-regular; P0-3 of a launch
+* Preferred cluster geometries are checked all-preferred and all-regular (P0-6 too); P0-3 of a launch
   that mixes them is covered only where both geometries write the same elements per
   preferred-size group of CTAs, which is not checked ("Clusters, tcgen05, CLC").
 * Refused by design: CuTe CLC, P1-1 on TLX, TMEM addresses relative

@@ -14,7 +14,7 @@ import KV.Eval
 namespace KV
 
 inductive SpecId where
-  | bounds | tripCount | coverage | barrier | maskElision | tmemReuse
+  | bounds | tripCount | coverage | barrier | maskElision | namedBarriers | tmemReuse
 
 /-- The five P0 specs (every KIR). -/
 def SpecId.all : List SpecId := [.bounds, .tripCount, .coverage, .barrier, .maskElision]
@@ -22,9 +22,12 @@ def SpecId.all : List SpecId := [.bounds, .tripCount, .coverage, .barrier, .mask
 /-- The P1 specs (decided on a P1 KIR only, references/specs.md "P1-1"). -/
 def SpecId.p1 : List SpecId := [.tmemReuse]
 
+/-- P0-6, decided on the P0-6 KIR of a variant only (references/specs.md "P0-6"). -/
+def SpecId.nb : List SpecId := [.namedBarriers]
+
 def SpecId.label : SpecId → String
   | .bounds => "P0-1" | .tripCount => "P0-2" | .coverage => "P0-3" | .barrier => "P0-4"
-  | .maskElision => "P0-5" | .tmemReuse => "P1-1"
+  | .maskElision => "P0-5" | .namedBarriers => "P0-6" | .tmemReuse => "P1-1"
 
 def SpecId.title : SpecId → String
   | .bounds => "global accesses in bounds"
@@ -32,6 +35,7 @@ def SpecId.title : SpecId → String
   | .coverage => "output coverage exactly once"
   | .barrier => "mbarrier protocol"
   | .maskElision => "mask-elision soundness"
+  | .namedBarriers => "named barriers convergent"
   | .tmemReuse => "TMEM reuse ordered"
 
 /-- One counterexample or note line: IR location, where (CTA/role/slot), what. -/

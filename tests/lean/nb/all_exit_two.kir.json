@@ -1,0 +1,105 @@
+{
+ "kir_version": 1,
+ "kernel": "all_exit_two",
+ "source": "nb.py",
+ "ir": "ptx",
+ "grid": [
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  },
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  },
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  }
+ ],
+ "params": [],
+ "tensors": [],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "a",
+   "warps": 2,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "named_bar",
+     "id": {
+      "e": "const",
+      "w": 32,
+      "v": 0
+     },
+     "count": {
+      "e": "const",
+      "w": 32,
+      "v": 128
+     },
+     "sync": true,
+     "loc": "nb.py:1",
+     "all": true
+    },
+    {
+     "op": "event",
+     "ev": "named_bar",
+     "id": {
+      "e": "const",
+      "w": 32,
+      "v": 0
+     },
+     "count": {
+      "e": "const",
+      "w": 32,
+      "v": 128
+     },
+     "sync": true,
+     "loc": "nb.py:3",
+     "all": true
+    }
+   ]
+  },
+  {
+   "name": "b",
+   "warps": 2,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "named_bar",
+     "id": {
+      "e": "const",
+      "w": 32,
+      "v": 0
+     },
+     "count": {
+      "e": "const",
+      "w": 32,
+      "v": 128
+     },
+     "sync": true,
+     "loc": "nb.py:1",
+     "all": true
+    }
+   ]
+  }
+ ],
+ "nbar": {
+  "sites": []
+ },
+ "case": {
+  "name": "nb/all_exit_two",
+  "inputs": [
+   {
+    "name": "one",
+    "params": {}
+   }
+  ]
+ }
+}

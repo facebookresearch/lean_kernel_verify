@@ -7,18 +7,20 @@ description:
   frontend turns it into KIR, and Lean decides per case input, by native_decide,
   P0-1 bounds and address wrap, P0-2 role trip counts (hangs), P0-3 output
   coverage exactly once, P0-4 mbarrier protocol (parity, expect_tx bytes) and
-  P0-5 mask elision on host-selected fast paths, plus (CuTe only, reported
-  apart) P1-1 TMEM reuse ordering (cross-warp tcgen05 ld/st/cp/mma races). For
+  P0-5 mask elision on host-selected fast paths and P0-6 named barriers
+  convergent (from the PTX, also of variants the P0 translation refuses), plus
+  (CuTe only, reported apart) P1-1 TMEM reuse ordering (cross-warp tcgen05
+  ld/st/cp/mma races). For
   checking a kernel revision or a fix for hangs, out-of-bounds or wrapped
   addresses, missing or duplicate writes, barrier bugs and TMEM reuse races on the
   shapes callers use (partial tiles, multi-wave grids), or writing a case file for a
   new kernel; verdicts cover the case inputs only.'
 ---
 
-# lean-kernel-verify: compiler IR to Lean verdicts for five P0 specs and P1-1
+# lean-kernel-verify: compiler IR to Lean verdicts for six P0 specs and P1-1
 
 The skill checks a TLX/Triton or CuTe DSL kernel at a given revision against
-five P0 safety specs, on the concrete inputs of a case file, with no model of
+six P0 safety specs, on the concrete inputs of a case file, with no model of
 the kernel: the real host code and compiler produce the IR on a CPU-only
 machine, a mechanical frontend turns it into KIR, and Lean proves or refutes
 each verdict as a `native_decide` theorem.
@@ -89,7 +91,8 @@ python3 -I $S/scripts/lkv.py check K.kir.json... --out DIR   # Layer 2 alone on 
 ```
 
 - The frontend is CuTe if the case has a `builder`, else TTGIR. `run` options:
-  `--inputs a,b`, `--target sm_103` (TTGIR only), `--jobs N` (default min(8, CPUs)),
+  `--inputs a,b`, `--target sm_103` (TTGIR only), `--jobs N` (Lean files at a time and
+  the TTGIR frontend's P0-6 processes; default min(8, CPUs)),
   `--timeout S` (per Lean file, default 3600), `--src DIR` (default: the case's
   `src_root` / `source.src`), `--frontend ptx` (experimental: translate the kernel's
   PTX instead of its IR, with one shared core for both frontends: `frontend_ptx.md`;
@@ -155,7 +158,7 @@ input. **Leave out very unlikely inputs unless the user asks for them**: an empt
 a negative one, head counts the callers rule out, misuse that the docs or the public
 wrapper rule out, and opt-in modes nobody uses.
 
-## The five P0 specs
+## The P0 specs
 
 | P0  | Spec                         | FAIL (violation certain in the extracted model)                                                                                                                                                                                                                                                                                                                                                                                    | NOTE (may be harmless; never a FAIL)                                                                                                 |
 | --- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -164,6 +167,7 @@ wrapper rule out, and opt-in modes nobody uses.
 | 3   | Output coverage exactly once | an output without `intended_writes`; an intended element that plain stores write 0 times or 2+ times (over all CTAs); a plain store outside the intended region                                                                                                                                                                                                                                                                    | reductions outside the region; `unchecked` opt-outs                                                                                  |
 | 4   | mbarrier protocol            | a parity other than 0/1; a stale repeated parity; a first wait that synchronizes with phase 0 on a TMA slot (parity 1 on the fresh barrier, unless a late join moves it); in a waited phase, expect_tx bytes != landing bytes; TMA bytes landing in a phase or on a slot nobody waits on; a load not covered by an earlier expect_tx of its role (in its phase, or at all); transaction bytes that cannot be attributed to a phase | laps; expect_tx bytes pending in a phase nobody waits for, or on a slot nobody waits on                                              |
 | 5   | Mask-elision soundness       | an elided input (it sets one of the case's `elision_flags`) violates P0-1 or P0-3 on the variant the host selected; those findings are reported under P0-5 instead                                                                                                                                                                                                                                                                 | the P0-1/P0-3 notes of an elided input                                                                                               |
+| 6   | Named barriers convergent    | (decided on the P0-6 KIR, `.nb.json`, made from every variant's PTX whatever the translation; `references/specs.md` "P0-6") a named barrier (`bar.sync`/`bar.arrive`/`bar.red`) reached under a condition its participants may not share: thread-index values that differ (F1), a loop whose exit differs, e.g. a spin loop on a strong load (F2); a count no warps meet, ids or counts that differ between the warps that meet, a sync that waits forever in the pairing (F3); UNDECIDED where uniformity or the pairing is not decided (arrive-based pairings rest on the warp-ahead reading) | none                                                                                                                                 |
 
 ### P1-1 TMEM reuse ordered (CuTe only; `references/specs.md`, "P1-1")
 
@@ -239,6 +243,13 @@ A verdict depends on exactly these items (`design.md`, "Trust base"):
    PASS: they only separate F1 from undecided. tcgen05 fences and TMEM
    allocation lifetime are not checked (the kernels checked so far have no tcgen05
    fences).
+7. **P0-6 only:** the barrier pass's uniformity rules (`specs.md` "P0-6": exact
+   thread-index instances; shared-memory data at a uniform address written before
+   a synchronization every reader passed; a value a spin loop accepted published
+   once by its producer; weak loads of tensors the kernel never writes), its node
+   splitting (copies of PTX blocks), the recorded contents of metadata tensors, and
+   for arrive-based protocols the warp-ahead reading (no role runs a whole instance
+   of a named barrier ahead of the others; the report counts the arrivals it held).
 
 The case file decides what is checked: its inputs, and annotations that name
 segments, work items, intended regions and elision flags. Review them like code.

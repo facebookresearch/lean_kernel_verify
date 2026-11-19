@@ -63,6 +63,17 @@ Rules of kir.md beyond its field tables, which lean/KV relies on:
   of 32; `tmem_wait` and `named_bar` flags are booleans; "site" is an optional string.
   In a role of several warps every warp issues each mbarrier event (the CuTe P1 pass
   splits roles so); checked here as: an arrive gives at least `warps` arrivals.
+* P0-6 KIR (kir.md, change 14; file suffix .nb.json): a top-level "nbar" object (the
+  frontend's barrier sites, informational) marks a KIR without barriers, whose tensors are
+  all 1-D metadata tensors and whose only events are `named_bar`
+  (as in a P1 KIR, without "tmem"), `nb_open` {"kind", "certain", "why", "id", "count",
+  "sync"} (kind one of NB_KINDS, certain/sync booleans, why a string, id/count null or a
+  const Expr) and `nb_rep` {"begin", "why", "key"} (begin a boolean; key an optional string,
+  the region's identity across the roles of one split role); in each role the `nb_rep`
+  events nest (every begin has its end, in the same statement list). A KIR without
+  "nbar" has neither `nb_open` nor `nb_rep` events. Only a P0-6 KIR's `named_bar` may
+  have "all" (a boolean; true only with "sync" true): the instruction names no thread
+  count.
 * Clusters (kir.md, change 11): an optional top-level "cluster" [x, y, z] of positive ints
   (default [1, 1, 1]). Barrier events may name another CTA of the cluster: "cta" (arrive,
   expect_tx, wait, complete_tx) is a w=32 Expr, its rank in the cluster; "cta_mask"
@@ -134,9 +145,13 @@ EVENT_FIELDS = {
     "work": ({"fields"}, set()),
     "tmem": ({"inst", "warp", "rects"}, {"site", "cta_mask"}),
     "tmem_wait": ({"ld"}, set()),
-    "named_bar": ({"id", "count", "sync"}, set()),
+    "named_bar": ({"id", "count", "sync"}, {"all"}),
+    "nb_open": ({"kind", "certain", "why", "id", "count", "sync"}, set()),
+    "nb_rep": ({"begin", "why"}, {"key"}),
 }
 P1_EVENTS = ("tmem", "tmem_wait", "named_bar")
+NB_EVENTS = ("named_bar", "nb_open", "nb_rep")
+NB_KINDS = ("lane", "cond", "loop", "operand", "dispatch")
 TMEM_INSTS = ("ld", "st", "cp", "mma")
 RECT_USES = ("data", "d", "a", "sf")
 RECT_FIELDS = {"use", "write", "lane", "nlanes", "col", "ncols"}
@@ -154,7 +169,7 @@ TOP_FIELDS = {
     "roles",
     "case",
 }
-TOP_OPTIONAL = {"target", "compiler", "tmem", "cluster"}
+TOP_OPTIONAL = {"target", "compiler", "tmem", "cluster", "nbar"}
 CLUSTER_FIELDS = ("cta", "cta_mask")
 TENSOR_FIELDS = {
     "name",
@@ -202,6 +217,7 @@ class _Checker:
         self.role_tpi = None  # threads_per_issue of the role being checked
         self.cluster_size = 1  # CTAs per cluster
         self.few_arrivals = []  # (path, arrivals, warps): arrives no P1 role may have
+        self.nbar = False  # a P0-6 KIR (top-level "nbar")
 
     def err(self, path, msg):
         self.errors.append(f"{path}: {msg}")
@@ -568,7 +584,9 @@ class _Checker:
                     path,
                     f"{ev} writes '{name}', declared role 'input': declare it 'output' (P0-3 checks it) or 'workspace'",
                 )
-        if ev in ("tma_load", "tma_store", "tma_reduce"):
+        if self.nbar or ev in ("nb_open", "nb_rep"):
+            self.nb_event(path, ev, s, scope)
+        elif ev in ("tma_load", "tma_store", "tma_reduce"):
             self._check_tma_coords(path, s, scope)
         elif ev in ("gload", "gstore", "gatomic"):
             t = self.tensors.get(s["tensor"]) if isinstance(s["tensor"], str) else None
@@ -627,6 +645,73 @@ class _Checker:
             uses.append((r["use"], r["write"]))
         return uses
 
+    def nb_event(self, path, ev, s, scope):
+        """The events of a P0-6 KIR (kir.md, change 14)."""
+        if not self.nbar:
+            self.err(path, f"{ev} outside a P0-6 KIR (top-level 'nbar')")
+            return
+        if ev not in NB_EVENTS:
+            self.err(path, f"{ev} in a P0-6 KIR (only {', '.join(NB_EVENTS)})")
+            return
+        if ev == "named_bar":
+            self.named_bar(path, s, scope)
+            return
+        self.string(f"{path}.why", s["why"])
+        if ev == "nb_rep":
+            self.bool_field(f"{path}.begin", s["begin"])
+            if "key" in s:
+                self.string(f"{path}.key", s["key"])
+            return
+        if s["kind"] not in NB_KINDS:
+            self.err(f"{path}.kind", f"must be one of {NB_KINDS}")
+        self.bool_field(f"{path}.certain", s["certain"])
+        self.bool_field(f"{path}.sync", s["sync"])
+        for f in ("id", "count"):
+            e = s[f]
+            if e is not None and not (isinstance(e, dict) and e.get("e") == "const"):
+                self.err(f"{path}.{f}", "must be null or a const Expr")
+            elif e is not None:
+                self.expr(f"{path}.{f}", e, scope)
+
+    def named_bar(self, path, s, scope):
+        self.bool_field(f"{path}.sync", s["sync"])
+        if "all" in s:
+            self.bool_field(f"{path}.all", s["all"])
+            if s["all"] is True and s["sync"] is not True:
+                self.err(
+                    f"{path}.all", "an arrive (sync false) always names a thread count"
+                )
+        for f in ("id", "count"):
+            e = s[f]
+            if not (isinstance(e, dict) and e.get("e") == "const"):
+                self.err(
+                    f"{path}.{f}", "named barrier id and count must be const Exprs"
+                )
+            else:
+                self.expr(f"{path}.{f}", e, scope)
+        c = s["count"]
+        if isinstance(c, dict) and is_int(c.get("v")) and (c["v"] <= 0 or c["v"] % 32):
+            self.err(
+                f"{path}.count", "named barrier count must be a positive multiple of 32"
+            )
+
+    def nb_nesting(self, path, stmts):
+        """The nb_rep events of a statement list nest, each region inside one list."""
+        depth = 0
+        for i, st in enumerate(stmts if isinstance(stmts, list) else []):
+            if not isinstance(st, dict):
+                continue
+            if st.get("op") == "event" and st.get("ev") == "nb_rep":
+                depth += 1 if st.get("begin") is True else -1
+                if depth < 0:
+                    self.err(f"{path}[{i}]", "nb_rep end without a begin")
+                    depth = 0
+            for key in ("body", "then", "else"):
+                if key in st:
+                    self.nb_nesting(f"{path}[{i}].{key}", st[key])
+        if depth:
+            self.err(path, f"{depth} nb_rep begin(s) without an end")
+
     def p1_event(self, path, ev, s, scope):
         """tmem / tmem_wait / named_bar events of a P1 KIR (kir.md, change 10)."""
         self.p1_events += 1
@@ -635,6 +720,8 @@ class _Checker:
             return
         if ev == "named_bar":
             self.bool_field(f"{path}.sync", s["sync"])
+            if "all" in s:
+                self.err(f"{path}.all", "only in a P0-6 KIR (top-level 'nbar')")
             for f in ("id", "count"):
                 e = s[f]
                 if not (isinstance(e, dict) and e.get("e") == "const"):
@@ -761,6 +848,11 @@ class _Checker:
     def kernel(self, k):
         if not self.keys("$", k, TOP_FIELDS, TOP_OPTIONAL):
             return
+        self.nbar = "nbar" in k
+        if self.nbar and not isinstance(k["nbar"], dict):
+            self.err("$.nbar", "expected an object")
+        if self.nbar and "tmem" in k:
+            self.err("$", "a KIR with both 'nbar' (P0-6) and 'tmem' (P1)")
         self._check_header(k)
         self._check_cluster(k)
         self._check_params(k)
@@ -780,7 +872,19 @@ class _Checker:
                     self.tensors[t["name"]] = t
             for i, t in enumerate(k["tensors"]):
                 self.tensor(f"$.tensors[{i}]", t, host)
+                if (
+                    self.nbar
+                    and isinstance(t, dict)
+                    and (
+                        t.get("metadata") is not True or len(t.get("shape") or ()) != 1
+                    )
+                ):
+                    self.err(
+                        f"$.tensors[{i}]", "a P0-6 KIR has only 1-D metadata tensors"
+                    )
         if self.list_field("$.barriers", k["barriers"]):
+            if self.nbar and k["barriers"]:
+                self.err("$.barriers", "a P0-6 KIR declares no barriers")
             for i, b in enumerate(k["barriers"]):
                 path = f"$.barriers[{i}]"
                 if self.keys(path, b, {"name", "count", "num"}) and self.string(
@@ -811,6 +915,8 @@ class _Checker:
                 self.role_tpi = r["threads_per_issue"]
                 self.block(f"{path}.body", r["body"], self.params)
                 self.role_warps = self.role_tpi = None
+                if self.nbar:
+                    self.nb_nesting(f"{path}.body", r["body"])
         for name, t in self.tensors.items():
             seg = t.get("segments")
             if (

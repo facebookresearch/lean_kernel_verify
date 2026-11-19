@@ -76,6 +76,9 @@ if TYPE_CHECKING:  # mem.py and tmem.py import this module
     from .tmem import P1
 
 _LANES = tuple(range(32))
+# Entries of a translator's substitution memos (Translator.memo) beyond which they are
+# dropped.
+_MEMO_MAX = 2_000_000
 # Translator.env key (no PTX register has this name) of what mem.py knows of the thread's
 # local memory; run forgets it at the start of each basic block.
 LOCAL = "%local"
@@ -196,6 +199,8 @@ class Translator:
         self.slot_facts: dict = {}  # slot variable -> known trailing zeros
         self.cur = None  # the instruction being translated
         self._inst: dict = {}
+        self._memos: dict = {}  # substitution memos shared between expressions (memo)
+        self._nmemo = 0  # memo() calls since the memos' size was last checked
         self._tvals: dict = {}  # (%t term, threads) -> its value per thread (_read_once)
         self._uniform_checked: dict = {}  # (id(statement list), mask, uniform) -> list
         self.pending = None  # events not emitted yet (mem_event, thread_event; flush)
@@ -363,6 +368,18 @@ class Translator:
         m = {"%warp": E.const(w, 32), "%lane": E.const(lane, 32)}
         m.update({v: E.const(int(lane == 0), 1) for v in fv if v.startswith("%elect")})
         return m
+
+    def memo(self, key) -> dict:
+        """The memo (expr.subst's `cache`) of one substitution, shared by every
+        expression this translator applies it to; `key` names the mapping: ("w", w)
+        %warp := w, ("l", s) %lane := s (an Expr). The substitutions are pure, so a shared
+        memo gives the very nodes a fresh one does. Dropped when large."""
+        self._nmemo += 1
+        if self._nmemo >= 4096:
+            self._nmemo = 0
+            if sum(map(len, self._memos.values())) > _MEMO_MAX:
+                self._memos.clear()
+        return self._memos.setdefault(key, {})
 
     def instances(self, e) -> list:
         """e for every thread of the role, in threads() order (folded). The elected lane
@@ -2314,10 +2331,12 @@ class Translator:
                 i, "shfl.sync of a value that depends on which lane elect.sync picks"
             )
         src = E.select(ok, j, lane)
-        out = []
+        out, vw = [], {}  # vw: v in each warp
         for w, ln in self.threads():
             s = E.subst(src, self.thread_subst(w, ln))
-            out.append(E.subst(E.subst(v, {"%warp": E.const(w, 32)}), {"%lane": s}))
+            if w not in vw:
+                vw[w] = E.subst(v, {"%warp": E.const(w, 32)}, self.memo(("w", w)))
+            out.append(E.subst(vw[w], {"%lane": s}, self.memo(("l", s))))
         lane_only = all(out[k] is out[k % 32] for k in range(len(out)))
         self.write(regs[0][1], self.lane_table(out[:32] if lane_only else out, "sh"))
 

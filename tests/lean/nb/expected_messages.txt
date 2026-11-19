@@ -1,0 +1,27 @@
+# Counterexample text each P0-6 fixture's report must contain: <fixture> <substring>.
+short nb.py:7: cta (0,0,0) role w0: barrier 1: role w0 waits forever: 32 of the 128 threads arrive on its instance
+per_input nb.py:7: cta (0,0,0) role w0: barrier 1: role w0 waits forever
+count_mismatch nb.py:4: cta (0,0,0) role b: barrier 1: role b arrives with count 96 on an instance that roles [a] opened with count 64 at nb.py:1: the counts differ between warps that meet
+cycle role a waits forever
+open_certain nb.py:9: cta (0,0,0) role all: bar.sync 1, 128 at PTX line 9: inside a branch on data
+open_undecided nb.py:9: cta (0,0,0) role all: not decided on this input: bar.sync 1, 128 at PTX line 9
+rep_shared nb.py:5: cta (0,0,0) role a: not decided on this input: barrier 1: role a uses it in a region repeated a number of times the model does not fix, and role b uses it too
+arrive_twice nb.py:6: cta (0,0,0) role a: not decided on this input: barrier 1: an instance of count 128 ends the CTA with 64 threads arrived
+arrive_leftover nb.py:3: cta (0,0,0) role a: not decided on this input: barrier 1: an instance of count 128 ends the CTA with 64 threads arrived
+two_ctas nb.py:7: cta (1,0,0) role w0: barrier 1: role w0 waits forever
+rep_keyed_two nb.py:5: cta (0,0,0) role b: not decided on this input: barrier 1: role b joins an instance opened at nb.py:1 from another nest of repeated regions
+held_cycle nb.py:5: cta (0,0,0) role c: not decided on this input: barrier 2: role c waits forever
+rep_mixed nb.py:5: cta (0,0,0) role b: not decided on this input: barrier 1: role b joins an instance opened at nb.py:2 from another nest of repeated regions
+meta_stop nb.py:5: cta (1,0,0) role all: not decided on this input: 1 role trace(s) stop at an out-of-bounds metadata load
+meta_stop_two_roles nb.py:5: cta (1,0,0) role a: not decided on this input: 1 role trace(s) stop at an out-of-bounds metadata load
+short_arrive_after nb.py:7: cta (0,0,0) role w0: barrier 1: role w0 waits forever
+mix_alone nb.py:3: cta (0,0,0) role w0_1: not decided on this input: barrier 5: role w0_1 completes an instance of count 64 alone, and role w2_3 uses the barrier too: which warps complete each instance depends on timing
+mix_counts nb.py:3: cta (0,0,0) role w0: not decided on this input: barrier 6: role w0 completes an instance of count 32 alone, and role w1_3 uses the barrier too
+mix_groups nb.py:3: cta (0,0,0) role g0: not decided on this input: barrier 2: role g0 completes an instance of count 128 alone, and role g1 uses the barrier too
+wait_after_rep nb.py:3: cta (0,0,0) role w0: not decided on this input: barrier 1: role w0 waits forever
+wait_after_rep_swapped nb.py:4: cta (0,0,0) role w1: not decided on this input: barrier 2: role w1 waits forever
+rep_open_certain nb.py:9: cta (0,0,0) role all: not decided on this input: bar.sync 1, 128 at PTX line 9
+rep_bad_count nb.py:6: cta (0,0,0) role all: not decided on this input: barrier 1: count 256 exceeds the CTA's 128 threads
+all_counted nb.py:4: cta (0,0,0) role w0_1: barrier 0: role w0_1 waits forever: 64 of the 128 threads arrive on its instance
+all_mixed nb.py:3: cta (0,0,0) role a: not decided on this input: barrier 0: role a waits forever: 96 of the 128 threads arrive on its instance (roles [a, b])
+all_cycle nb.py:3: cta (0,0,0) role a: barrier 0: role a waits forever

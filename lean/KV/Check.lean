@@ -39,6 +39,7 @@ import KV.Spec.Coverage
 import KV.Spec.Barrier
 import KV.Spec.MaskElision
 import KV.Spec.TmemReuse
+import KV.Spec.NamedBarriers
 
 namespace KV
 
@@ -48,6 +49,7 @@ def SpecId.Holds : SpecId → Run → Prop
   | .coverage, r => r.complete ∧ Coverage.Holds r
   | .barrier, r => r.complete ∧ Barrier.Holds r
   | .maskElision, r => r.complete ∧ MaskElision.Holds r
+  | .namedBarriers, r => r.complete ∧ NamedBarriers.Holds r
   | .tmemReuse, r => r.complete ∧ TmemReuse.Holds r
 
 instance : (s : SpecId) → (r : Run) → Decidable (s.Holds r)
@@ -56,6 +58,7 @@ instance : (s : SpecId) → (r : Run) → Decidable (s.Holds r)
   | .coverage, r => inferInstanceAs (Decidable (r.complete ∧ Coverage.Holds r))
   | .barrier, r => inferInstanceAs (Decidable (r.complete ∧ Barrier.Holds r))
   | .maskElision, r => inferInstanceAs (Decidable (r.complete ∧ MaskElision.Holds r))
+  | .namedBarriers, r => inferInstanceAs (Decidable (r.complete ∧ NamedBarriers.Holds r))
   | .tmemReuse, r => inferInstanceAs (Decidable (r.complete ∧ TmemReuse.Holds r))
 
 def RunHolds (s : SpecId) : Except EvalError Run → Prop
@@ -111,6 +114,10 @@ def SpecId.result (s : SpecId) (r : Run) (Ls : Ledgers) : SpecResult :=
   | .barrier => p0 (r.complete && decide (Barrier.HoldsWith Ls)) (Barrier.issues r.host Ls) (Barrier.notes r.host Ls)
       (unconverged r.host Ls ++ Barrier.undecided r.host Ls)
   | .maskElision => p0 (r.complete && decide (MaskElision.Holds r)) (MaskElision.issues r) (MaskElision.notes r)
+  | .namedBarriers =>
+    let o := NamedBarriers.analyze r
+    { spec := s, holds := r.complete && o.ok, issues := un ++ o.certain ++ o.undecided,
+      notes := #[], certain := !o.certain.isEmpty }
   | .tmemReuse =>
     let o := TmemReuse.analyze r r.ledgersP1
     { spec := s, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }
@@ -164,6 +171,23 @@ def runP1 (k : Kernel) (i : Input) : Report :=
         s!", {o.blocked} blocked wait(s)" ++
         (if stops = 0 then "" else s!"; {stops} role trace(s) stop at an out-of-bounds metadata load, so P1-1 is not decided"),
       results := res }
+
+/-- P0-6 on a P0-6 KIR (references/specs.md, "P0-6") on input `i`: the summary line (named
+barrier operations, `nb_open` events, `nb_rep` regions reached), then the P0-6 verdict and
+its counterexamples. -/
+def runNb (k : Kernel) (i : Input) : Report :=
+  match eval k i with
+  | .error e =>
+    { kernel := k.kernel, input := i, error := some e, summary := "",
+      results := SpecId.nb.map fun s =>
+        { spec := s, holds := false, issues := #[], notes := #[], certain := e.kind == .kernel } }
+  | .ok r =>
+    let (ops, opens, reps) := NamedBarriers.counts r
+    let held := NamedBarriers.heldArrivals r
+    let heldStr := if held == 0 then "" else s!", {held} arrival(s) held under the warp-ahead reading"
+    { kernel := k.kernel, input := i, error := none,
+      summary := s!"grid {pidStr r.host.grid}{clusterStr r.host}: {r.ctas.size} CTA(s) x {k.roles.length} role(s); P0-6: {ops} named barrier operation(s), {opens} not counted (nb_open), {reps} repeated region(s) reached{heldStr}",
+      results := SpecId.nb.map (·.result r #[]) }
 
 /-- Counterexample lines, and note lines, printed per spec beyond one per loc. -/
 def maxShown : Nat := 12

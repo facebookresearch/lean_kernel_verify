@@ -85,6 +85,7 @@ and a CTA with no work included; `cases.md` says which inputs a case checks.
 | 3 | **Output coverage exactly once + inter-CTA write disjointness** | E3, E4 | interval cover/disjointness over all store footprints |
 | 4 | **mbarrier protocol**: wait parity matches the intended completion (stale repeats, a data consumer starting at parity 1), expect_tx bytes equal the bytes landing in each waited phase, no TMA bytes land in a phase nobody waits for, expect_tx issued before the loads it accounts for | E10 (issue counts), the PTX ISA's mbarrier rules | per-barrier phase ledger over the event sequences |
 | 5 | **Mask-elision soundness**: an input for which the host selects a mask-elided variant (a flag the case lists in `elision_flags`, e.g. FULL_TILES) satisfies P0-1 and P0-3 on that variant | E11 | the P0-1/P0-3 checks of those inputs, reported under P0-5 |
+| 6 | **Named barriers convergent**: every named barrier (`bar.sync`, `bar.arrive`, `bar.red`) is reached by its participant warps the same number of times with the same id and count, every branch and loop exit deciding that uniform over them: no barrier under a condition that differs between them (F1, e.g. a partition barrier the compiler puts before an async MMA inside a branch on the thread index that only one warp takes), none in a loop whose trip count may differ between them (F2, e.g. a partition barrier inside a spin loop that re-reads a strong load: warps leave it in different iterations and pair instances across iterations), no count other than 32 x the warps that meet (F3); checked from the PTX of every variant | the PTX ISA's barrier rules (an aligned barrier is executed by all threads of a warp; an instance completes at its thread count) | value classes over the PTX (uniform, per lane, per warp, per thread; strong loads and atomics nondet) and a lockstep pairing of barrier instances per CTA, `specs.md` "P0-6" |
 
 ### P1
 
@@ -134,14 +135,19 @@ extraction IR, multi-GPU signalling.
 
 ## 4. Trust base
 
-A P0 result depends on exactly four things:
+A P0 result depends on exactly these things:
 
 1. the IR the compiler produced for the analyzed config (nothing below it is checked);
 2. the Lean semantics of each IR op the compiler front end extracts (one table per
    dialect, written from the PTX ISA and TLX/CuTe docs, the same for every kernel);
 3. the Lean compiler (`native_decide`, T1), which decides every verdict;
 4. for P0-2 and P0-4, the phase ledger algorithm (references/design.md, trust base),
-   whose soundness against mbarrier semantics is argued informally.
+   whose soundness against mbarrier semantics is argued informally;
+5. for P0-6, its uniformity assumptions (shared-memory data written before a
+   synchronization its readers passed; a value a spin loop accepted is published once)
+   and, for arrive-based protocols, the lockstep pairing of barrier instances with the
+   warp-ahead reading (no role runs a whole instance ahead of the others; `specs.md`
+   "P0-6").
 
 Nothing in the chain is hand-modeled per kernel.
 

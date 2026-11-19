@@ -325,7 +325,7 @@ descriptors"),
 `ldmatrix`, `stmatrix`, `mma.sync` (register MMA), `createpolicy` (an L2 policy only
 `.L2::cache_hint` operands take), `fence.*`, `membar`, `tcgen05.fence`,
 `griddepcontrol`, `setmaxnreg` (no consistency check across a warpgroup: real kernels
-run it at different points per warp), `prefetch`, `bar.warp.sync`, the commit/wait
+run it at different points per warp), `prefetch`, `nanosleep` (a scheduling hint), `bar.warp.sync`, the commit/wait
 groups of `cp.async` and `cp.async.bulk`, `st.param` and `st.param::func` (call
 staging), `trap` (the run is evaluated as if it were not reached: an unguarded trap ends
 its block, which goes on at the other side of the conditional branch that reached it,

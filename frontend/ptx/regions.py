@@ -106,6 +106,7 @@ class _Graph:
 
     def __init__(self, cfg, role):
         self.cfg, self.fn = cfg, cfg.fn
+        self._readers = None  # register -> the instructions reading it (readers)
         succ = {b: tuple(dict.fromkeys(s)) for b, s in role.succs.items()}
         self.entry = role.entry
         rpo = C._rpo(self.fn, self.entry, succ)
@@ -144,6 +145,16 @@ class _Graph:
                     f"{sorted(outs) or 'nothing'}; only exits to one block are supported"
                 )
             self.exit[h] = outs.pop()
+
+    def readers(self, reg) -> list:
+        """The function's instructions that read reg (reads_of), in program order; one
+        scan of the function for every wait loop of the role."""
+        if self._readers is None:
+            self._readers = {}
+            for i in self.fn.instructions():
+                for r in reads_of(i):
+                    self._readers.setdefault(r, []).append(i)
+        return self._readers.get(reg, [])
 
     def instrs(self, b):
         return self.cfg.blocks[b].instrs
@@ -278,7 +289,7 @@ def _wait(g, h):
             return None
     else:
         return None
-    reads = [i for i in g.fn.instructions() if i is not br and pred[1] in reads_of(i)]
+    reads = [i for i in g.readers(pred[1]) if i is not br]
     if reads:
         raise RegionError(
             f"{g.fn.name}: the result of the try_wait at line {tw.line} is read at line "

@@ -91,6 +91,22 @@ follow items 1 to 3 and 8.
     checked per CTA. An array no `bar_init` names (hand-written fixtures, a
     frontend-made slot such as the cluster barrier) is taken as initialized once
     before the roles start.
+14. **P0-6 KIR (named barriers convergent; both families).** A P0-6 KIR (file suffix
+    `.nb.json`, written next to the P0 KIR for every variant, whatever the
+    translation, by the PTX frontend's barrier pass `frontend/ptx/nbar.py`; for a
+    TTGIR variant whose launches prefer other cluster dims also for that all-preferred
+    geometry, `<spec>@cluster<dims>.nb.json`, change 11) has a
+    top-level `nbar` (the pass's classification of every barrier site, for audit;
+    Layer 2 ignores it), no barriers, as tensors only metadata tensors (1-D flat
+    buffers the conditions read with `load`; their contents per input), and only the
+    `named_bar`, `nb_open` and `nb_rep` events below (`named_bar` without `tmem`). A
+    KIR without `nbar` has no `nb_open` or `nb_rep`, so P0 and P1 KIRs and verdicts
+    do not change. `emit_lean.py` emits `#eval KV.runNb` and the P0-6 theorems
+    (`KV.Holds .namedBarriers`); `frontend/kir.py` rejects a P0-6 KIR with a
+    barrier, a tensor that is not a 1-D metadata tensor or any other event (memory
+    events such as `gload`, `gstore`, `gatomic` and TMA included), and checks that
+    `nb_rep` events nest in each statement list. Every event of a P0-6 KIR is
+    executed by every warp of its role (the pass splits roles so).
 
 ## Top level
 
@@ -256,6 +272,8 @@ Tagged by `"ev"`; all carry `loc`.
 | `tmem` (P1)                    | `inst` (`ld`, `st`, `cp`, `mma`), `warp` (w=32 Expr: the issuing warp, whose lane quarter an ld/st must stay in), `rects` [{`use` (`data`, `d`, `a`, `sf`), `write` bool, `lane` w=32 Expr, `nlanes` (16, 32, 64 or 128), `col` w=32 Expr, `ncols` (1..512)}], optional `site` (the kernel line that reached a DSL helper), optional `cta_mask` (the CTAs whose TMEM it accesses; a cta_group::2 cp or mma). ld: data reads only; st, cp: data writes only; mma: one `d` write, at most one `a` read, zero or two `sf` reads. A role with a cp or mma has one warp |
 | `tmem_wait` (P1)               | `ld` bool: `tcgen05.wait::ld` (true) or `::st` of the whole role; completes the role's earlier ld (st)                                                                                                                                                                                                                                                                                                                                                                            |
 | `named_bar` (P1)               | `id`, `count` (const Exprs; count a positive multiple of 32), `sync` bool: `bar.sync` (true) or `bar.arrive` of every thread of the role on named barrier `id` (`nvvm.barrier`: id 0, count = the block's threads)                                                                                                                                                                                                                                                                |
+| `nb_open` (P0-6)               | `kind` (`lane`, `cond`, `loop`, `operand`, `dispatch`), `certain` bool, `why` string, `id`, `count` (const Exprs or null), `sync` bool: a named barrier instruction the barrier pass cannot count, reached by the role under a condition its participants may not share (references/specs.md "P0-6"); reached and certain: a certain P0-6 violation, else P0-6 is undecided                                                                                                     |
+| `nb_rep` (P0-6)                | `begin` bool, `why` string, `key` (optional string, default empty): the begin (true) or end of a region that runs a number of times the model does not fix, the same in every warp of the role; begins and ends nest within one statement list; a non-empty key names the region of the role before warp splitting whose condition is uniform over that whole role (its split roles repeat it alike)                                                                                  |
 
 ## Inputs
 

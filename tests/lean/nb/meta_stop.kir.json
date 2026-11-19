@@ -1,0 +1,127 @@
+{
+ "kir_version": 1,
+ "kernel": "meta_stop",
+ "source": "nb.py",
+ "ir": "ptx",
+ "grid": [
+  {
+   "e": "const",
+   "w": 32,
+   "v": 2
+  },
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  },
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  }
+ ],
+ "params": [
+  {
+   "name": "N_META",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "meta",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "var",
+     "name": "N_META",
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "w": 32,
+     "v": 1
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": true
+  }
+ ],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "all",
+   "warps": 4,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "let",
+     "var": "v",
+     "loc": "nb.py:5",
+     "expr": {
+      "e": "load",
+      "tensor": "meta",
+      "w": 32,
+      "index": [
+       {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       }
+      ]
+     }
+    },
+    {
+     "op": "event",
+     "ev": "named_bar",
+     "id": {
+      "e": "const",
+      "w": 32,
+      "v": 1
+     },
+     "count": {
+      "e": "const",
+      "w": 32,
+      "v": 128
+     },
+     "sync": true,
+     "loc": "nb.py:6"
+    }
+   ]
+  }
+ ],
+ "nbar": {
+  "sites": []
+ },
+ "case": {
+  "name": "nb/meta_stop",
+  "inputs": [
+   {
+    "name": "in_range",
+    "params": {
+     "N_META": 2
+    },
+    "metadata": {
+     "meta": [
+      3,
+      5
+     ]
+    }
+   },
+   {
+    "name": "out_of_range",
+    "params": {
+     "N_META": 1
+    },
+    "metadata": {
+     "meta": [
+      3
+     ]
+    }
+   }
+  ]
+ }
+}

@@ -16,7 +16,9 @@
   not a kernel error); an evaluation error's kind decides its specs (kernel error: FAIL,
   model limit: UNDECIDED, unexpected: ERROR), and an INCONSISTENT verdict is an ERROR; a
   variant without verdicts is UNDECIDED if the frontend refuses it by design, else an
-  ERROR; the outcome and exit status are FAIL (1) on any FAIL, else ERROR (2) on any
+  ERROR; a spec, or its all-preferred geometry, for
+  which to_kir wrote neither a P0-6 KIR nor a P0-6 failure is an ERROR too; the outcome
+  and exit status are FAIL (1) on any FAIL, else ERROR (2) on any
   failure, else UNDECIDED (0) on anything a known limit leaves open, else PASS (0); P1-1
   ERRORs always count, its FAIL and UNDECIDED only with --p1-strict; inputs the host
   rejects count as none; an export's revision marker names the analyzed revision;
@@ -772,6 +774,18 @@ class Unit(unittest.TestCase):
                 lkv_py.layer2(kirs, Path(d) / "out", None, 1, 1)
             self.assertFalse((Path(d) / "out").exists())
 
+    def test_variant_inputs_of_a_geometry(self):
+        # a to_kir failure line names `<spec>` or `<spec>@cluster<dims>`: the inputs of
+        # the spec, those whose grid the dims divide (a bare `@cluster`: every one)
+        la = lambda spec, grid: {"spec": spec, "launch": {"grid": grid}}  # noqa: E731
+        dump = {"inputs": [{"name": "a", "launches": [la("s", [4, 1, 1])]},
+                           {"name": "b", "launches": [la("s", [6, 1, 1])]},
+                           {"name": "c", "launches": [la("t", [4, 1, 1])]}]}  # fmt: skip
+        self.assertEqual(lkv_py.variant_inputs(dump, "s"), ["a", "b"])
+        self.assertEqual(lkv_py.variant_inputs(dump, "s@cluster4x1x1"), ["a"])
+        self.assertEqual(lkv_py.variant_inputs(dump, "s@cluster2x1x1"), ["a", "b"])
+        self.assertEqual(lkv_py.variant_inputs(dump, "s@cluster"), ["a", "b"])
+
     def test_target_reaches_the_ttgir_dump(self):
         calls = []
 
@@ -817,12 +831,60 @@ class Unit(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(lkv_py, "buck_run", buck_run), \
+                mock.patch.object(lkv_py, "NB_NOT_CHECKED", []), \
                 mock.patch.object(lkv_py, "P1_NOT_CHECKED", []):  # fmt: skip
             kirs, failures = lkv_py.run_ttgir(Path(d) / "c.json", Path(d), Path(d),
                                               Path(d), [], "sm_100")  # fmt: skip
         self.assertEqual([k.name for k in kirs], ["s.kir.json"])
         self.assertEqual([(f["variant"], f["inputs"], f["kind"]) for f in failures],
                          [("s@cluster", ["a", "b"], "gap")])  # fmt: skip
+
+    def test_lost_p0_6_kir_is_an_error(self):
+        # to_kir stopped after its P0 lines (a P0 failure keeps lkv.py going): a spec
+        # without a P0-6 KIR or `P0-6 FAILED` line, and a spec's all-preferred geometry
+        # without one, get an ERROR entry instead of no verdict
+        def buck_run(target, args, log_path):
+            args = list(map(str, args))
+            if target == "frontend/ttgir:dump":
+                la = lambda spec, attrs: {"spec": spec, "launch": {  # noqa: E731
+                    "grid": [4, 1, 1], "cluster": [1, 1, 1], "attrs": attrs}}  # fmt: skip
+                launches = [
+                    la("s", {}),
+                    la("t", {}),
+                    la("u", {"preferred_cluster": [2, 1, 1]}),
+                ]
+                dump = {"kernel": "k", "specs": {"s": {}, "t": {}, "u": {}},
+                        "inputs": [{"name": "a", "launches": launches}]}  # fmt: skip
+                (Path(args[args.index("--out") + 1]) / "dump.json").write_text(
+                    json.dumps(dump)
+                )
+                Path(log_path).write_text("")
+                return 0
+            fe = Path(args[args.index("--dump") + 1]).parent
+            for name in ("s.kir.json", "s.nb.json", "u.kir.json", "u.nb.json"):
+                (fe / name).write_text("{}")
+            Path(log_path).write_text(
+                "[to_kir] t: FAILED (gap): x\nTraceback (most recent call last):\n"
+            )
+            return 1
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(lkv_py, "buck_run", buck_run), \
+                mock.patch.object(lkv_py, "NB_NOT_CHECKED", []) as nb, \
+                mock.patch.object(lkv_py, "P1_NOT_CHECKED", []):  # fmt: skip
+            kirs, failures = lkv_py.run_ttgir(Path(d) / "c.json", Path(d), Path(d),
+                                              Path(d), [], "sm_100")  # fmt: skip
+        self.assertEqual(
+            [k.name for k in kirs],
+            ["s.kir.json", "u.kir.json", "s.nb.json", "u.nb.json"],
+        )
+        self.assertEqual([f["variant"] for f in failures], ["t"])
+        self.assertEqual([(x["variant"], x["inputs"], x["kind"]) for x in nb],
+                         [("t.nb", ["a"], "error"), ("u@cluster.nb", ["a"], "error")])  # fmt: skip
+        report = {"variants_nb": [], "nb_not_checked": nb}
+        self.assertEqual(
+            [x["outcome"] for x in lkv_py.unchecked_nb(report)], ["ERROR", "ERROR"]
+        )
 
     def test_run_outside_a_checkout_is_an_error(self):
         # A copy of the skill outside an fbsource checkout cannot build the frontend.

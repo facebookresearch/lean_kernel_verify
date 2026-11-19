@@ -1,0 +1,85 @@
+{
+ "kir_version": 1,
+ "kernel": "short_arrive_after",
+ "source": "nb.py",
+ "ir": "ptx",
+ "grid": [
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  },
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  },
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  }
+ ],
+ "params": [],
+ "tensors": [],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "w0",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "named_bar",
+     "id": {
+      "e": "const",
+      "w": 32,
+      "v": 1
+     },
+     "count": {
+      "e": "const",
+      "w": 32,
+      "v": 128
+     },
+     "sync": true,
+     "loc": "nb.py:7"
+    },
+    {
+     "op": "event",
+     "ev": "named_bar",
+     "id": {
+      "e": "const",
+      "w": 32,
+      "v": 2
+     },
+     "count": {
+      "e": "const",
+      "w": 32,
+      "v": 32
+     },
+     "sync": false,
+     "loc": "nb.py:8"
+    }
+   ]
+  },
+  {
+   "name": "w1_3",
+   "warps": 3,
+   "threads_per_issue": 1,
+   "body": []
+  }
+ ],
+ "nbar": {
+  "sites": []
+ },
+ "case": {
+  "name": "nb/short_arrive_after",
+  "inputs": [
+   {
+    "name": "one",
+    "params": {}
+   }
+  ]
+ }
+}

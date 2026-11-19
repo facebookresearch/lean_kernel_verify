@@ -23,6 +23,9 @@
 # 3. The same for every tests/lean/p1/*.kir.json fixture (P1 KIR, P1-1 TMEM reuse ordered;
 #    written by p1/make_fixtures.py) against p1/expected.txt (one P1-1 column),
 #    p1/expected_messages.txt and p1/report_checks.txt.
+# 4. The same for every tests/lean/nb/*.kir.json fixture (P0-6 KIR, named barriers
+#    convergent; written by nb/make_fixtures.py) against nb/expected.txt (one P0-6 column),
+#    nb/expected_messages.txt and nb/report_checks.txt.
 #
 # Generated Lean files and outputs are kept in $LKV_TEST_OUT (default ${TMPDIR:-/tmp}/lkv_lean_tests_$USER).
 set -uo pipefail
@@ -128,6 +131,49 @@ for f in "$P1"/*.kir.json; do
       grep -qF -- "$line" "$OUT/p1_$n.out" || bad "p1/$n: report lacks: $line"
     fi
   done < <(grep -v '^#' "$P1/report_checks.txt")
+done
+
+# P0-6 fixtures: one P0-6 verdict per input (KV.runNb, theorem KV.Holds .namedBarriers).
+NB="$T/nb"
+for f in "$NB"/*.kir.json; do
+  n="$(basename "$f" .kir.json)"
+  nfix=$((nfix + 1))
+  python3 -I "$S/frontend/kir.py" "$f" || { bad "nb/$n: invalid KIR"; continue; }
+  python3 -I "$S/frontend/emit_lean.py" "$f" -o "$OUT/nb_$n.lean" || { bad "nb/$n: emit_lean.py failed"; continue; }
+  "$S/scripts/run_lean_check.sh" "$OUT/nb_$n.lean" >"$OUT/nb_$n.out" 2>&1
+  status=$?
+  want="$(awk -v f="$n" '$1 == f { printf "VERDICT %s P0-6 %s\n", $2, $3 }' "$NB/expected.txt" | sort)"
+  got="$(grep '^VERDICT ' "$OUT/nb_$n.out" | sort)"
+  if [[ -z "$want" ]]; then
+    bad "nb/$n: no rows in nb/expected.txt"
+    continue
+  fi
+  if [[ "$want" != "$got" ]]; then
+    bad "nb/$n: verdicts differ from nb/expected.txt (< expected, > got; output in $OUT/nb_$n.out)"
+    diff <(echo "$want") <(echo "$got") | grep '^[<>]' | sed 's/^/    /'
+  fi
+  nverdicts=$((nverdicts + $(grep -c . <<<"$want")))
+  want_thm="$(awk -v f="$n" '$1 == f && $3 == "FAIL" { printf "namedBarriers %s\n", $2 }' "$NB/expected.txt" | sort)"
+  got_thm="$(sed -n 's/^ *KV\.Holds KV\.SpecId\.\([A-Za-z]*\) kernel input[0-9]*_\(.*\)$/\1 \2/p' "$OUT/nb_$n.out" | sort)"
+  nerr="$(grep -c ': error' "$OUT/nb_$n.out")"
+  if [[ "$want_thm" != "$got_thm" ]] || (( nerr != $(grep -c . <<<"$got_thm") )); then
+    bad "nb/$n: refuted theorems differ from the expected FAILs, or other Lean errors ($nerr errors; see $OUT/nb_$n.out)"
+  fi
+  if (( (status != 0) != ($(grep -c . <<<"$want_thm") > 0) )); then
+    bad "nb/$n: lean exit status $status does not match the expected verdicts"
+  fi
+  while IFS=' ' read -r fx msg; do
+    [[ "$fx" == "$n" ]] || continue
+    grep -qF -- "$msg" "$OUT/nb_$n.out" || bad "nb/$n: report lacks: $msg"
+  done < <(grep -v '^#' "$NB/expected_messages.txt")
+  while IFS=' ' read -r fx line; do
+    [[ "$fx" == "$n" ]] || continue
+    if [[ "$line" == '!'* ]]; then
+      if grep -qF -- "${line:1}" "$OUT/nb_$n.out"; then bad "nb/$n: report contains: ${line:1}"; fi
+    else
+      grep -qF -- "$line" "$OUT/nb_$n.out" || bad "nb/$n: report lacks: $line"
+    fi
+  done < <(grep -v '^#' "$NB/report_checks.txt")
 done
 
 if (( failures )); then

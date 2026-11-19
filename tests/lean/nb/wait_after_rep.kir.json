@@ -1,0 +1,116 @@
+{
+ "kir_version": 1,
+ "kernel": "wait_after_rep",
+ "source": "nb.py",
+ "ir": "ptx",
+ "grid": [
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  },
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  },
+  {
+   "e": "const",
+   "w": 32,
+   "v": 1
+  }
+ ],
+ "params": [],
+ "tensors": [],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "w0",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "named_bar",
+     "id": {
+      "e": "const",
+      "w": 32,
+      "v": 1
+     },
+     "count": {
+      "e": "const",
+      "w": 32,
+      "v": 64
+     },
+     "sync": true,
+     "loc": "nb.py:3"
+    }
+   ]
+  },
+  {
+   "name": "w1",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "nb_rep",
+     "begin": true,
+     "why": "a loop on uniform data",
+     "loc": "nb.py:1"
+    },
+    {
+     "op": "event",
+     "ev": "named_bar",
+     "id": {
+      "e": "const",
+      "w": 32,
+      "v": 2
+     },
+     "count": {
+      "e": "const",
+      "w": 32,
+      "v": 64
+     },
+     "sync": true,
+     "loc": "nb.py:4"
+    },
+    {
+     "op": "event",
+     "ev": "nb_rep",
+     "begin": false,
+     "why": "a loop on uniform data",
+     "loc": "nb.py:1"
+    },
+    {
+     "op": "event",
+     "ev": "named_bar",
+     "id": {
+      "e": "const",
+      "w": 32,
+      "v": 1
+     },
+     "count": {
+      "e": "const",
+      "w": 32,
+      "v": 64
+     },
+     "sync": true,
+     "loc": "nb.py:5"
+    }
+   ]
+  }
+ ],
+ "nbar": {
+  "sites": []
+ },
+ "case": {
+  "name": "nb/wait_after_rep",
+  "inputs": [
+   {
+    "name": "one",
+    "params": {}
+   }
+  ]
+ }
+}

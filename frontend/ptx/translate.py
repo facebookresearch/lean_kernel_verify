@@ -661,7 +661,9 @@ def _tma_write(mn: str) -> bool:
     )
 
 
-def writes(ptx_text: str, entry: str, params: list) -> list | None:
+def writes(
+    ptx_text: str, entry: str, params: list, ignore=None, narrow=False, module=None
+) -> list | None:
     """The tensors a kernel may write, for the stale-data checks of a variant the
     translation refused (the write set from the PTX, else every pointer argument): the
     named pointers (param_table's `params`) the address of each global write derives
@@ -669,11 +671,15 @@ def writes(ptx_text: str, entry: str, params: list) -> list | None:
     unknown or no base, or an instruction has no op-table row or is refused by it (a call
     of a device function may store anywhere; of the refused rows only try_wait/test_wait,
     which read shared memory, are known to write nothing): then any argument may be
-    written."""
-    module = parse.parse(ptx_text)
+    written. `ignore(i)`: instructions the caller knows write no tensor; `narrow`: a value
+    loaded with a type of 32 bits or less is no pointer (P0-6's write set, nbar.py).
+    `module`: ptx_text already parsed (it is only read)."""
+    module = module or parse.parse(ptx_text)
     fn = module.function(entry)
     try:
         for i in fn.instructions():
+            if ignore is not None and ignore(i):  # the caller knows it writes no tensor
+                continue
             if ops.classify(i)[0] == "refuse" and not ops.mnemonic(i.opcode).startswith(
                 ("mbarrier.try_wait", "mbarrier.test_wait")
             ):
@@ -682,7 +688,7 @@ def writes(ptx_text: str, entry: str, params: list) -> list | None:
         return None
     shared = {v.name for v in module.vars + fn.vars if v.space == "shared"}
     table = {p["ptx"]: p for p in params}
-    bases = _Bases(fn, table, shared)
+    bases = _Bases(fn, table, shared, narrow)
     scratch = {p["name"] for p in params if p.get("scratch")}
     replaced = set().union(*(bases.of(i.operands[1]) for i, mn in bases.instrs
                              if mn.startswith("tensormap.replace.global_address")))  # fmt: skip
@@ -730,8 +736,8 @@ class _Bases:
     fixed point. A pointer parameter or field is its tensor, a shared symbol _SHARED, a
     loaded 64-bit value or any other symbol _UNKNOWN; scalars and narrower loads none."""
 
-    def __init__(self, fn, table: dict, shared: set):
-        self.fn, self.table, self.shared = fn, table, shared
+    def __init__(self, fn, table: dict, shared: set, narrow: bool = False):
+        self.fn, self.table, self.shared, self.narrow = fn, table, shared, narrow
         self.regs: dict = {}
         self.instrs = [(i, ops.mnemonic(i.opcode)) for i in fn.instructions()]
         changed = True
@@ -767,6 +773,12 @@ class _Bases:
             return [(r, _param_bases(p, off + k * size)) for k, r in enumerate(ds)]
         if mn.startswith(("ld", "atom")):  # memory: a 64-bit value may be a pointer
             wide = {r for r in ds if self.fn.regs.get(r, "")[1:] == "64"}
+            if (
+                self.narrow
+                and int((re.findall(r"\d+", i.opcode.rsplit(".", 1)[-1]) or ["64"])[0])
+                <= 32
+            ):
+                wide = set()
             return [(r, {_UNKNOWN} if r in wide else set()) for r in ds]
         got = set().union(*(self.of(op) for op in i.operands[1:]))
         return [(r, got) for r in ds]

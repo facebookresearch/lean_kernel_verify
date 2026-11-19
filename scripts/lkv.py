@@ -40,6 +40,16 @@ its verdicts in a section of their own and in report.json "variants_p1" / "total
 "not checked"). P1-1's FAIL and UNDECIDED verdicts count toward the outcome only with
 --p1-strict; its ERRORs always do (they are failures of LKV).
 
+P0-6 (named barriers convergent, both families): to_kir also writes a P0-6 KIR per variant
+from its PTX, whatever the translation and also where the P0 translation refuses the
+variant (`<spec>.nb.json`, `<kernel>__<digest>.nb.json`; frontend/ptx/nbar.py), and per
+TTGIR variant whose launches prefer other cluster dims one for that all-preferred
+geometry (`<spec>@cluster<dims>.nb.json`, as the PTX translation's P0 KIR). run checks
+it like a P0 KIR; its verdicts are P0 verdicts (the per-input table, the summary, the
+findings, the outcome and exit status) and report.json keeps them in "variants_nb" (with
+the frontend's classification of every barrier site, "nb_sites") and "nb_not_checked"
+(variants whose barrier pass refused or failed, or whose P0-6 KIR to_kir did not write).
+
 A verdict is per (KIR variant, input, spec), and it has one of four outcomes:
   PASS       the theorem `KV.Holds` was proved by native_decide (a variant gets verdicts
              only if Lean's sole errors are refuted theorems and its exit status says the
@@ -115,6 +125,7 @@ SPECS = {
     "coverage": "P0-3",
     "barrier": "P0-4",
     "maskElision": "P0-5",
+    "namedBarriers": "P0-6",
     "tmemReuse": "P1-1",
 }
 EXPORT_MARK = "LKV_EXPORT.json"
@@ -124,12 +135,15 @@ TITLES = {
     "P0-3": "output coverage exactly once",
     "P0-4": "mbarrier protocol",
     "P0-5": "mask-elision soundness",
+    "P0-6": "named barriers convergent",
     "P1-1": "TMEM reuse ordered",
 }
 LABELS = ["P0-1", "P0-2", "P0-3", "P0-4", "P0-5"]
 # P1 specs: decided on the P1 KIR (`<kernel>__<digest>.p1.json`, CuTe only) and reported
 # in their own section; they never change the exit status unless --p1-strict.
 LABELS_P1 = ["P1-1"]
+# P0-6: decided on the P0-6 KIR (`.nb.json`) of every variant, reported with the P0 specs.
+LABELS_NB = ["P0-6"]
 # Outcomes of a verdict and of a run (module doc), and the run's exit status.
 OUTCOMES = ("PASS", "FAIL", "ERROR", "UNDECIDED")
 EXIT_STATUS = {"PASS": 0, "UNDECIDED": 0, "FAIL": 1, "ERROR": 2}
@@ -247,7 +261,7 @@ def source_rev(case, root, src):
     return case["source"].get("rev") if frontend_of(case) == "cute" else case.get("rev")
 
 
-def run_frontend(case_path, case, root, out, inputs, target):
+def run_frontend(case_path, case, root, out, inputs, target, jobs=1):
     """Dump and translate; returns ([KIR paths], [{"variant", "kernel", "inputs", "kind",
     "error"}] for the variants without a KIR, [{"input", "error"}] for the inputs the host
     code rejected: the dump's `host_error`, an exception the exported sources raised or no
@@ -260,7 +274,7 @@ def run_frontend(case_path, case, root, out, inputs, target):
     if frontend_of(case) == "cute":
         kirs, failures = run_cute(case_path, case, root, fe, logs, sel)
     else:
-        kirs, failures = run_ttgir(case_path, root, fe, logs, sel, target)
+        kirs, failures = run_ttgir(case_path, root, fe, logs, sel, target, jobs)
     rejected = [
         {"input": i["name"], "error": i["host_error"]}
         for i in json.loads((fe / "dump.json").read_text())["inputs"]
@@ -308,6 +322,19 @@ def run_cute(case_path, case, root, fe, logs, sel):
                     "error": e["error"],
                 }
             )
+        nb = e.get("nb")
+        if nb and nb["status"] == "checked":
+            kirs.append(Path(nb["kir"]))
+        elif nb:
+            NB_NOT_CHECKED.append(
+                {
+                    "variant": f"{e['kernel']}__{e['digest']}.nb",
+                    "kernel": e["kernel"],
+                    "inputs": e.get("inputs", []),
+                    "kind": "error" if nb["status"] == "error" else "gap",
+                    "error": nb.get("error", ""),
+                }
+            )
         p1 = e.get("p1")
         if p1 and p1["status"] == "checked":
             kirs.append(Path(p1["kir"]))
@@ -327,6 +354,9 @@ def run_cute(case_path, case, root, fe, logs, sel):
 # P1 translations without a P1 KIR (refused, failed: "error", not applicable), filled by
 # the frontends.
 P1_NOT_CHECKED = []
+# Variants without a P0-6 KIR ({variant, kernel, inputs, kind: "gap" | "error", error}),
+# filled by the frontends.
+NB_NOT_CHECKED = []
 # KIRs whose source lines are best effort, {variant: "line_only"}, filled by run_cute:
 # the CuTe frontend's PTX translation (LKV_FRONTEND=ptx) under DSL 4.4.2, whose PTX
 # attributes code to the wrong source files, takes only the line numbers, in the
@@ -334,7 +364,7 @@ P1_NOT_CHECKED = []
 LOC_QUALITY = {}
 
 
-def run_ttgir(case_path, root, fe, logs, sel, target):
+def run_ttgir(case_path, root, fe, logs, sel, target, jobs=1):
     """The TTGIR frontend (dump, then to_kir): ([KIR paths], variants without a KIR, each
     with its kind: "gap" or "error")."""
     status = buck_run(
@@ -344,31 +374,39 @@ def run_ttgir(case_path, root, fe, logs, sel, target):
     )
     if status != 0:
         raise RuntimeError(f"TTGIR dump failed:\n{tail(logs / 'dump.log')}")
-    for old in fe.glob("*.kir.json"):
+    for old in [*fe.glob("*.kir.json"), *fe.glob("*.nb.json")]:
         old.unlink()
     status = buck_run(
         "frontend/ttgir:to_kir",
-        ["--dump", fe / "dump.json", "--case", case_path],
+        ["--dump", fe / "dump.json", "--case", case_path, "--jobs", jobs],
         logs / "to_kir.log",
     )
     dump = json.loads((fe / "dump.json").read_text())
     failures = []
+    nb_failed = set()
     for line in (logs / "to_kir.log").read_text().splitlines():
-        m = re.match(r"\[to_kir\] (\S+): FAILED \((gap|error)\): (.*)", line)
+        m = re.match(r"\[to_kir\] (\S+): (P0-6 )?FAILED \((gap|error)\): (.*)", line)
         if m:
-            spec = m.group(1).partition("@")[0]  # <spec>@cluster...: another geometry
-            inputs = [
-                i["name"]
-                for i in dump["inputs"]
-                if any(la["spec"] == spec for la in i.get("launches", []))
-            ]
+            inputs = variant_inputs(dump, m.group(1))
+            if m.group(2):  # the barrier pass (P0-6)
+                nb_failed.add(m.group(1))
+                NB_NOT_CHECKED.append(
+                    {
+                        "variant": f"{m.group(1)}.nb",
+                        "kernel": dump["kernel"],
+                        "inputs": inputs,
+                        "kind": m.group(3),
+                        "error": m.group(4),
+                    }
+                )
+                continue
             failures.append(
                 {
                     "variant": m.group(1),
                     "kernel": dump["kernel"],
                     "inputs": inputs,
-                    "kind": m.group(2),
-                    "error": m.group(3),
+                    "kind": m.group(3),
+                    "error": m.group(4),
                 }
             )
     if status != 0 and not failures:
@@ -392,7 +430,64 @@ def run_ttgir(case_path, root, fe, logs, sel, target):
         }
         for k in kirs
     )
+    kirs += [fe / f"{k}.nb.json" for k in specs if (fe / f"{k}.nb.json").exists()]
+    kirs += sorted(p for k in specs for p in fe.glob(f"{k}@*.nb.json"))
+    NB_NOT_CHECKED.extend(
+        {
+            "variant": f"{k}.nb",
+            "kernel": dump["kernel"],
+            "inputs": variant_inputs(dump, k),
+            "kind": "error",
+            "error": "to_kir wrote neither a P0-6 KIR nor a P0-6 failure (it stopped)",
+        }
+        for k in nb_lost(dump, fe, nb_failed)
+    )
     return kirs, failures
+
+
+def nb_lost(dump, fe, failed):
+    """The P0-6 results to_kir wrote neither as a KIR nor as a `P0-6 FAILED` line (it
+    stopped before them): each spec's, and the all-preferred geometry's (`<spec>@cluster`)
+    of a spec with a launch that prefers other cluster dims."""
+    lost = []
+    for k in dump["specs"]:
+        if not (fe / f"{k}.nb.json").exists() and k not in failed:
+            lost.append(k)
+        recs = [la.get("launch") or {} for i in dump["inputs"]
+                for la in i.get("launches", []) if la["spec"] == k]  # fmt: skip
+        prefers = any(
+            (pref := (r.get("attrs") or {}).get("preferred_cluster"))
+            and tuple(pref) != tuple(r.get("cluster") or (1, 1, 1))
+            for r in recs
+        )
+        if (
+            prefers
+            and not any(fe.glob(f"{k}@*.nb.json"))
+            and not any(n.startswith(f"{k}@") for n in failed)
+        ):
+            lost.append(f"{k}@cluster")
+    return lost
+
+
+def variant_inputs(dump, name):
+    """The inputs of a TTGIR variant `<spec>` or `<spec>@cluster<dims>` (an
+    all-preferred cluster geometry: the inputs whose grid the dims divide; a bare
+    `@cluster`, a failure deciding the geometry, has every input of the spec)."""
+    spec, _, geometry = name.partition("@")
+    dims = re.fullmatch(r"cluster(\d+)x(\d+)x(\d+)", geometry)
+    dims = [int(d) for d in dims.groups()] if dims else None
+    return [
+        i["name"]
+        for i in dump["inputs"]
+        if any(
+            la["spec"] == spec
+            and (
+                dims is None
+                or all(g % c == 0 for g, c in zip(la["launch"]["grid"], dims))
+            )
+            for la in i.get("launches", [])
+        )
+    ]
 
 
 # ------------------------------------------------------------------- Layer 2
@@ -525,7 +620,7 @@ def parse_lean(text, k, status):
             f"Lean exited with status {status} and {len(refuted)} refuted theorem(s)"
         )
     for n, inp in inputs.items():
-        for label in LABELS_P1 if "tmem" in k else LABELS:
+        for label in labels_of(k):
             s = inp["specs"].setdefault(label, new_spec())
             theorem = "FAIL" if (n, label) in refuted else "PASS"
             # The theorem is the verdict; the #eval report must agree with it.
@@ -549,6 +644,11 @@ def parse_lean(text, k, status):
     return [inputs[n] for n in names]
 
 
+def labels_of(k):
+    """The specs a KIR decides: P1-1 (P1 KIR), P0-6 (P0-6 KIR) or P0-1..P0-5."""
+    return LABELS_P1 if "tmem" in k else LABELS_NB if "nbar" in k else LABELS
+
+
 def variant_name(path):
     return path.name.removesuffix(".json").removesuffix(".kir")
 
@@ -561,8 +661,11 @@ def check_kir(path, lean_dir, sources, timeout):
         kernel=k.get("kernel"),
         flags=k.get("case", {}).get("inputs", [{}])[0].get("flags", {}),
         p1="tmem" in k,
+        nb="nbar" in k,
         input_names=[i.get("name") for i in k.get("case", {}).get("inputs", [])],
     )
+    if "nbar" in k and isinstance(k["nbar"], dict):
+        entry["nb_sites"] = k["nbar"].get("sites", [])
     errors = kir.validate(k)
     if errors:
         return dict(entry, status="invalid_kir", error="; ".join(errors[:10]))
@@ -593,6 +696,13 @@ def check_kir(path, lean_dir, sources, timeout):
         for s in inp["specs"].values():
             for f in s["counterexamples"] + s["notes"]:
                 f["source"], f["line_text"] = sources.resolve(f["loc"])
+    if entry[
+        "nb"
+    ]:  # P0-6 verdicts that rest on the warp-ahead reading (specs.md "P0-6")
+        held = re.findall(
+            r"(\d+) arrival\(s\) held under the warp-ahead reading", r.stdout
+        )
+        entry["nb_held"] = max((int(x) for x in held), default=0)
     return dict(entry, status="checked", inputs=inputs)
 
 
@@ -639,6 +749,36 @@ def layer2(kirs, out, sources, jobs, timeout):
 # ------------------------------------------------------------------- reports
 
 
+def unchecked_nb(report):
+    """The variants without P0-6 verdicts (unchecked's entries for P0-6): a P0-6 KIR whose
+    check did not finish, or a barrier pass that refused (UNDECIDED) or failed (ERROR)."""
+    out = [
+        {
+            "variant": v["variant"],
+            "kernel": v.get("kernel"),
+            "inputs": v.get("input_names", []),
+            "why": f"P0-6 {v['status']}: {v.get('error', '')}",
+            "outcome": "ERROR",
+            "labels": LABELS_NB,
+        }
+        for v in report.get("variants_nb", [])
+        if v["status"] != "checked"
+    ]
+    for x in report.get("nb_not_checked", []):
+        err = x.get("kind") == "error"
+        out.append(
+            {
+                "variant": x["variant"],
+                "kernel": x.get("kernel") or x["variant"].split("__")[0],
+                "inputs": x.get("inputs", []),
+                "why": f"P0-6 barrier pass {'error' if err else 'refused'}: {x['error']}",
+                "outcome": "ERROR" if err else "UNDECIDED",
+                "labels": LABELS_NB,
+            }
+        )
+    return out
+
+
 def unchecked(report, p1=False):
     """The variants without verdicts, each {variant, kernel, inputs, why, outcome}: ERROR for
     a P0 (with `p1`: P1) KIR whose check did not finish and for a frontend failure (kind
@@ -652,6 +792,7 @@ def unchecked(report, p1=False):
             "inputs": v.get("input_names", []),
             "why": f"{v['status']}: {v.get('error', '')}",
             "outcome": "ERROR",
+            "labels": LABELS_P1 if p1 else LABELS,
         }
         for v in (report.get("variants_p1", []) if p1 else report["variants"])
         if v["status"] != "checked"
@@ -675,6 +816,7 @@ def unchecked(report, p1=False):
                 "inputs": x.get("inputs", []),
                 "why": f"{'P1 translation' if p1 else 'frontend'} {what}: {x['error']}",
                 "outcome": "ERROR" if err else "UNDECIDED",
+                "labels": LABELS_P1 if p1 else LABELS,
             }
         )
     return out
@@ -696,8 +838,9 @@ def totals(variants, labels=None, no_verdicts=()):
                 t[label]["INCONSISTENT"] += s["verdict"] == "INCONSISTENT"
                 t[label]["with_notes"] += s["note_count"] > 0
     for u in no_verdicts:
-        for label in labels:
-            t[label][u["outcome"]] += len(u["inputs"])
+        for label in u.get("labels", labels):
+            if label in t:
+                t[label][u["outcome"]] += len(u["inputs"])
     return t
 
 
@@ -788,6 +931,8 @@ def run_reason(report):
         return "ERROR", f"pipeline error: {report['error'].splitlines()[0]}"
     if any(v["status"] == "checked" for v in report["variants"]):
         return None
+    if any(v["status"] == "checked" for v in report.get("variants_nb", [])):
+        return None  # the P0 variants' own reasons say why they have no verdicts
     missing = unchecked(report)
     if not missing:
         return "ERROR", (
@@ -810,6 +955,7 @@ def result(report):
     lines = {"FAIL": [], "ERROR": [], "UNDECIDED": []}
     parts = [
         ("", report["variants"], unchecked(report), True),
+        ("P0-6: ", report.get("variants_nb", []), unchecked_nb(report), True),
         (
             "P1-1: ",
             report.get("variants_p1", []),
@@ -893,7 +1039,7 @@ def md_per_input(variants, no_verdicts=(), labels=None):
             )
     for u in no_verdicts:
         for name in u["inputs"]:
-            for label in labels:
+            for label in u.get("labels", labels):
                 cells[(u["kernel"], name)][label].append((u["outcome"], False))
     if not cells:
         return []
@@ -914,6 +1060,9 @@ def md_per_input(variants, no_verdicts=(), labels=None):
             n = len(specs[label])
             count = Counter(o for o, _ in specs[label])
             noted = sum(x for _, x in specs[label])
+            if not n:
+                row.append("-")
+                continue
             parts = [f"**FAIL** ({count['FAIL']}/{n})"] if count["FAIL"] else []
             parts += [f"**ERROR** ({count['ERROR']}/{n})"] if count["ERROR"] else []
             parts += (
@@ -1244,6 +1393,54 @@ def md_p1(report):
     return out
 
 
+def p0_variants(report):
+    """The variants with P0 verdicts: the P0 KIRs' and the P0-6 KIRs'."""
+    return report["variants"] + report.get("variants_nb", [])
+
+
+def p0_unchecked(report):
+    return unchecked(report) + unchecked_nb(report)
+
+
+def md_nb_sites(report):
+    """P0-6: what the barrier pass found at each named barrier site it could not count
+    (nb_open), from the P0-6 KIRs ("nbar"), and the variants whose pairing rests on the
+    warp-ahead reading."""
+    out = []
+    held = [v for v in report.get("variants_nb", []) if v.get("nb_held")]
+    if held:
+        out = ["## P0-6 under the warp-ahead reading", "",
+               "The P0-6 verdicts of these variants rest on the warp-ahead reading",
+               "(references/specs.md \"P0-6\"): no role runs a whole instance ahead of the others",
+               "on a named barrier. The reading holds, or may hold, that many arrivals (most over",
+               "the inputs) for the next instance: an arrive after which its role uses the barrier",
+               "again while the other roles could complete the instance without it.", ""]  # fmt: skip
+        out += [f"- {code(v['variant'])}: {v['nb_held']} arrival(s)" for v in held]
+        out.append("")
+    sites = []
+    for v in report.get("variants_nb", []):
+        opens = [x for x in v.get("nb_sites", []) if x["status"] == "open"]
+        if not opens:
+            continue
+        if not sites:
+            sites = ["## P0-6 barrier sites not counted", "",
+                     "Named barrier instructions the barrier pass (frontend/ptx/nbar.py) could not",
+                     "count; each is an `nb_open` event: a reached one is a certain violation",
+                     "(certain) or leaves P0-6 undecided.", ""]  # fmt: skip
+        sites.append(f"- {code(v['variant'])}:")
+        seen = set()
+        for x in opens:
+            key = (x["role"], x["ptx_line"])
+            if key in seen:
+                continue
+            seen.add(key)
+            cert = "certain" if x["certain"] else "not certain"
+            sites.append(
+                f"  - role {x['role']}, {code(x['loc'])} ({x['kind']}, {cert}): {x['why']}"
+            )
+    return out + sites
+
+
 def markdown(report):
     out = [f"# lkv report: {report['case']}", ""]
     for key in ("case_file", "frontend", "translation", "target", "rev", "src", "out"):
@@ -1268,12 +1465,13 @@ def markdown(report):
     for section in (
         md_env,
         md_summary,
-        lambda r: md_per_input(r["variants"], unchecked(r)),
-        lambda r: md_fail(r["variants"]),
-        lambda r: md_errors(r["variants"], unchecked(r)),
-        lambda r: md_gaps(r["variants"], unchecked(r)),
+        lambda r: md_per_input(p0_variants(r), p0_unchecked(r), LABELS + LABELS_NB),
+        lambda r: md_fail(p0_variants(r), LABELS + LABELS_NB),
+        lambda r: md_errors(p0_variants(r), p0_unchecked(r), LABELS + LABELS_NB),
+        lambda r: md_gaps(p0_variants(r), p0_unchecked(r), LABELS + LABELS_NB),
         md_notes,
         md_variants,
+        md_nb_sites,
         md_p1,
     ):
         lines = section(report)
@@ -1283,11 +1481,19 @@ def markdown(report):
 
 def write_report(report, out):
     report["variants_p1"] = [v for v in report["variants"] if v.get("p1")]
-    report["variants"] = [v for v in report["variants"] if not v.get("p1")]
+    report["variants_nb"] = [v for v in report["variants"] if v.get("nb")]
+    report["variants"] = [
+        v for v in report["variants"] if not v.get("p1") and not v.get("nb")
+    ]
     report["p1_not_checked"] = list(P1_NOT_CHECKED)
+    report["nb_not_checked"] = list(NB_NOT_CHECKED)
     if LOC_QUALITY:
         report["loc_quality"] = dict(LOC_QUALITY)
-    report["totals"] = totals(report["variants"], LABELS, unchecked(report))
+    report["totals"] = totals(
+        report["variants"] + report["variants_nb"],
+        LABELS + LABELS_NB,
+        unchecked(report) + unchecked_nb(report),
+    )
     report["totals_p1"] = totals(
         report["variants_p1"], LABELS_P1, unchecked(report, p1=True)
     )
@@ -1301,7 +1507,7 @@ def write_report(report, out):
             f"{label} {t[label]['PASS']} PASS / {t[label]['FAIL']} FAIL / "
             f"{t[label]['ERROR']} ERROR / {t[label]['UNDECIDED']} UNDECIDED "
             f"({t[label]['with_notes']} with notes)"
-            for label in LABELS
+            for label in LABELS + LABELS_NB
         )
     )
     if report["variants_p1"] or report["p1_not_checked"]:
@@ -1360,7 +1566,7 @@ def cmd_run(args):
     }
     try:
         kirs, report["frontend_failures"], report["host_rejected"] = run_frontend(
-            case_path, case, root, out, args.inputs, args.target
+            case_path, case, root, out, args.inputs, args.target, args.jobs
         )
         if not args.p1:
             kirs = [k for k in kirs if not k.name.endswith(".p1.json")]
@@ -1428,7 +1634,12 @@ def main():
             p.add_argument("--out", required=True, help="output directory")
             p.add_argument("--name", default="kir", help="report title")
         p.add_argument("--src", help="exported source tree (default: the case's)")
-        p.add_argument("--jobs", type=int, default=min(8, os.cpu_count() or 1))
+        p.add_argument(
+            "--jobs",
+            type=int,
+            default=min(8, os.cpu_count() or 1),
+            help="Lean files at a time; also the TTGIR frontend's P0-6 processes",
+        )
         p.add_argument(
             "--timeout", type=int, default=3600, help="seconds per Lean file"
         )

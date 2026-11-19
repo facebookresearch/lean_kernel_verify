@@ -188,7 +188,7 @@ class TtgirProbe(unittest.TestCase):
         order in the input (the other specialization, a grid of whose launches the
         preferred dims do not divide, has the refused `<spec>@cluster` instead),
         and every KIR translates (a copy with the preferred dims used to be looked up by
-        equality, a ValueError that stopped the whole translation)."""
+        equality, a ValueError that stopped the whole translation); the P0-6 KIRs too."""
         dump = json.loads(self.dump.read_text())
         for inp in dump["inputs"]:
             for la in inp["launches"]:
@@ -220,12 +220,71 @@ class TtgirProbe(unittest.TestCase):
             [i["name"] for i in got["1691f771b8a0@cluster2x1x1"]["case"]["inputs"]],
             ["aligned#0", "aligned#1", "aligned#2", "empty"],
         )
+        nb = ttgir_to_kir.translate_nb(self.dump, self.case)  # the P0-6 KIRs alike
+        self.assertEqual(list(nb), list(got))
+        self.assertEqual(str(nb.pop("6614c8dcb51d@cluster")), str(e))
+        for name, k in nb.items():
+            self.assertIsInstance(k, dict, f"{name}: {k}")
+            self.assertEqual([i["name"] for i in k["case"]["inputs"]],
+                             [i["name"] for i in got[name]["case"]["inputs"]])  # fmt: skip
+
+    def test_nb_parallel(self):
+        """translate_nb's forked workers (--jobs) give the sequential results: the same
+        P0-6 KIRs, files and order."""
+        seq = ttgir_to_kir.translate_nb(self.dump, self.case)
+        files = {k: (self.tmp / f"{k}.nb.json").read_bytes() for k in seq}
+        for f in self.tmp.glob("*.nb.json"):
+            f.unlink()
+        par = ttgir_to_kir.translate_nb(self.dump, self.case, jobs=2)
+        self.assertEqual(list(par), list(seq))
+        self.assertEqual(par, seq)
+        self.assertTrue(all(isinstance(k, dict) for k in par.values()), par)
+        self.assertEqual(
+            {k: (self.tmp / f"{k}.nb.json").read_bytes() for k in par}, files
+        )
+
+    def test_nb_preferred_geometry(self):
+        """A launch with a preferred cluster gets a second P0-6 KIR per specialization,
+        `<spec>@cluster<dims>`, in the all-preferred geometry (its cluster dims), next to
+        the regular one, which does not change; a specialization with a launch whose grid
+        the preferred dims do not divide has the refused `<spec>@cluster` instead."""
+        regular = ttgir_to_kir.translate_nb(self.dump, self.case)
+        dump = json.loads(self.dump.read_text())
+        for inp in dump["inputs"]:
+            for la in inp["launches"]:
+                la["launch"]["attrs"]["preferred_cluster"] = [2, 1, 1]
+                la["launch"]["attrs"]["func_attributes"] = {
+                    "required_cluster": [1, 1, 1]
+                }
+        self.dump.write_text(json.dumps(dump))
+        got = ttgir_to_kir.translate_nb(self.dump, self.case, jobs=2)
+        names = ["1691f771b8a0", "1691f771b8a0@cluster2x1x1",
+                 "6614c8dcb51d", "6614c8dcb51d@cluster"]  # fmt: skip
+        self.assertEqual(list(got), names)
+        for key in regular:
+            self.assertEqual(got[key], regular[key])
+        e = got["6614c8dcb51d@cluster"]
+        self.assertEqual(ttgir_to_kir.failure_kind(e), "gap")
+        self.assertIn("do not divide the grid of input(s) below_block, partial", str(e))
+        self.assertEqual(list(self.tmp.glob("6614c8dcb51d@*.nb.json")), [])
+        name = "1691f771b8a0@cluster2x1x1"
+        k = got[name]
+        self.assertEqual(kir.validate(k), [])
+        self.assertEqual(json.loads((self.tmp / f"{name}.nb.json").read_text()), k)
+        self.assertEqual(
+            [c["v"] for c in k["cluster"]]
+            if isinstance(k["cluster"][0], dict)
+            else k["cluster"],
+            [2, 1, 1],
+        )
+        self.assertEqual([i["name"] for i in k["case"]["inputs"]], ["aligned", "empty"])
+        self.assertTrue(k["case"]["name"].endswith(name))
 
     def test_preferred_dims_disagree(self):
         """Launches of a specialization that disagree on the preferred cluster dims: its
         regular KIR is kept and written, and the all-preferred geometry is the refused
         variant `<spec>@cluster` (a gap, no dims known); the other specialization's
-        geometries are unaffected."""
+        geometries are unaffected. The P0-6 KIRs alike."""
         dump = json.loads(self.dump.read_text())
         for inp in dump["inputs"]:
             for la in inp["launches"]:
@@ -249,6 +308,32 @@ class TtgirProbe(unittest.TestCase):
         self.assertEqual(ttgir_to_kir.failure_kind(e), "gap")
         self.assertIn("differ in their (preferred) cluster dims", str(e))
         self.assertEqual(list(self.tmp.glob("6614c8dcb51d@*.kir.json")), [])
+        nb = ttgir_to_kir.translate_nb(self.dump, self.case)  # the P0-6 KIRs alike
+        self.assertEqual(list(nb), list(got))
+        self.assertIsInstance(nb["6614c8dcb51d"], dict)
+        self.assertEqual(str(nb["6614c8dcb51d@cluster"]), str(e))
+
+    def test_nb_required_cluster(self):
+        """A launch whose function's required cluster differs from its cluster dims
+        refuses the P0-6 KIR too (gap), with the P0 KIR's reason: neither checks a
+        geometry that may not be the one that runs."""
+        dump = json.loads(self.dump.read_text())
+        for inp in dump["inputs"]:
+            for la in inp["launches"]:
+                la["launch"]["attrs"]["func_attributes"] = {
+                    "required_cluster": [2, 1, 1]
+                }
+        self.dump.write_text(json.dumps(dump))
+        with mock.patch.dict(os.environ, PTX_MODE):
+            p0 = ttgir_to_kir.translate(self.dump, self.case)
+        got = ttgir_to_kir.translate_nb(self.dump, self.case)
+        self.assertEqual(list(got), list(p0))
+        for key, e in got.items():
+            self.assertIsInstance(e, ttgir_to_kir.KirError, key)
+            self.assertEqual(ttgir_to_kir.failure_kind(e), "gap")
+            self.assertIn("function's required cluster", str(e))
+            self.assertEqual(str(e), str(p0[key]))
+        self.assertEqual(list(self.tmp.glob("*.nb.json")), [])
 
 
 class CuteProbe(unittest.TestCase):

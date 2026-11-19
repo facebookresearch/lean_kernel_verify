@@ -2,8 +2,9 @@
 
 Layer 2 (`lean/KV`, core Lean + Std) evaluates a KIR program
 (`references/kir.md`) on the concrete inputs of its case file and decides five
-P0 specs per input, and on a P1 KIR (CuTe only) the P1 spec P1-1 "TMEM reuse
-ordered" (section "P1-1" below). This file is the reference for what each
+P0 specs per input, on the P0-6 KIR of every variant (both families) the sixth P0
+spec P0-6 "named barriers convergent" (section "P0-6" below), and on a P1 KIR
+(CuTe only) the P1 spec P1-1 "TMEM reuse ordered" (section "P1-1" below). This file is the reference for what each
 verdict means. The Lean definitions are the authority; each section names them.
 
 ## What a verdict covers
@@ -313,6 +314,164 @@ describe the inputs on general variants. An out-of-bounds metadata load is
 P0-1's on every input (a scalar read, not an elided mask; it leaves P0-2..P0-5
 undecided).
 
+## P0-6 named barriers convergent (`KV.NamedBarriers.Holds`)
+
+A CTA-level named barrier (`bar.sync`/`barrier.sync[.aligned] a{, b}`,
+`bar.arrive`/`barrier.arrive a, b`, `bar.red`; PTX ISA "bar, barrier") completes an
+instance when `b` threads arrived (no `b`: every thread of the CTA); `sync` and `red`
+wait for the completion, `arrive` does not, and an aligned barrier is executed by all
+threads of a warp together, so a warp arrives with its 32 threads. P0-6: every named
+barrier is reached by the warps that take part in it the same number of times, with the
+same id and count, every condition deciding that (a branch around it, a loop exit of a
+loop holding it, its predicate, id or count) uniform over them. Violations:
+
+- **F1** a barrier reached under a condition that differs between its participants
+  (warps, or the lanes of a warp). E.g. a TLX partition barrier (`bar.sync 3, 128`
+  before an async MMA in a 4-warp partition) inside `if (tid & 127) < 32`: one warp
+  arrives, the instance never completes.
+- **F2** a barrier inside a loop whose trip count may differ between its participants,
+  e.g. a spin loop re-reading a strong load: the warps leave it in different iterations
+  and pair instances across iterations.
+- **F3** a count no participants meet: not a positive multiple of 32, above the CTA's
+  threads, or other than 32 x the warps that meet; or ids or counts that differ between
+  the warps that meet.
+
+**Pipeline.** The P0-6 KIR (`<spec>.nb.json`, `<kernel>__<digest>.nb.json`; kir.md
+change 14) is made from the variant's PTX by the barrier pass of the PTX frontend
+(`frontend/ptx/nbar.py`, frontend_ptx.md "The P0-6 barrier pass"), for every variant of
+both families, whatever the Layer-1 translation (`--frontend legacy` too) and also where
+the P0 translation refuses the variant (e.g. the global-memory synchronization of a
+Triton kernel across CTAs). Its roles are the warp-specialize roles (TLX/Triton:
+`default`, `partition<k>`, padding states' roles included; CuTe: the block), split into
+warp ranges wherever a deciding condition is uniform within each warp but not over the
+role, so every event is executed by every warp of its role:
+
+- `named_bar` (id, count, sync): a barrier instruction with constant id and count, under
+  conditions uniform over its role (exact KIR `if`/`for`/`while` where the frontend has
+  exact values);
+- `nb_open` (kind, certain, why): one the pass cannot count, reached under a condition
+  its participants may not share: `lane` (thread-index values that differ between the
+  lanes of a warp), `cond` (a branch or predicate on data that may differ), `loop` (a
+  loop whose exit may differ), `operand` (an id or count that is not a constant, or a
+  count no warps meet), `dispatch` (barrier 1, the warp-specialize dispatch's fork
+  barrier, used otherwise). `certain` when the model admits participants that diverge:
+  thread-index constants that differ (an elect.sync leader), or nondet data (a strong
+  load, an atomic's result, %clock: warps may read different values, and a spin loop's
+  warps leave it in different iterations);
+- `nb_rep` (begin/end, key): a region repeated a number of times the model does not fix,
+  the same in every warp of the role (a loop, or an arm of a branch, on uniform data the
+  KIR does not carry); its key (`<role>@<PTX line>`) is non-empty when the condition is
+  uniform over the role before warp splitting too.
+
+**Decision** (per input and CTA; `KV.runNb`, theorem `KV.Holds .namedBarriers`):
+
+- a reached `nb_open` marked certain is a certain violation (F1/F2), one not marked
+  certain leaves P0-6 UNDECIDED;
+- a count that is not a positive multiple of 32 or exceeds the CTA's threads is a
+  certain violation (F3; the frontend reports those as certain `nb_open`s);
+- the pairing: one operation of each role in turn (lockstep); an instance of barrier b
+  opens with the count of its first operation, collects the arriving roles' threads and
+  completes at its count, releasing the roles that wait on it. With `sync` operations
+  only in the CTA, each warp blocks in each one, so every instance holds exactly one
+  operation of each warp that completes it and the pairing is forced: a count mismatch
+  (F3) or a role that waits forever (a count above the threads that reach it, a different
+  number of syncs per warp, a cycle between two barriers) is a certain violation.
+  Producer `arrive`s pair with consumer `sync`s across roles (CuTe/CUTLASS warp-group
+  barriers). A role that arrives again on an open instance it already arrived on (an
+  `arrive`, then another operation on the same barrier) joins that instance when the
+  other roles cannot complete it without it: their threads that may still arrive before
+  they block on it (each role up to its first `sync` on the barrier; none for a role that
+  waits on it) do not reach the count, so its arrival lands there whatever the timing
+  (e.g. a warp that arrives and then syncs on one 160-thread instance with four other
+  warps). Otherwise it is held until the instance completes and arrives on the next one:
+  the **warp-ahead reading**, an assumption (below). The summary line counts the arrivals
+  held. A pairing that may still depend on timing leaves P0-6 UNDECIDED: more arrivals
+  than the count, an instance an arrive leaves incomplete when every role has ended, a
+  role held for an instance that never completes, or a mismatch or wait forever in a CTA
+  with an `arrive`;
+- an `nb_rep` region is paired once (it may run any number of passes, also none). A
+  barrier that only one role uses may lie in one (repeating it repeats complete instances
+  of that role alone). A barrier several roles use may lie in one only if every region
+  around each use has a key (a region of the role before warp splitting whose condition
+  is uniform over that whole role, so the roles split from it repeat it alike), and every
+  instance must be formed by operations of one nest of regions, or all outside every
+  region: then one pass pairs every pass. Otherwise P0-6 is UNDECIDED. A mismatch or a
+  wait forever inside a repeated region is UNDECIDED, not FAIL (the region may run no
+  pass);
+- a CTA with a role trace stopped at an out-of-bounds metadata load is not paired, and
+  its repeated regions are not judged (both need every role's whole trace): only the
+  checks of single events that ran (a reached certain `nb_open`, a count) apply there
+  (section "Undecided specs: out-of-bounds metadata loads").
+
+P0-6 is the same on every input of a variant unless input-dependent control (exact KIR
+`if`/loops on params and CTA ids) decides reach. A launch with a preferred cluster
+geometry is checked in both geometries (`<spec>` and `<spec>@cluster<dims>`, as P0):
+the cluster rank can decide reach. It counts toward the outcome and the exit status like
+the other P0 specs.
+
+**Uniformity: what a PASS rests on** (trust base; frontend_ptx.md "The P0-6 barrier
+pass" has the rules). A value is uniform over a role when it is equal in all its threads:
+an exact expression whose thread-index instances fold to one value over the role, or
+data the pass classifies as uniform:
+
+1. kernel parameters, constants, ctaid, cluster rank (exact);
+2. a weak global load, at an address uniform over the role, of a tensor the kernel never
+   writes (`translate.writes`, ignoring stores of shared memory only; a value loaded with a
+   type of 32 bits or less is **assumed** to be no pointer, so an index read from memory
+   does not make every tensor a possible store target). Where the dump recorded the
+   tensor's contents (a 1-D contiguous integer tensor that is no view, holds no stale
+   data and shares no storage with a written tensor) the load is exact, a metadata `load`
+   Lean evaluates on each input's contents, as in the P0 translation (the same trust:
+   the recorded contents are what the kernel reads); then loops bounded by such data are
+   exact and Lean counts their passes;
+3. shared-memory data at a uniform address (`ld.shared`, `ld.shared::cluster`, a
+   generic load of a shared address; `ldmatrix` at a uniform address is the same in
+   every warp, per lane), and the CLC response: **assumed** written before a
+   synchronization every reader passed, so every reader sees the same value;
+4. **published values**: the value a spin loop accepted (the loop re-reads a location
+   with strong loads at an address uniform over the role until its exit test accepts
+   the value; a loop LLVM rotated, `if accept(v0) skip; else spin`, counts when the If's
+   test is the loop's acceptance test on a strong load of the same address): **assumed**
+   published once by its producer (a write-once slot, a tagged word whose tag is written
+   once), so every reader accepts the same value. The spin loop itself repeats a number
+   of times that differs between readers (F2 if it holds a barrier). A producer that
+   changes an accepted value (e.g. a counter compared with `>=` and then used) breaks
+   this assumption;
+5. a warp collective over lanes: `redux`/`vote` of data the same in every warp per lane
+   (or uniform) is uniform; `shfl.sync.idx` from one lane is uniform over the warp (each
+   class also records whether the value is alike in corresponding lanes of every warp of
+   the role before warp splitting, so such a collective keys the split roles' regions);
+6. values in a loop translated by classes: a register uniform at every entry and back
+   edge is a fresh uniform symbol (its exact uses stay exact; no KIR expression reads
+   it).
+
+Not uniform: strong loads (`.volatile`, `.relaxed`, `.acquire`, `.cv`), atomics'
+results, `%clock`/`%globaltimer`, `mbarrier.test_wait`/`try_wait` results outside the
+blocking wait idiom, vote/shfl of values that differ between warps, thread-index values
+that differ over the role, and any other data (UNDECIDED, never PASS).
+
+**What a PASS means.** Every reached named barrier of every CTA pairs into complete
+instances under the lockstep pairing, every deciding condition uniform over its
+participants under the rules above. A PASS rests on assumptions 2 (recorded metadata) to
+4, and, where the summary line counts held arrivals, on the **warp-ahead reading**: no
+role runs a whole instance ahead of the others on a named barrier, i.e. a role that has
+arrived on an open instance does not arrive on that barrier again before the instance
+completes unless no other role could complete it first. This is the analogue of P1-1's
+reading of a role of several warps: P0-6 has no mbarriers, and in the kernels checked the
+mbarrier waits between a producer's arrives (it waits for its consumers to release a
+buffer) are what keeps it from running ahead; a kernel without such an order would pair
+instances depending on timing, which P0-6 then does not see. A PASS says nothing about
+mbarriers (P0-2, P0-4), memory ordering or which data the barriers protect.
+
+**Fails closed** (P0-6 UNDECIDED for the variant, `nb_not_checked`, kind `gap`): control
+flow outside cfg.py/regions.py (a loop exiting to two blocks, several rets, brx.idx
+outside the dispatch, several dispatches), a call of a device function, roles that are
+not warp ranges. Irreducible flow (LLVM tail-merges the identical exits of two inlined
+spin loops) is made reducible by node splitting, and a loop whose rotated test leaves
+the natural loop on one path back to its header gets that path copied into the loop;
+the copies are counted in `nbar.split_blocks`. An instruction without an op table row
+that may be a barrier or a branch is an ERROR (any other only computes data).
+
 ## P1-1 TMEM reuse ordered (`KV.TmemReuse.Holds`)
 
 Decided on a P1 KIR (`<kernel>__<digest>.p1.json`, written by the CuTe
@@ -466,13 +625,16 @@ PASS), and the persistent-handoff and split-role variants around them
 A role whose metadata `load` index lies outside the tensor stops at that load:
 the value the GPU reads there is unknown, and later control flow and addresses
 depend on it, so no value can stand in for it soundly. P0-1 FAILs with the load
-(loc, tensor, index, extents). P0-2..P0-5 hold only on inputs where every role
+(loc, tensor, index, extents). P0-2..P0-6 hold only on inputs where every role
 trace is complete, so their theorems are refuted; their reports start with a
 `not decided on this input` line at the load and then list only the
 counterexamples that are certain anyway: P0-2/P0-4 on the CTAs whose role traces
 are all complete, P0-3 double writes and stray writes (no holes: a stopped role
-may still have written them), P0-5 on the evaluated events. A spec with such a
-counterexample FAILs; one without is UNDECIDED (`UNDECIDED <input> <P0-n>`).
+may still have written them), P0-5 on the evaluated events, P0-6 the pairing of
+the CTAs whose role traces are all complete and the single-event checks on the
+evaluated events (a role waiting on a barrier that a stopped role would reach is
+not a counterexample). A spec with such a counterexample FAILs; one without is
+UNDECIDED (`UNDECIDED <input> <P0-n>`).
 Other CTAs and roles are evaluated as usual (roles share no values).
 
 ## Undecided specs: a barrier ledger that does not converge
@@ -573,8 +735,10 @@ the other keys say why.
 | `host_rejected` | `[{input, error}]`: the inputs the host code rejected; they count toward no outcome |
 | `frontend_failures` | `[{variant, kernel, inputs, kind, error}]`: the P0 variants the frontend made no KIR for, with the inputs that launched them; `kind` is `gap` (refused by design: UNDECIDED) or `error` (ERROR) |
 | `variants`, `variants_p1` | the P0 and the P1 KIRs Lean checked or tried to (below) |
+| `variants_nb` | the P0-6 KIRs Lean checked or tried to (variant names end in `.nb`); each also has `nb_sites`, the barrier pass's classification of every site (`{role, op, id, count, loc, ptx_line, status (counted, open), kind, certain, rep, why}`, the KIR's `nbar.sites`), for audit, and `nb_held`, the most arrivals the pairing held under the warp-ahead reading on one input (0: the verdicts do not rest on it; report.md lists the others in "P0-6 under the warp-ahead reading") |
+| `nb_not_checked` | `[{variant, kernel, inputs, kind, error}]`: the variants without a P0-6 KIR; `kind` is `gap` (the barrier pass refuses the variant by design: UNDECIDED) or `error` (ERROR) |
 | `p1_not_checked` | `[{variant, status, error}]` (CuTe adds `kernel`, `inputs`): the variants without a P1 KIR; `status` is `refused` (UNDECIDED; the outcome counts it only with `--p1-strict`), `error` (ERROR), `not_applicable` (no TMEM) or `not_checked` (TTGIR) |
-| `totals`, `totals_p1` | per spec label, counts over (variant, input) runs (below) |
+| `totals`, `totals_p1` | per spec label, counts over (variant, input) runs (below); `totals` has `P0-6` (from `variants_nb` and `nb_not_checked`) |
 
 A variant is `{variant, kir, kernel, flags, p1, input_names, status, ...}`: `variant` is
 the KIR file name without `.json` (TTGIR: `.kir.json`; P1 KIRs end in `.p1`), `flags`

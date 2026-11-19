@@ -115,6 +115,7 @@ smem address-slot analysis can close this). atom/red.shared and a generic st/ato
 of shared memory (cvta.shared) in a kernel with a dispatch are refused (mem.py).
 """
 
+import functools
 import re
 from dataclasses import dataclass, field
 from itertools import combinations
@@ -155,6 +156,17 @@ class Cfg:
     def where(self, b):
         instrs = self.blocks[b].instrs
         return f"{b} (line {instrs[0].line})" if instrs else b
+
+    @functools.cached_property
+    def defs(self) -> dict:
+        """register -> the positions (block, index) of the instructions that may write
+        it (_dests), in text order: _def's search for its only definition."""
+        out: dict = {}
+        for c, blk in self.blocks.items():
+            for j, x in enumerate(blk.instrs):
+                for r in dict.fromkeys(_dests(x)):
+                    out.setdefault(r, []).append((c, j))
+        return out
 
 
 @dataclass
@@ -1149,12 +1161,7 @@ def _def(cfg, b, k, reg):
             break
         b = cfg.blocks[b].preds[0]
         k = len(cfg.blocks[b].instrs)
-    defs = [
-        (c, j)
-        for c, blk in cfg.blocks.items()
-        for j, x in enumerate(blk.instrs)
-        if reg in _dests(x)
-    ]
+    defs = cfg.defs.get(reg, ())
     if len(defs) != 1 or defs[0][0] == use or not cfg.dominates(defs[0][0], use):
         return None
     return defs[0] if _instr(cfg, defs[0]).guard is None else None
