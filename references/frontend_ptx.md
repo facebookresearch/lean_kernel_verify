@@ -109,8 +109,12 @@ the DSL helper the MMA is located in (a heuristic, for the report only).
 
 `cfg.py` splits the PTX into basic blocks and admits only the shapes real kernels have:
 reducible flow, every exit edge of a natural loop leaving to one block, exactly one
-`ret`/`exit`, `brx.idx` only in the Triton dispatch (below). Anything else (a guarded
-`ret`, a loop with exits to two blocks) is refused naming the lines. An unguarded `trap`
+`ret`/`exit`. A `brx.idx` is the Triton dispatch (below; its index is the state byte, an
+8-bit `ld.shared`) or a switch (LLVM's jump table of a select chain or `switch`), which
+`cfg.lower_switches` rewrites into the compare chain `@(i == k) bra T_k` (the last target
+when no case matched); the interpreter requires the index to be provably in range (its
+interval; out of range is undefined in PTX). Anything else (a guarded `ret`, a loop with
+exits to two blocks) is refused naming the lines. An unguarded `trap`
 ends its block, which goes on at the other successor of its one predecessor, a
 conditional branch, as if the trap were not reached: Triton places a
 `tl.device_assert`'s failing path after the `ret` (`call __assertfail; trap;`, a KIR
@@ -184,6 +188,18 @@ variant must have the same block and cluster.
   warp, the partitions that do more than synchronize first, padding last (Triton gives
   larger partitions the lower warps, so k is the TTGIR partition index where the warp
   counts do not grow in TTGIR order).
+  Captures: Triton passes the values a partition captures through shared memory: the
+  default stores them before its first fork barrier, each worker loads them between its
+  first and second one (both protocols). A worker's `ld.shared` there of bytes the
+  default stored gets the stored value (byte by byte, so a capture split into bytes is
+  put back together) if the default's store runs unconditionally (statically known
+  issuing threads, no runtime condition) and its value is one value in every thread that
+  depends on nothing but the launch (parameters, program id, shared symbols, metadata);
+  otherwise the load is Data as any shared load. Any other shared write before the
+  workers' loads (an unknown address, a condition, a value of a role, a worker's write,
+  the default's after its first fork barrier) makes the bytes it may touch unknown; roles
+  are translated one after the other, the default first, so such a write of a byte
+  another role already read refuses the kernel.
 * **CuTe DSL.** Partition refinement: a role starts as every warp of the block; a branch
   condition, mbarrier address, remote CTA rank, named-barrier id or count, or a select
   between two tensors that is uniform within each warp but differs between warps of the

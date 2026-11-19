@@ -456,6 +456,158 @@ class Contract(unittest.TestCase):
             self.assertEqual(offs, sorted(want))
 
 
+# The default computes a capture from n (n + 7) and stores it before its first fork
+# barrier; partition0 loads it between its first and second fork barrier and waits with
+# its low bit as parity (Triton's captures through shared memory).
+CAP_STORE = "    add.s32 %r40, %r20, 7;\n    st.shared.b32 [smem+32], %r40;\n"
+CAP_LOAD = "    ld.shared.b32 %r41, [smem+32];\n"
+CAP = WS.replace("    st.shared.b32 [smem+24], 33554689;\n",
+                 "    st.shared.b32 [smem+24], 33554689;\n" + CAP_STORE).replace(
+    "$P0:\n    barrier.sync 1;\n", "$P0:\n" + CAP_LOAD + "    barrier.sync 1;\n").replace(
+    "    and.b32 %r10, %r9, 1;\n", "    and.b32 %r10, %r41, 1;\n")  # fmt: skip
+
+
+class Captures(unittest.TestCase):
+    def parity(self, f, n):
+        (w,) = [
+            t for t in evaluate(f, {"n": n, "x.shape.0": 64}, role=1) if t[0] == "wait"
+        ]
+        return w[3]
+
+    def test_capture_forwarded(self):
+        f = ws_facts(CAP)
+        self.assertEqual(f.refusals, [])
+        self.assertEqual([self.parity(f, n) for n in (0, 1, 2)], [1, 0, 1])
+        self.assertEqual(kir_errors(f), [])
+        # bytewise: two b8 stores, two b8 loads put back together
+        st = "    st.shared.b8 [smem+32], %r40;\n    shr.u32 %r42, %r40, 8;\n" \
+             "    st.shared.b8 [smem+33], %r42;\n"  # fmt: skip
+        ld = "    ld.shared.b8 %r43, [smem+32];\n    ld.shared.b8 %r44, [smem+33];\n" \
+             "    shl.b32 %r45, %r44, 8;\n    or.b32 %r41, %r43, %r45;\n"  # fmt: skip
+        g = ws_facts(
+            CAP.replace("    st.shared.b32 [smem+32], %r40;\n", st).replace(
+                CAP_LOAD, ld
+            )
+        )
+        self.assertEqual(g.refusals, [])
+        self.assertEqual([self.parity(g, n) for n in (0, 1, 2)], [1, 0, 1])
+
+    def test_unknown_captures_stay_data(self):
+        cases = [
+            # a store under a runtime condition may not happen
+            CAP.replace("    st.shared.b32 [smem+32]",
+                        "    setp.eq.s32 %p9, %r20, 0;\n    @%p9 st.shared.b32 [smem+32]"),
+            # a value that differs between the threads
+            CAP.replace("    add.s32 %r40, %r20, 7;", "    add.s32 %r40, %r1, 7;"),
+            # a byte nobody stored
+            CAP.replace(CAP_LOAD, "    ld.shared.b32 %r41, [smem+30];\n"),
+            # a store after the default's first fork barrier
+            CAP.replace(CAP_STORE, "").replace("    barrier.sync 1;\n    barrier.sync 1;\n    add.s32 %r21",
+                        "    barrier.sync 1;\n" + CAP_STORE + "    barrier.sync 1;\n    add.s32 %r21", 1),
+        ]  # fmt: skip
+        for text in cases:
+            f = ws_facts(text)
+            self.assertIn("reaches", f.refusals[0]["msg"] if f.refusals else "", text)
+
+    def test_store_by_part_of_the_threads_stays_data(self):
+        # a store that only some of the default's threads run may land before another
+        # thread's earlier store of the bytes, or not happen (the elected lane under a lane
+        # condition): thread 0 or warp 0 over every thread's n + 7, and the elected lane
+        # of warp 0 if it is lane 0
+        lane0 = "    and.b32 %r60, %r1, 31;\n    setp.eq.u32 %p9, %r60, 0;\n" \
+                "    and.pred %p9, %p7, %p9;\n"  # fmt: skip
+        cases = [
+            CAP.replace(CAP_STORE, CAP_STORE + "    setp.eq.s32 %p9, %r1, 0;\n"
+                        "    @%p9 st.shared.b32 [smem+32], 5;\n"),
+            CAP.replace(CAP_STORE, CAP_STORE + "    @%p5 st.shared.b32 [smem+32], 5;\n"),
+            CAP.replace("    st.shared.b32 [smem+32], %r40;\n",
+                        lane0 + "    @%p9 st.shared.b32 [smem+32], %r40;\n"),
+        ]  # fmt: skip
+        for text in cases:
+            f = ws_facts(text)
+            self.assertIn("reaches", f.refusals[0]["msg"] if f.refusals else "", text)
+
+    def test_overwrite_after_a_read_is_refused(self):
+        f = ws_facts(
+            CAP.replace(CAP_LOAD, CAP_LOAD + "    st.shared.b32 [smem+32], 0;\n")
+        )
+        self.assertIn("may overwrite a warp-specialize capture", f.refusals[0]["msg"])
+
+
+# A switch on pid % 4 (LLVM's jump table of a select chain): cfg.lower_switches makes it a
+# compare chain; each case picks the element the store writes.
+SWITCH = """
+JT:
+    .branchtargets C0, C1, C2, C3;
+    mov.u32 %r1, %tid.x;
+    ld.param.u64 %rd1, [k_param_0];
+    mov.u32 %r2, %ctaid.x;
+    and.b32 %r3, %r2, 3;
+    brx.idx %r3, JT;
+C0:
+    mov.b32 %r4, 5;
+    bra.uni J;
+C1:
+    mov.b32 %r4, 9;
+    bra.uni J;
+C2:
+    mov.b32 %r4, 2;
+    bra.uni J;
+C3:
+    mov.b32 %r4, 7;
+J:
+    setp.eq.s32 %p1, %r1, 0;
+    mul.wide.u32 %rd2, %r4, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    @%p1 st.global.b32 [%rd3], %r1;
+    ret;
+"""
+
+
+class Switches(unittest.TestCase):
+    def test_compare_chain(self):
+        f = run(SWITCH)
+        self.assertEqual(f.refusals, [])
+        got = [[t[2] for t in evaluate(f, {"x.shape.0": 64}, pid=(c, 0, 0)) if t[0] == "gstore"]
+               for c in range(8)]  # fmt: skip
+        self.assertEqual(got, [[[5]], [[9]], [[2]], [[7]]] * 2)
+        self.assertEqual(kir_errors(f), [])
+        g = run(SWITCH, family="cute")
+        self.assertEqual(g.refusals, [])
+
+    def test_index_out_of_range_is_refused(self):
+        f = run(SWITCH.replace("and.b32 %r3, %r2, 3;", "and.b32 %r3, %r2, 7;"))
+        self.assertIn("brx.idx at line", f.refusals[0]["msg"])
+        self.assertIn("not provably in [0, 4)", f.refusals[0]["msg"])
+
+    def test_one_target(self):
+        # a table of one target checks its index too: a parameter may be out of [0, 1)
+        one = SWITCH.replace(".branchtargets C0, C1, C2, C3;", ".branchtargets C0;")
+        f = run(one.replace("and.b32 %r3, %r2, 3;", "ld.param.u32 %r3, [k_param_1];"))
+        self.assertIn(
+            "not provably in [0, 1)", f.refusals[0]["msg"] if f.refusals else ""
+        )
+        f = run(one.replace("and.b32 %r3, %r2, 3;", "mov.u32 %r3, 0;"))
+        self.assertEqual(f.refusals, [])
+        got = [t[2] for t in evaluate(f, {"x.shape.0": 64}) if t[0] == "gstore"]
+        self.assertEqual(got, [[5]])
+
+    def test_taken_names_are_refused(self):
+        # the compare chain's names must be fresh: a kernel's own register of such a name
+        body = "    .reg .pred %__swL_0;\n" + SWITCH
+        line = 1 + kernel(body).splitlines().index("    brx.idx %r3, JT;")
+        f = run(body.replace("%__swL_0", f"%__sw{line}_0"))
+        self.assertIn(f"brx.idx at line {line}: the names of its compare chain",
+                      f.refusals[0]["msg"] if f.refusals else "")  # fmt: skip
+        self.assertEqual(run(body.replace("%__swL_0", "%__sw0_0")).refusals, [])
+
+    def test_dispatch_is_not_lowered(self):
+        # WS's brx.idx indexes by the state byte: still the dispatch (two roles)
+        self.assertEqual(
+            [r["name"] for r in ws_facts().roles], ["default", "partition0"]
+        )
+
+
 class ParamTable(unittest.TestCase):
     """param_table's struct pointer fields: named by the tensor their address is in every
     record (a null pointer, a zero-length tensor's, resolves nowhere and is skipped)."""

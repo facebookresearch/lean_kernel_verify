@@ -46,8 +46,10 @@ Every normalized mnemonic has exactly one class. A mnemonic without a row is an 
 
 * **event**: becomes KIR events or feeds an event model (below);
 * **value**: an integer value the translator evaluates exactly;
-* **control**: `bra` (guarded: the branch of an if or loop), `brx.idx` (only in the
-  Triton warp-specialize dispatch), `ret` (exactly one per kernel);
+* **control**: `bra` (guarded: the branch of an if or loop), `brx.idx` (the Triton
+  warp-specialize dispatch, or a switch: rewritten into a compare chain whose index must
+  be provably in range, `frontend_ptx.md` "Control flow"), `ret` (exactly one per
+  kernel);
 * **drop**: affects no spec; its results are Data, and Data that reaches a root (an event
   operand, a branch condition, an address, a predicate, a barrier field, a work anchor)
   is the slice soundness refusal naming its origin, so a wrong drop cannot hide an event;
@@ -164,7 +166,7 @@ load's cycle, whose transaction bytes P0-4 checks).
 
 | Instruction | KIR (TLX / CuTe) |
 |---|---|
-| `cp.async.bulk.tensor.{1-5}d.shared{::cluster}.global.mbarrier::complete_tx::bytes{.multicast::cluster}{.cta_group::2} [dst], [tmap, {c}], [mbar]` | `tma_load(desc, coords, bar)` / plus the footprint `gload` on the base tensor |
+| `cp.async.bulk.tensor.{1-5}d.shared{::cluster}.global.mbarrier::complete_tx::bytes{.multicast::cluster}{.cta_group::2} [dst], [tmap, {c}], [mbar]` (the two modifiers in either order: TLX writes `.cta_group::2.multicast::cluster`) | `tma_load(desc, coords, bar)` / plus the footprint `gload` on the base tensor |
 | `cp.async.bulk.tensor.{1-5}d.global.shared.bulk_group [tmap, {c}], [src]` | `tma_store` / footprint `gstore` |
 | `cp.reduce.async.bulk.tensor.{1-5}d.global.shared.<op>.bulk_group` | `tma_reduce` / footprint `gatomic` |
 | `cp.async.bulk.shared{::cluster}.global.mbarrier::complete_tx::bytes [dst], [g], n, [mbar]` | `gload` of the n bytes + `tma_load` of the 1-D descriptor `bulk_<T>_<n>` on mbar |
@@ -312,8 +314,10 @@ entry is the stolen cluster's first CTA, to which TLX adds `%cluster_ctarank`):
 
 Drop (no spec effect; results are Data): floating-point arithmetic, comparison, moves
 and conversions (`<op>.f`), `ld.shared`/`st.shared` and `atom`/`red.shared` (except the
-tensormap staging buffer's zeroing and the CLC response read; a shared write still
-closes the staging buffers it may overlap, `frontend_ptx.md`, "TMA descriptors"),
+tensormap staging buffer's zeroing, the CLC response read and a TLX worker's load of a
+warp-specialize capture the default stored, `frontend_ptx.md`, "Threads and roles"; a
+shared write still closes the staging buffers it may overlap, `frontend_ptx.md`, "TMA
+descriptors"),
 `ldmatrix`, `stmatrix`, `mma.sync` (register MMA), `createpolicy` (an L2 policy only
 `.L2::cache_hint` operands take), `fence.*`, `membar`, `tcgen05.fence`,
 `griddepcontrol`, `setmaxnreg` (no consistency check across a warpgroup: real kernels

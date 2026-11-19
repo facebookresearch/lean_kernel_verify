@@ -6,7 +6,20 @@
 """Control flow of the PTX frontend: basic blocks, dominators, natural loops, the shape
 check, and the roles of a kernel (the Triton warp-specialize dispatch recognizer).
 
-    build(fn) -> Cfg                    roles(cfg, family) -> ([Role], Dispatch or None)
+    lower_switches(fn) -> {id(setp): (n, line)}
+                                        build(fn) -> Cfg
+    roles(cfg, family) -> ([Role], Dispatch or None)
+
+lower_switches (before build): a `brx.idx i, T` over n targets that is not a candidate
+warp-specialize dispatch (its index register is never the result of an 8-bit
+`ld.shared`, the dispatch's state byte) is a switch, as LLVM lowers a select chain or a
+`switch` to a jump table. It is rewritten in place into the compare chain `setp.eq.u32
+p_k, i, k; @p_k bra T_k` for k < n - 1, then `bra T_{n-1}` (labels `$__sw<line>_<k>`;
+one target: `setp.eq.u32 p_0, i, 0; bra T_0`): the same transfer for every index in
+[0, n). An index out of range is undefined in PTX (LLVM guards its jump tables by a
+range check or by the index's known bits), so the interpreter requires the index of the
+first case's setp to be provably in [0, n) (its interval) and refuses the variant
+otherwise. A kernel that already has a register or label of such a name is refused.
 
 build: the basic blocks of a parse.Function. A block starts at a label or after a
 branch and ends at `bra` (guarded: successors are the target, then the fall-through),
@@ -172,6 +185,52 @@ class Dispatch:
 
 
 # ---------------------------------------------------------------------------- CFG
+
+
+def lower_switches(fn) -> dict:
+    """Rewrite each switch brx.idx of fn into a compare chain, in place (module doc);
+    {id(the first case's setp): (targets, line of the brx.idx)} for the interpreter's
+    range check of the index."""
+    state = {
+        i.operands[0][1]
+        for i in fn.instructions()
+        if i.opcode.startswith("ld.shared") and i.opcode.rsplit(".", 1)[-1] in ("b8", "u8", "s8")
+        and i.operands and i.operands[0][0] == "reg"
+    }  # fmt: skip
+    names = set(fn.regs) | {x.name for x in fn.body or () if isinstance(x, parse.Label)}
+    out, body = {}, []
+    for x in fn.body or ():
+        table = idx = None
+        if isinstance(x, parse.Instr) and x.base == "brx" and x.guard is None:
+            idx = x.operands[0]
+            table = fn.branchtargets.get(x.operands[1][1])
+            if idx[0] != "reg" or idx[1] in state:
+                table = None
+        if not table or idx is None:
+            body.append(x)
+            continue
+        n, at = len(table), (x.loc, x.line, x.asm)
+        if any(m.startswith((f"$__sw{x.line}_", f"%__sw{x.line}_")) for m in names):
+            raise CfgError(f"{fn.name}: brx.idx at line {x.line}: the names of its compare "
+                           f"chain ($__sw{x.line}_<k>, %__sw{x.line}_<k>) are taken")  # fmt: skip
+        for k, t in enumerate(table):
+            if k:
+                body.append(parse.Label(f"$__sw{x.line}_{k}", x.line))
+            pk = f"%__sw{x.line}_{k}"
+            if k < n - 1 or not k:
+                fn.regs[pk] = "pred"
+                setp = parse.Instr("setp.eq.u32", (("reg", pk), idx, ("imm", k)), None, *at,
+                                   f"setp.eq.u32 {pk}, {idx[1]}, {k}; // case {k} of {x.text}")  # fmt: skip
+                if not k:
+                    out[id(setp)] = (n, x.line)
+                body.append(setp)
+            if k == n - 1:
+                body.append(parse.Instr("bra", (("sym", t),), None, *at, f"bra {t}; // case {k} of {x.text}"))  # fmt: skip
+            else:
+                body.append(parse.Instr("bra", (("sym", t),), (pk, False), *at,
+                                        f"@{pk} bra {t}; // case {k} of {x.text}"))  # fmt: skip
+    fn.body = body
+    return out
 
 
 def build(fn):
@@ -991,8 +1050,13 @@ def _to(succs, frm, to):
     return tuple(to if s == frm else s for s in succs)
 
 
+_FORK_BARRIERS = ("bar.sync", "barrier.sync", "barrier.sync.aligned")
+
+
 def _is_fork(i):
-    return i.opcode == "barrier.sync" and i.operands == (("imm", 1),)
+    """i is a fork barrier: barrier 1 over the whole CTA (no thread count) in any spelling
+    the op table admits; interp.py counts the same instructions."""
+    return ops.mnemonic(i.opcode) in _FORK_BARRIERS and i.operands == (("imm", 1),)
 
 
 def _nforks(cfg, b):

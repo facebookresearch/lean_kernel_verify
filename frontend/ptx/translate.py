@@ -206,6 +206,7 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
     p1 = tmem.P1() if pol.get("p1") and tcgen05 else None  # interp.Kernel.p1
     if p1 is not None and pol["family"] != "cute":
         raise interp.Unsupported("P1", fn.name, "no P1 pass for Triton kernels")
+    switches = C.lower_switches(fn)
     cfg = C.build(fn)
     roles, dispatch = C.roles(cfg, pol["family"])
     locs, srclocs = _locs(fn, pol)
@@ -231,7 +232,8 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
                  work=_sites(fn, work.get("sites", ())),
                  work_fields=tuple(work.get("fields", ())), work_mode=work.get("mode", "gate"),
                  work_per=dict(work.get("per", {})),
-                 srclocs=srclocs, p1=p1)  # fmt: skip
+                 srclocs=srclocs, p1=p1, switches=switches,
+                 captures={} if dispatch is not None else None)  # fmt: skip
     translators = []
     for role in roles:
         tree = R.build(cfg, role)

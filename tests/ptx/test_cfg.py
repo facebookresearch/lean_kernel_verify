@@ -23,7 +23,8 @@ passing the links up to its own; looked for in Triton kernels only); padding sta
 roles (marked, translate.py keeps them only if they emit); the direct dispatch of the
 single-warp-specialize lowering (warp-id links, regions ending in ret, numbering, its
 refusals, a padding target reached through two links: a role per path, each translated);
-and one refusal per protocol item (entry, header, table, exit, forks), each
+fork barriers in each spelling (`bar.sync 1`, `barrier.sync.aligned 1` count too); and one
+refusal per protocol item (entry, header, table, exit, forks), each
 naming its item, among them branches on the complement result q of a `setp p|q` (not
 read as the comparison).
 """
@@ -809,6 +810,28 @@ class WarpSpecialize(unittest.TestCase):
             cfg.CfgError, r"dispatch \(chain\): warps \[4, 5\] reach the partition at "
         ):
             cfg.roles(build(text))
+
+    def test_fork_barrier_spellings(self):
+        # bar.sync 1 and barrier.sync.aligned 1 are fork barriers too, as the interpreter
+        # counts them: the same dispatch, and one more in the default breaks the count
+        alt = WS_DIRECT.replace(
+            "$HDR:\n    barrier.sync 1;\n", "$HDR:\n    bar.sync 1;\n"
+        )
+        alt = alt.replace(
+            "    barrier.sync 1;\n$RET:", "    barrier.sync.aligned 1;\n$RET:"
+        )
+        self.assertEqual(cfg.roles(build(alt))[1].warps, {4: 2, 5: 2, 6: 0, 7: 1})
+        two = "    barrier.sync 1;\n    barrier.sync 1;\n    st.global"
+        three = (
+            "    barrier.sync 1;\n    bar.sync 1;\n    barrier.sync 1;\n    st.global"
+        )
+        for text, msg in ((WS_DIRECT, "after 3 fork barriers, not 2"),
+                          (WS_FALL, "after 5 fork barriers, not 4")):  # fmt: skip
+            with self.subTest(msg):
+                with self.assertRaisesRegex(
+                    cfg.CfgError, rf"dispatch \(forks\): .*{msg}"
+                ):
+                    cfg.roles(build(text.replace(two, three)))
 
     def test_protocol_refusals(self):
         def drop(text, line):

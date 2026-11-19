@@ -69,7 +69,7 @@ import re
 from dataclasses import dataclass, field
 from typing import NoReturn, TYPE_CHECKING
 
-from . import expr as E, ops, parse, regions as R
+from . import cfg as C, expr as E, ops, parse, regions as R
 
 if TYPE_CHECKING:  # mem.py and tmem.py import this module
     from .mem import Memory
@@ -132,6 +132,13 @@ class Kernel:
     srclocs: dict = field(default_factory=dict)  # id(instr) -> (source path, line)
     elects: dict = field(default_factory=dict)  # id(elect.sync) -> its elect symbol
     p1: "P1 | None" = None  # the P1 pass's events (translate.py, tmem.py), else None
+    # id(the first case's setp of a lowered brx.idx) -> (targets, line) (cfg.py)
+    switches: dict = field(default_factory=dict)
+    # Warp-specialize captures (a kernel with a dispatch; else None): (shared symbol,
+    # byte) -> the byte the default stored there before its first fork barrier (an
+    # 8-bit expression), or None if unknown (Translator._capture_store)
+    captures: dict | None = None
+    capture_reads: bool = False  # some worker read a capture (_capture_load)
 
 
 # An mbarrier event awaiting its array (mem.Memory.barriers): the KIR event (bar and idx
@@ -152,6 +159,17 @@ class BarrierUse:
     init: int | None = None
     srcloc: tuple | None = None
     key: tuple = ()
+
+
+def _launch_only(e, params, created) -> bool:
+    """e depends on nothing but the launch: no thread variable, no variable of a role
+    (one it created), only parameters and the frontend's reserved symbols."""
+    return not any(
+        E.is_thread_var(v)
+        or v in created
+        or (v not in params and not v.startswith("%"))
+        for v in E.free_vars(e)
+    )
 
 
 class Translator:
@@ -186,6 +204,7 @@ class Translator:
         self.clc_cancels: list = []  # sync.py: (response address, mbarrier) per try_cancel
         self.clc_reads: list = []  # sync.py: ClcResponse.read of every queried response
         self.invals: list = []  # sync.py: (symbol, offset, instr) of each elided cycle
+        self.forks = 0  # fork barriers (barrier.sync 1, the whole CTA) executed so far
 
     # ---------------------------------------------------------------- basics
     def loc(self, i=None) -> str:
@@ -620,6 +639,8 @@ class Translator:
             self.fail(i, why)
         if cls == "control":
             return
+        if id(i) in self.k.switches:
+            self._switch_index(i, *self.k.switches[id(i)])
         if i.guard is None:
             self.execute(i, cls)
         else:
@@ -627,6 +648,16 @@ class Translator:
         sites = self.k.work.get(id(i))
         if sites:
             self.work(i, sites)
+
+    def _switch_index(self, i, n: int, line: int) -> None:
+        """The index of a brx.idx lowered to a compare chain (cfg.lower_switches; i is
+        the first case's setp) must lie in [0, n): an index out of range is undefined in
+        PTX, and the chain would take the last target."""
+        v = self.operand(i, 1, 32)
+        r = None if isinstance(v, Data) else E.interval(v)
+        if r is None or r[0] < 0 or r[1] >= n:
+            self.fail(i, f"brx.idx at line {line} over {n} targets: its index is not "
+                         f"provably in [0, {n}) (out of range is undefined in PTX)")  # fmt: skip
 
     def predicated(self, i, cls: str) -> None:
         if _carries(ops.mnemonic(i.opcode)):  # CC.CF is not merged per thread
@@ -1647,11 +1678,15 @@ class Translator:
         mn = ops.mnemonic(i.opcode)
         if self.k.p1 is not None:  # P1 pass: TMEM and named-barrier events (tmem.py)
             self.k.p1.execute(self, i, mn)
+        if C._is_fork(i):  # (cfg.py)
+            self.forks += 1
         if cls == "drop":
             if mn == "ld.shared" and i.opcode.endswith(".b128"):  # a CLC response
                 self.k.mem.execute(self, i, mn)  # (sync.py)
                 return
             self._shared_drop(i, mn)
+            if mn == "ld.shared" and self._capture_load(i):
+                return
             for r in R.dests(i):
                 self.env[r] = Data(f"{i.opcode} at {self.loc(i)}")
             return
@@ -1675,13 +1710,129 @@ class Translator:
     def _shared_drop(self, i, mn: str, maybe: bool = False) -> None:
         """A dropped write of shared memory (st.shared, stmatrix, atom/red.shared)
         closes the tensormap staging buffers it may overlap (tma.py); a st.shared may
-        also zero one, unless `maybe` (under a data predicate: it may not happen)."""
+        also zero one, unless `maybe` (under a data predicate: it may not happen). It
+        may also write warp-specialize captures (_capture_store)."""
         if mn == "st.shared":
             self.k.mem.tma.staging_store(self, i, maybe)
+            self._capture_store(i, maybe)
         elif mn.startswith("stmatrix"):  # (tma.SHARED_WRITES)
             self.k.mem.tma.close_staging(self)
+            self._capture_store(i, True)
         elif mn.startswith(("atom.shared", "red.shared")):  # as a generic one (mem.py)
             self.k.mem.execute(self, i, mn)
+            self._capture_store(i, True)
+
+    # ------------------------------------------------- warp-specialize captures
+    def _capture_bytes(self, i, op) -> list | None:
+        """[(shared symbol, byte)] of the bytes a scalar or vector st/ld.shared i
+        accesses through address operand op, if the address is the same constant in
+        every thread of the role; else None."""
+        t = i.opcode.rsplit(".", 1)[-1]
+        if i.base not in ("ld", "st", "atom", "red") or not re.fullmatch(
+            r"[bsu](8|16|32|64)", t
+        ):
+            return None  # (stmatrix: bytes over the lanes, unknown here)
+        n = next(
+            (int(m[1:]) for m in i.opcode.split(".") if re.fullmatch(r"v\d", m)), 1
+        )
+        try:
+            sym, off = self.k.mem._smem(self, i, op)
+        except Unsupported:
+            return None
+        u = self.uniform(off)
+        if u is None or not E.is_const(u):
+            return None
+        nb = n * int(t[1:]) // 8
+        return [(sym, u[2] + b) for b in range(nb)]
+
+    def _capture_store(self, i, maybe: bool) -> None:
+        """A shared write in a kernel with a warp-specialize dispatch (the captures,
+        frontend_ptx.md "Threads and roles"): the default's st.shared before its first
+        fork barrier records the bytes it writes if it runs unconditionally (statically
+        known issuing threads, no runtime condition) and stores one value in every
+        thread that depends on nothing but the launch (parameters, program id, shared
+        symbols, metadata): a worker reads that value between its first and second fork
+        barrier. Any other shared write before the workers' reads (at an unknown address,
+        under a condition, of a value of the role, a worker's, the default's after its
+        first fork barrier) makes the bytes it may touch unknown, all of them if its
+        address is not static. Roles are translated one after the other, the default
+        first: such a write of a byte a worker may already have read refuses the kernel."""
+        caps = self.k.captures
+        if caps is None or self.forks > 1:
+            return
+        mem = next((x for x in i.operands if x[0] == "mem"), None)
+        where = self._capture_bytes(i, mem) if mem else None
+        vals = None
+        if (
+            where is not None
+            and self.name == "default"
+            and not self.forks
+            and not maybe
+        ):
+            uni, var = self.split_mask()
+            act = self.active(var)
+            if E.is_const(uni, 1) and act is not None and len(act) == 32 * self.nw:
+                vals = self._capture_values(i, len(where))
+        if (
+            vals is None
+            and self.k.capture_reads
+            and (where is None or any(caps.get(b) is not None for b in where))
+        ):
+            self.fail(i, "a shared write that may overwrite a warp-specialize capture "
+                         "another role read before its second fork barrier")  # fmt: skip
+        if where is None:
+            caps.clear()  # (the known bytes are forgotten: every read is Data)
+            caps[None] = None
+            return
+        for k, b in enumerate(where):
+            caps[b] = vals[k] if vals else None
+
+    def _capture_values(self, i, nb: int) -> list | None:
+        """The bytes (8-bit expressions, little-endian) a st.shared i writes, if every
+        element is one value in every thread of the role and depends on nothing but the
+        launch; else None."""
+        t = i.opcode.rsplit(".", 1)[-1]
+        w = int(t[1:])
+        src = i.operands[1]
+        elems = src[1] if src[0] == "vec" else (src,)
+        out = []
+        for op in elems:
+            v = self.operand_value(op, w)
+            if isinstance(v, Data):
+                return None
+            v = self.uniform(E.resize(v, w, False) if E.width(v) != w else v)
+            if v is None or not _launch_only(v, self.k.mem.used_params, self.created):
+                return None
+            out += [E.trunc(E.bin("lshr", v, E.const(8 * b, w)), 8) if w > 8 else v
+                    for b in range(w // 8)]  # fmt: skip
+        return out if len(out) == nb else None
+
+    def _capture_load(self, i) -> bool:
+        """A worker's ld.shared between its first and second fork barrier of every byte
+        the default stored before its first one (_capture_store): its destination(s) get
+        the stored values. False (the destinations stay Data) otherwise."""
+        caps = self.k.captures
+        if caps is None or None in caps or self.name == "default" or self.forks != 1:
+            return False
+        mem = next((x for x in i.operands if x[0] == "mem"), None)
+        where = self._capture_bytes(i, mem) if mem else None
+        if where is None or any(caps.get(b) is None for b in where):
+            return False
+        t = i.opcode.rsplit(".", 1)[-1]
+        w, signed = int(t[1:]), t[0] == "s"
+        dst = i.operands[0]
+        regs = [x[1] for x in (dst[1] if dst[0] == "vec" else (dst,))]
+        if any(r is None for r in regs) or len(regs) * w // 8 != len(where):
+            return False
+        for k, r in enumerate(regs):
+            bs = [caps[b] for b in where[k * w // 8 : (k + 1) * w // 8]]
+            v = E.ext(bs[0], w, False) if w > 8 else bs[0]
+            for j, b in enumerate(bs[1:], 1):
+                v = E.bin("or", v, E.bin("shl", E.ext(b, w, False), E.const(8 * j, w)))
+            rw = _reg_width(self.k.fn.regs.get(r, "b32"))
+            self.write(r, E.ext(v, rw, signed) if rw > w else v)
+        self.k.capture_reads = True
+        return True
 
     def write(self, reg: str, v) -> None:
         """Assign a register at its declared width (a narrower or wider value is extended

@@ -159,6 +159,7 @@ _TMA_LOAD_OPT = (
     ".multicast::cluster",
     ".cta_group::2",
     ".multicast::cluster.cta_group::2",
+    ".cta_group::2.multicast::cluster",  # (TLX's inline asm; ptxas takes either order)
 )
 
 # (class, reason, mnemonics): one row per family.
@@ -487,8 +488,9 @@ _ROWS = [
     ),
     (
         "control",
-        "control flow (ISA: Control Flow Instructions: bra, brx.idx, ret); brx.idx only "
-        "in the warp-specialize dispatch",
+        "control flow (ISA: Control Flow Instructions: bra, brx.idx, ret); brx.idx is "
+        "the warp-specialize dispatch or a switch, which cfg.lower_switches rewrites into "
+        "a compare chain",
         ["bra", "brx.idx", "ret"],
     ),
     (
