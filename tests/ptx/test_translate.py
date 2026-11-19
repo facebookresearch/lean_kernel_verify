@@ -252,9 +252,13 @@ class Contract(unittest.TestCase):
         f = run("    mov.u32 %r1, %tid.x;\n    frobnicate.b32 %r2, %r1;\n    ret;\n")
         self.assertEqual(f.refusals[0]["kind"], "error")
         self.assertIn("no op table row", f.refusals[0]["msg"])
-        f = run("    barrier.cluster.arrive.aligned;\n    ret;\n")
+        f = run(
+            "    mov.u32 %r10, smem;\n    mbarrier.complete_tx.shared::cta.b64 [%r10], 16;\n    ret;\n"
+        )
         self.assertEqual(f.refusals[0]["kind"], "gap")
-        self.assertIn("not supported in Triton kernels", f.refusals[0]["msg"])
+        self.assertIn(
+            "KIR complete_tx is a shared::cluster copy's", f.refusals[0]["msg"]
+        )
         f = run(
             "    mov.u32 %r1, %tid.x;\n    setp.eq.s32 %p1, %r1, 0;\n    @%p1 bra A;\n    ret;\nA:\n    ret;\n"
         )

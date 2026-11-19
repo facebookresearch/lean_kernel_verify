@@ -23,8 +23,7 @@ count from the Facts. KIR `ir` is "ptx".
 
 Where a variant runs: one translate() per compiled kernel (TTGIR spec, CuTe digest),
 with the LaunchRecords of every launch of it (they must agree on block and cluster; the
-first names the params unless the policy gives them). The Triton family with a cluster
-of more than one CTA is a gap.
+first names the params unless the policy gives them).
 
 Policy (a dict; `policy()` fills the family defaults):
     family          "ttgir" | "cute"
@@ -203,9 +202,6 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
     fn = module.function(entry)
     facts.target = module.target.removesuffix("a")
     facts.block, facts.cluster = _launch_dims(fn, records)
-    if pol["family"] == "ttgir" and facts.cluster != (1, 1, 1):
-        raise interp.Unsupported("launch", fn.name, f"cluster {facts.cluster}: Triton kernels with "
-                            "clusters of more than one CTA are not supported")  # fmt: skip
     tcgen05 = any(i.opcode.startswith("tcgen05.") for i in fn.instructions())
     p1 = tmem.P1() if pol.get("p1") and tcgen05 else None  # interp.Kernel.p1
     if p1 is not None and pol["family"] != "cute":

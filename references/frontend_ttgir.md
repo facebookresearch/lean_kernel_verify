@@ -320,6 +320,16 @@ k-th `clc_query_cancel` of a role reads `__clc_schedule[pid.x, k]`. That every r
 the same response at its k-th query relies on the response barrier protocol, which P0-4
 checks on the same trace.
 
+With clusters of c CTAs (the PTX translation, `frontend_ptx.md`; 1-D grids, cluster
+`(c, 1, 1)`) the unit is the cluster: `max(1, resident // c)` clusters start, a
+try_cancel (`.multicast::cluster::all`) cancels a whole pending cluster, and every CTA of
+the asking cluster receives the response, whose first CTA id is the cancelled cluster's
+first CTA (TLX's `multi_ctas` adds the CTA's own rank). The schedules steal whole
+clusters (round_robin cycles over the resident clusters, greedy gives every pending
+cluster to cluster 0), and both tables stay per CTA, equal within a cluster: a CTA
+launches iff its cluster does, and its k-th entry is the first CTA of the k-th cluster
+its cluster steals (`to_kir._with_clc`).
+
 ### Encodings
 
 * TExpr `ext` / `trunc` where `tt.addptr` sign-extends an i32 tensor offset that is added
@@ -421,4 +431,5 @@ tensors, params, inputs, checks and `[to_kir] ... FAILED` lines stay; the defaul
 * `test_gpu_parity` needs a GB300 (or B200) host. Without a GPU it skips.
 * CLC is analyzed under three schedules, not every schedule the hardware may produce.
 * 2-CTA (cluster) kernels need cross-CTA events (target CTA of an arrive, DSMEM copies)
-  that KIR v1 does not have.
+  that this translation does not emit: the PTX translation (`--frontend ptx`,
+  `frontend_ptx.md`) checks them.

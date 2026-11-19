@@ -255,6 +255,27 @@ cluster_multicast_pipeline local_release    PASS PASS PASS FAIL PASS
 # the representative assignment's lines as certain counterexamples.
 cluster_lander_shares     ordered          PASS PASS PASS FAIL PASS
 cluster_lander_shares     unordered        PASS PASS PASS FAIL PASS
+# TLX's cluster launch control with 2-CTA clusters: the rank-0 CTA multicasts each try_cancel
+# response into both CTAs after waiting on its empty slot, which both roles of both CTAs
+# release after their waits on their own response slot. Only the response's transaction bytes
+# order the other CTA's k-th wait after the k-th try_cancel, so the landings' phases follow
+# their issue order (Ledger.lean, "Bytes carry order"; before, P0-4 was not decided for n3
+# and n5); unordered: the rank-0 CTA does not wait on its empty slot (not decided).
+cluster_clc_response      n1               PASS PASS PASS PASS PASS
+cluster_clc_response      n3               PASS PASS PASS PASS PASS
+cluster_clc_response      n5               PASS PASS PASS PASS PASS
+cluster_clc_response      unordered        PASS PASS PASS FAIL PASS
+# A cta_group::2 pipeline whose empty slot counts the leader MMA's commit and the arrive of
+# a second role per CTA that waits for the MMA's commit on another slot (TLX 2-CTA GEMMs
+# with a bias-partial role): the peer's landings are ordered only through both releases,
+# and the leader's own producer may load the next phase meanwhile, whose bytes must not
+# stand in for the peer's (Ledger.lean, "Bytes carry order": the own cuts; before, n3 and
+# n5 were not decided); early_release: the second role releases without waiting (not
+# decided).
+cluster_pair_two_release  n1               PASS PASS PASS PASS PASS
+cluster_pair_two_release  n3               PASS PASS PASS PASS PASS
+cluster_pair_two_release  n5               PASS PASS PASS PASS PASS
+cluster_pair_two_release  early_release    PASS PASS PASS FAIL PASS
 cluster_launch            grid4            PASS PASS PASS PASS PASS
 cluster_launch            grid3            FAIL FAIL FAIL FAIL FAIL
 cluster_barrier           ok               PASS PASS PASS PASS PASS

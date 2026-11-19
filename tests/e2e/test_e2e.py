@@ -151,6 +151,8 @@ LANDER_UNDECIDED = {
     ("cluster_multicast_pipeline", "local_release", "P0-4"),
     ("cluster_lander_shares", "ordered", "P0-4"),
     ("cluster_lander_shares", "unordered", "P0-4"),
+    ("cluster_clc_response", "unordered", "P0-4"),
+    ("cluster_pair_two_release", "early_release", "P0-4"),
 }
 
 

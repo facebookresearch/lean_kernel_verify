@@ -11,10 +11,13 @@ translate() on hand-written PTX.
 Special registers folded from the cluster dims; mapa and a remote mbarrier arrive /
 arrive.expect_tx (`cta`, a role split by a per-warp rank, a lane-varying rank refused, no
 `cta` in a cluster of one CTA); barrier.cluster arrive/wait on `cluster_barrier` (count,
-parity prologue and flips, part of a role refused, the Triton family a gap); the peer-bit
+parity prologue and flips, part of a role refused, the Triton family's worker-warp arrive
+and remote arrive); the peer-bit
 mask of a CTA pair's mbarrier (`leader` with .cta_group::2, LLVM's shrunken masks, masks
 that clear a bit the offset may set or that the symbol's alignment does not cover,
-without .cta_group::2, outside a cluster of pairs); multicast TMA loads (`cta_mask`,
+without .cta_group::2, outside a cluster of pairs); TLX's mapa of the pair leader's
+mbarrier (`leader` for rank & ~1 in clusters of 2 and 4, the own rank, refusals per
+rank); multicast TMA loads (`cta_mask`,
 outside a cluster, issued by several lanes, as cta_group::2 ones); a load into another
 CTA refused; multicast
 tcgen05.commit (`cta_mask`) and cta_group::2 tcgen05 ops; shared::cluster bulk copies
@@ -337,9 +340,36 @@ class ClusterBarrier(unittest.TestCase):
             + "    setp.lt.u32 %p6, %r1, 16;\n    @%p6 barrier.cluster.arrive.aligned;\n"
         )
         self.assertIn("differs between the lanes of a warp", refusal(f))
-        f = run(PRE + CB, family="ttgir", cluster=(1, 1, 1))
-        self.assertIn("not supported in Triton kernels", refusal(f))
-        self.assertEqual(f.refusals[0]["kind"], "gap")
+
+    def test_triton_family(self):
+        # TLX 2-CTA kernels: the CTA of rank 1 only arrives (a condition uniform in the
+        # role), the remote arrive on the leader's slot; one event over the issuing
+        # threads (threads_per_issue 1, the arrive counting them)
+        body = (
+            PRE
+            + """
+    setp.ne.u32 %p7, %r4, 0;
+    @%p7 barrier.cluster.arrive.relaxed.aligned;
+    @%p7 bra $W;
+    barrier.cluster.arrive.relaxed.aligned;
+    barrier.cluster.wait.aligned;
+$W:
+    mapa.shared::cluster.u32 %r11, %r2, 0;
+    @%p1 mbarrier.arrive.shared::cluster.b64 _, [%r11+8];
+"""
+        )
+        f = run(body, family="ttgir")
+        self.assertEqual(f.refusals, [])
+        cb = [
+            (e["ev"], e.get("n"))
+            for e in events(f)
+            if e.get("bar") == "cluster_barrier"
+        ]
+        self.assertEqual(cb, [("arrive", 64), ("arrive", 64), ("wait", None)])
+        (a,) = [e for e in events(f, "arrive") if e["bar"] == "mbar_8"]
+        self.assertEqual((a["cta"], "n" in a), (const(0), False))
+        self.assertEqual(f.roles[0]["threads_per_issue"], 1)
+        self.assertEqual(kir_errors(f), [])
 
 
 class TmaLoad(unittest.TestCase):
@@ -360,6 +390,71 @@ class TmaLoad(unittest.TestCase):
             self.assertNotIn("cta_mask", ld)
             self.assertEqual(len(events(f, "gload")), 1)  # its footprint, once
             self.assertEqual(kir_errors(f), [])
+
+    def test_mapa_leader(self):
+        # TLX names the pair leader's mbarrier by mapa of rank & ~1 (LLVM: & 254)
+        for mask, cl in (
+            ("254", PAIR),
+            ("-2", PAIR),
+            ("-2", (4, 1, 1)),
+            ("254", (4, 1, 1)),
+        ):
+            body = (
+                PRE
+                + TMA
+                + f"    and.b32 %r12, %r4, {mask};\n    mapa.shared::cluster.u32 %r9, %r2, %r12;\n"
+            )
+            f = run(body + load("%r9", ".cta_group::2"), tmap=True, cluster=cl)
+            self.assertEqual(f.refusals, [], (mask, cl))
+            (ld,) = events(f, "tma_load")
+            self.assertEqual(
+                (ld["bar"], ld["idx"], ld["leader"]), ("mbar_0", const(0), True)
+            )
+            self.assertEqual(kir_errors(f), [])
+        # mapa to the own rank: the own slot
+        f = run(
+            PRE
+            + TMA
+            + "    mapa.shared::cluster.u32 %r9, %r2, %r4;\n"
+            + load("%r9", ".cta_group::2"),
+            tmap=True,
+        )
+        self.assertEqual(f.refusals, [])
+        self.assertNotIn("leader", events(f, "tma_load")[0])
+        refused = [
+            # the peer of rank 0 is rank 1: not the pair leader in every CTA
+            (
+                "    mapa.shared::cluster.u32 %r9, %r2, %r5;\n",
+                ".cta_group::2",
+                {},
+                "[1, 0]",
+            ),
+            # the leader without .cta_group::2
+            (
+                "    and.b32 %r12, %r4, -2;\n    mapa.shared::cluster.u32 %r9, %r2, %r12;\n",
+                "",
+                {},
+                "neither the issuing CTA's",
+            ),
+            # a rank of a value of the launch: not a function of the rank alone
+            (
+                "    ld.param.u32 %r13, [k_param_1];\n    mapa.shared::cluster.u32 %r9, %r2, %r13;\n",
+                ".cta_group::2",
+                {},
+                "not a function of the rank",
+            ),
+            # rank & 1 in a cluster of 4: neither the own rank nor the pair's even one
+            # (rank & 2 would be: below 4 it equals rank & ~1)
+            (
+                "    and.b32 %r12, %r4, 1;\n    mapa.shared::cluster.u32 %r9, %r2, %r12;\n",
+                ".cta_group::2",
+                {"cluster": (4, 1, 1)},
+                "[0, 1, 0, 1]",
+            ),
+        ]
+        for pre, mods, kw, why in refused:
+            f = run(PRE + TMA + pre + load("%r9", mods), tmap=True, **kw)
+            self.assertIn(why, refusal(f), pre)
 
     def test_cta_group_2_on_the_own_mbarrier(self):
         f = run(PRE + TMA + load("%r2", ".cta_group::2"), tmap=True)

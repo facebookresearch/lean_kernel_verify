@@ -13,11 +13,13 @@ registers are Data, a .sync.aligned form under a lane condition is refused, comm
 commit_arrive per issuing thread, a multicast commit and cta_group::2 need a cluster
 (test_cluster.py). CLC: the
 try_cancel/query/get_first_ctaid sequence of Triton's CLC (evaluated over a schedule;
-the per-axis get_first_ctaid::x/::y/::z too), the role prologue, refusals of other
+the per-axis get_first_ctaid::x/::y/::z too), the role prologue, a cluster's response
+multicast to every CTA (`cta_mask`; a try_cancel without .multicast::cluster::all refused
+there), refusals of other
 response uses (a response read elsewhere than the try_cancel's address or before a wait
 on its mbarrier, an unpredicated get_first_ctaid) and of CuTe CLC. Named barriers,
-fences and griddepcontrol emit nothing; the cluster-scope forms are gaps in the Triton
-family (test_cluster.py: the CuTe family); relaxed arrive is refused; mbarrier.inval
+fences and griddepcontrol emit nothing; the cluster-scope forms are in test_cluster.py;
+relaxed arrive is refused; mbarrier.inval
 ends a private synchronous cycle (init, commit, wait, inval in each loop iteration),
 which is removed, and is refused otherwise; parts of a CuTe role that emit nothing are
 merged. Pipelines: a
@@ -207,6 +209,22 @@ class Clc(unittest.TestCase):
             [],
         )
 
+    def test_clusters(self):
+        # a cluster of 2: the response lands in both CTAs (cta_mask 3); without
+        # .multicast::cluster::all only in the asking CTA, which a cluster of more than one
+        # CTA refuses (and a cluster of one takes)
+        f = sync(CLC, cluster=(2, 1, 1))
+        self.assertEqual(f.refusals, [])
+        (load,) = events(f, "tma_load")
+        self.assertEqual(load["cta_mask"], {"e": "const", "w": 32, "v": 3})
+        self.assertEqual(kir_errors(f), [])
+        self.assertNotIn("cta_mask", events(sync(CLC), "tma_load")[0])
+        plain = CLC.replace(".multicast::cluster::all", "")
+        self.assertEqual(sync(plain).refusals, [])
+        self.assertIn(
+            "without .multicast::cluster::all", refusal(sync(plain, cluster=(2, 1, 1)))
+        )
+
     def test_refusals(self):
         self.assertIn(
             "CLC is supported in Triton kernels only", refusal(sync(CLC, family="cute"))
@@ -359,15 +377,14 @@ class Barriers(unittest.TestCase):
 
     def test_gaps_and_refused_forms(self):
         init = "    @%p12 mbarrier.init.shared::cta.b64 [%r10], 1;\n"
+        # the cluster-scope forms in a CTA of its own (test_cluster.py: in clusters)
+        for stmt in ("barrier.cluster.arrive.aligned;",
+                     "@%p12 mbarrier.arrive.shared::cluster.b64 _, [%r10];"):  # fmt: skip
+            self.assertEqual(sync(init + "    " + stmt).refusals, [], stmt)
         for stmt, why in [
-            ("barrier.cluster.arrive.aligned;", "not supported in Triton kernels"),
-            (
-                "@%p12 mbarrier.arrive.shared::cluster.b64 _, [%r10];",
-                "not supported in Triton kernels",
-            ),
             (
                 "@%p12 mbarrier.complete_tx.shared::cta.b64 [%r10], 16;",
-                "not supported in Triton kernels",
+                "KIR complete_tx is a shared::cluster copy's",
             ),
             (
                 "@%p12 mbarrier.arrive.relaxed.cta.shared::cta.b64 _, [%r10];",

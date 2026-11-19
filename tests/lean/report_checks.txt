@@ -58,6 +58,12 @@ ledger_confirm UNDECIDED at_budget P0-2
 ledger_confirm UNDECIDED at_budget P0-4
 ledger_confirm !UNDECIDED one_more P0-2
 cluster_pair_prologue UNDECIDED peer_unordered P0-4
+cluster_clc_response UNDECIDED unordered P0-4
+cluster_pair_two_release UNDECIDED early_release P0-4
+cluster_pair_two_release !UNDECIDED n3
+cluster_pair_two_release !UNDECIDED n5
+cluster_clc_response !UNDECIDED n3
+cluster_clc_response !UNDECIDED n5
 cluster_pair_prologue !UNDECIDED short_peer
 cluster_pair_prologue !UNDECIDED extra_peer_box
 cluster_pair_prologue !UNDECIDED peer_extra_iteration

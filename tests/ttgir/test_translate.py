@@ -1450,7 +1450,7 @@ class ExportTest(unittest.TestCase):
 
 
 class ClcScheduleTest(unittest.TestCase):
-    """_with_clc builds the CLC tables from the number of resident CTAs."""
+    """_with_clc builds the CLC tables from the number of resident CTAs (and clusters)."""
 
     @staticmethod
     def _input(ctas: int) -> dict:
@@ -1471,6 +1471,29 @@ class ClcScheduleTest(unittest.TestCase):
             out["metadata"]["__clc_schedule"],
             [2, 4, -1, 3, -1, -1] + [-1] * 9,
         )
+
+    def test_clusters_are_stolen_whole(self):
+        # 2-CTA clusters, 4 resident CTAs (2 clusters), a grid of 5 clusters: round_robin
+        # gives cluster 2 (CTAs 4, 5) and 4 to cluster 0, cluster 3 to cluster 1; each entry
+        # is the stolen cluster's first CTA, the same for both CTAs of the thief
+        out = to_kir._with_clc(self._input(10), "round_robin", 4, (2, 1, 1))
+        self.assertEqual(out["metadata"]["__clc_launched"], [1] * 4 + [0] * 6)
+        self.assertEqual(out["shapes"]["__clc_schedule"], [10, 3])
+        row0, row1, idle = [4, 8, -1], [6, -1, -1], [-1, -1, -1]
+        self.assertEqual(
+            out["metadata"]["__clc_schedule"], row0 * 2 + row1 * 2 + idle * 6
+        )
+        greedy = to_kir._with_clc(self._input(10), "greedy", 4, (2, 1, 1))
+        self.assertEqual(greedy["metadata"]["__clc_schedule"][:8], [4, 6, 8, -1] * 2)
+        # fewer resident CTAs than a cluster holds: one cluster still starts
+        one = to_kir._with_clc(self._input(4), "round_robin", 1, (2, 1, 1))
+        self.assertEqual(one["metadata"]["__clc_launched"], [1, 1, 0, 0])
+        self.assertEqual(
+            to_kir._with_clc(self._input(5), "round_robin", 2, (1, 1, 1)),
+            to_kir._with_clc(self._input(5), "round_robin", 2),
+        )
+        with self.assertRaisesRegex(to_kir.KirError, "cluster dims"):
+            to_kir._with_clc(self._input(4), "none", 2, (2, 2, 1))
 
     def test_empty_grid_launches_nothing(self):
         out = to_kir._with_clc(self._input(0), "round_robin", 4)

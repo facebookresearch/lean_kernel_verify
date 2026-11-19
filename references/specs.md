@@ -249,8 +249,22 @@ So (`Ledger.lean`, "Landers"):
 of other roles that may precede a wait's return instead of their run totals):
 in a multicast pipeline every CTA's consumer arrives on every CTA's empty slot,
 and the run totals of two such arriving roles order nothing
-(`tests/lean/cluster_multicast_pipeline`). The induction needs every landing's
-bytes to be non-negative: PTX transaction counts are unsigned, and a negative
+(`tests/lean/cluster_multicast_pipeline`). Their cuts also use transaction bytes
+(`Ledger.lean`, "Bytes carry order"): a phase completes only when its
+transaction count is back to 0, so a wait for phase k cannot return before
+loads and landings bringing the `expect_tx` bytes that surely precede phase k's
+completion were issued (those of each role issued before the arrivals of it that
+phase k needs, `SlotLedger.bytesNeeded`). E.g. TLX's cluster launch control:
+the rank-0 CTA multicasts each try_cancel response into the other CTA, whose
+roles' waits for it are ordered after the try_cancel only by its bytes
+(`tests/lean/cluster_clc_response`; before, P0-4 was not decided there). On a
+slot with a lander only loads that the wait's own return does not surely
+precede count (a load issued after the wait returned lands after its phase
+completed): in a cta_group::2 pipeline whose empty slot also counts a second
+role's release, the leader's own producer may load the next phase meanwhile,
+and those bytes must not stand in for the peer's
+(`tests/lean/cluster_pair_two_release`). The
+induction needs every landing's bytes to be non-negative: PTX transaction counts are unsigned, and a negative
 `expect_tx` or `complete_tx` count stops the evaluation (`unexpected`).
 
 The attribution follows the kernel's issue order whatever the bytes per phase: a
@@ -595,7 +609,8 @@ with at least one note, whatever their outcome (a PASS can have notes).
 
 ### Scope: refused kernels and constructs, unchecked bug classes
 
-- **Clusters: CuTe only.** CuTe cluster kernels (2-CTA, cta_group::2) are
+- **Clusters: CuTe, and TLX in the PTX translation.** CuTe cluster kernels
+  (2-CTA, cta_group::2), and TLX ones with `--frontend ptx` (P0 only), are
   checked with one barrier ledger per cluster (kir.md change 11): remote
   mbarrier arrives, multicast commits, cta_group::2 and multicast TMA loads,
   shared::cluster bulk copies (inline PTX) and the cluster barrier; P1-1 runs
@@ -607,10 +622,11 @@ with at least one note, whatever their outcome (a PASS can have notes).
   CTA's landings and a slot's phases that the ledger's happens-before does not
   find: one that only a named barrier gives (P0 has no named barriers: e.g. a
   relay warp whose next copy waits on a `bar.sync` with compute warps that wait
-  for the peer's phase), or one carried only by transaction bytes (a multicast
-  pipeline over more than 2 CTAs, whose consumers only the other CTAs' slices
-  hold back); its landings go to their first possible phase, and P0-4 is
-  UNDECIDED if they then overfill one. Refused: 2-CTA TTGIR kernels
+  for the peer's phase), or one carried by transaction bytes beyond the
+  `expect_tx` bytes `SlotLedger.bytesNeeded` counts (those that precede, in
+  their roles, arrivals the phase needs); its landings go to their first
+  possible phase, and P0-4 is UNDECIDED if they then overfill one.
+  Refused: 2-CTA TTGIR kernels in the default translation
   (`ttng.two-ctas`, remote mbarriers, DSMEM), TTGIR multi-CTA layouts
   (`ttg.num-ctas` > 1), CLC, im2col TMA, pointers carried by loops (TTGIR; CuTe:
   a loop-carried value that changes structure, e.g. a pointer into another

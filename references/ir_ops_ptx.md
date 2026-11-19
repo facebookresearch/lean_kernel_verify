@@ -230,9 +230,9 @@ is modeled as performed.
 | `bar.sync`, `bar.arrive`, `barrier.sync{.aligned}`, `barrier.arrive{.aligned}` `id{, count}` | no event; the aligned forms need a mask uniform per warp | `named_bar` of the whole role: id and count constants (one uniform per warp but not per role splits the role), count a positive multiple of 32, absent: the block's threads |
 | `barrier.red.{and,or,popc}{.aligned}`, `bar.red.*` `d, id{, count}, p` | as `bar.sync`; d: "Values" | as `bar.sync` |
 | `bar.warp.sync` | drop | drop |
-| `barrier.cluster.arrive{.relaxed}{.aligned}` / `.wait{.aligned}` (CuTe) | `arrive` of every thread of the role / `wait` on `cluster_barrier` | as P0 |
+| `barrier.cluster.arrive{.relaxed}{.aligned}` / `.wait{.aligned}` | `arrive` of every thread of the role / `wait` on `cluster_barrier` | as P0 |
 
-Clusters (CuTe; a TLX kernel launched with clusters is refused, `frontend_ptx.md`):
+Clusters (both families):
 
 * `mapa.shared::cluster d, a, r` makes a remote address (a in the CTA of rank r); any
   other arithmetic on it makes it Data. An `mbarrier.arrive{.expect_tx}.shared::cluster`
@@ -244,6 +244,11 @@ Clusters (CuTe; a TLX kernel launched with clusters is refused, `frontend_ptx.md
   bit: a trust item). It is accepted only as the mbarrier of a `.cta_group::2` TMA load,
   which then has KIR `leader`; a cta_group::2 load on a local mbarrier completes on the
   issuing CTA's own slot.
+* A TMA load's mbarrier given by `mapa` (TLX: `mapa d, a, %cluster_ctarank & 254`) is
+  decided per rank: the rank operand, a function of the CTA's rank alone (`%crank`
+  terms, constants), evaluated for every rank of the cluster, is either the issuing
+  CTA's own rank in every CTA (its own slot) or, for a `.cta_group::2` load, the even
+  rank of its pair in every CTA (`leader`); anything else is refused.
 * A multicast TMA load's mask operand is the `tma_load`'s `cta_mask` (its box lands in
   every CTA of the mask); a multicast `tcgen05.commit`'s is the `commit_arrive`'s.
 * `cp.async.bulk.shared::cluster.shared...complete_tx::bytes [dst], [src], n, [mbar]`
@@ -292,14 +297,16 @@ counts.
 
 | Instruction | KIR |
 |---|---|
-| `clusterlaunchcontrol.try_cancel.async.shared...complete_tx::bytes{.multicast::cluster::all} [resp], [mbar]` | `tma_load(__clc_response, [0], bar(mbar))` per issuing thread: the 16-byte response completes 16 transaction bytes |
+| `clusterlaunchcontrol.try_cancel.async.shared...complete_tx::bytes{.multicast::cluster::all} [resp], [mbar]` | `tma_load(__clc_response, [0], bar(mbar))` per issuing thread: the 16-byte response completes 16 transaction bytes; in a cluster of n > 1 CTAs it needs `.multicast::cluster::all` and has `cta_mask` `(1 << n) - 1` (the response lands at the same offsets in every CTA of the cluster); without it, refused |
 | `ld.shared.b128 r, [resp]` | r is the response token: read from a try_cancel's response address, after a wait of the reading role on that try_cancel's mbarrier |
 | `clusterlaunchcontrol.query_cancel.is_canceled p, r` | one query of the whole role: `let clc<k> = load(__clc_schedule, [pid.x, __clc_k])`, `__clc_k += 1`; p is `clc<k> != -1` |
 | `clusterlaunchcontrol.query_cancel.get_first_ctaid.v4 {x, y, z, _}, r` (predicated by p) | x = `clc<k>`, y, z = `clc<k> == -1 ? -1 : 0` |
 | `...get_first_ctaid::{x,y,z} d, r` (CuTe DSL 4.6.1's per-axis forms, predicated by p) | that one component |
 
 Any other use of a response is refused; so is CLC in a CuTe kernel. The schedules the
-tables hold: `frontend_ttgir.md`, "Cluster Launch Control".
+tables hold, also with clusters (the tables are per CTA, equal within a cluster, and an
+entry is the stolen cluster's first CTA, to which TLX adds `%cluster_ctarank`):
+`frontend_ttgir.md`, "Cluster Launch Control".
 
 ## Drop and refuse
 

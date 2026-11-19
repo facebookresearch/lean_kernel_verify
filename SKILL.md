@@ -30,7 +30,8 @@ mbarrier parity or expect_tx bugs and (CuTe) unordered TMEM reuse across warps
 loading), especially on partial and multi-wave shapes, including CuTe
 2-CTA (cluster) kernels for the P0 specs; or to add a case for a new kernel.
 **Do not use it** for numerics, performance, CUDA C++ kernels, TTGIR/TLX 2-CTA
-kernels, or general race/deadlock freedom (see Limits).
+kernels in the default translation (`--frontend ptx` checks them), or general
+race/deadlock freedom (see Limits).
 
 ```bash
 S=/path/to/lean_kernel_verify   # the directory of this file
@@ -265,11 +266,12 @@ When you report:
 
 ## Limits
 
-Clusters (CuTe): remote mbarrier arrives, multicast commits, cta_group::2 and
+Clusters (CuTe, and TLX with `--frontend ptx`, also with cluster launch control):
+remote mbarrier arrives, multicast commits, cta_group::2 and
 multicast TMA loads, DSMEM bulk copies and the cluster barrier are checked with one
-barrier ledger per cluster, and P1-1 runs per cluster (a cta_group::2 MMA or copy
+barrier ledger per cluster, and P1-1 runs per cluster (CuTe: a cta_group::2 MMA or copy
 accesses the TMEM of both CTAs of its pair); which CTA's data a copy carries is not
-checked. Refused: TTGIR 2-CTA kernels (remote
+checked. Refused: TTGIR 2-CTA kernels in the default translation (remote
 barriers, DSMEM, multi-CTA layouts), CLC, im2col TMA, TTGIR loop-carried pointers (CuTe: a
 loop-carried value changing structure, e.g. a pointer into another tensor),
 side-effecting inline asm, a value that reaches an event through register

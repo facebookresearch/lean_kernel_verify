@@ -1617,7 +1617,7 @@ def build_ptx(where: Path, dump: dict, key: str, case: dict) -> dict:
     if facts.clc:
         _add_clc(tensors, params)
     return _document(dump, key, case, "ptx", facts.target, params, tensors, facts.barriers,
-                     roles, launches, written, {}, facts.clc)  # fmt: skip
+                     roles, launches, written, {}, facts.clc, facts.cluster)  # fmt: skip
 
 
 def check_required_cluster(dump: dict, key: str) -> None:
@@ -1721,8 +1721,9 @@ def _check_case_names(case: dict, tensor_args: set, kernel: str) -> None:
 
 def _document(dump: dict, key: str, case: dict, ir: str, target: str, params: list,
               tensors: list, barriers: list, roles: list, launches: list, written: set,
-              desc_bases: dict, uses_clc: bool) -> dict:  # fmt: skip
-    """The KIR document: the inputs of every launch (one per CLC schedule with CLC)."""
+              desc_bases: dict, uses_clc: bool, cluster: tuple = (1, 1, 1)) -> dict:  # fmt: skip
+    """The KIR document: the inputs of every launch (one per CLC schedule with CLC);
+    `cluster` the launches' cluster dims (the PTX translation's Facts.cluster)."""
     spec = dump["specs"][key]
     inputs = []
     for inp, launch in launches:
@@ -1736,7 +1737,7 @@ def _document(dump: dict, key: str, case: dict, ir: str, target: str, params: li
                 1, dump["target"]["max_shared_mem"] // max(1, spec["shared_bytes"])
             )
             inputs += [
-                _with_clc(base, sched, resident)
+                _with_clc(base, sched, resident, tuple(cluster))
                 for sched in case.get("clc_schedules", CLC_SCHEDULES)
             ]
         else:
@@ -1762,6 +1763,7 @@ def _document(dump: dict, key: str, case: dict, ir: str, target: str, params: li
         },
         # Every input carries its own grid (it overrides these); the first one is shown.
         "grid": [K.const(g, 32) for g in inputs[0]["grid"]],
+        **({"cluster": list(cluster)} if tuple(cluster) != (1, 1, 1) else {}),
         "params": params,
         "tensors": tensors,
         "barriers": barriers,
@@ -1974,7 +1976,9 @@ def _outside(shape: list, strides: list, bshape: list, bstrides: list) -> int | 
     return None
 
 
-def _with_clc(inp: dict, schedule: str, resident: int) -> dict:
+def _with_clc(
+    inp: dict, schedule: str, resident: int, cluster: tuple = (1, 1, 1)
+) -> dict:
     """Attach a Cluster Launch Control schedule (which CTAs launch, what each query returns).
 
     Up to `resident` CTAs start at once (SMs x CTAs per SM by shared memory); the others
@@ -1982,6 +1986,13 @@ def _with_clc(inp: dict, schedule: str, resident: int) -> dict:
       none        every try_cancel fails; every CTA launches and runs its own tile
       round_robin pending CTAs are stolen in order, cycling over the resident CTAs
       greedy      CTA 0 steals every pending CTA
+    With clusters of c = cluster[0] CTAs (1-D grids: the cluster is (c, 1, 1)) the unit is
+    the cluster: resident // c clusters (at least one) start, a try_cancel cancels a whole
+    pending cluster, and every CTA of the asking cluster receives the response, whose
+    first CTA id is the cancelled cluster's first CTA (each CTA adds its own rank: TLX
+    multi_ctas). So both tables are per CTA, equal within a cluster: a CTA launches iff its
+    cluster does, and its k-th entry is the first CTA of the k-th cluster its cluster
+    steals. A grid that c does not divide does not launch (KIR: a kernel error).
     """
     if inp["grid"][1] * inp["grid"][2] != 1:
         raise KirError(
@@ -1993,17 +2004,22 @@ def _with_clc(inp: dict, schedule: str, resident: int) -> dict:
             " (check the case's num_sms)",
             kind="error",
         )
-    g = inp["grid"][0]
-    resident = min(g, resident)
-    steals = [[] for _ in range(g)]
-    launched = [1] * g
+    if tuple(cluster[1:]) != (1, 1):
+        raise KirError(f"input {inp['name']}: CLC with cluster dims {cluster}")
+    g, c = inp["grid"][0], cluster[0]
+    n = g // c  # clusters
+    rc = max(1, min(g, resident) // c)  # resident clusters
+    steals = [[] for _ in range(n)]
+    up = [1] * n
     if schedule != "none":
-        for t in range(resident, g):
-            thief = 0 if schedule == "greedy" else (t - resident) % resident
-            steals[thief].append(t)
-            launched[t] = 0
+        for t in range(rc, n):
+            thief = 0 if schedule == "greedy" else (t - rc) % rc
+            steals[thief].append(t * c)
+            up[t] = 0
     k = 1 + max((len(s) for s in steals), default=0)
-    table = [s + [-1] * (k - len(s)) for s in steals]
+    rows = [s + [-1] * (k - len(s)) for s in steals]
+    table = [rows[x // c] if x // c < n else [-1] * k for x in range(g)]
+    launched = [up[x // c] if x // c < n else 1 for x in range(g)]
     out: dict[str, Any] = {**inp, "name": f"{inp['name']}@clc:{schedule}"}
     out["metadata"] = dict(
         inp["metadata"],

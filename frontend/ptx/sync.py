@@ -37,7 +37,12 @@ the Triton family only, CuTe CLC is a gap):
   * try_cancel [resp], [mbar] -> `tma_load(__clc_response, [0], mbar)` per issuing
     thread: the 16-byte response lands through the async proxy and completes its
     transaction bytes on the barrier. .multicast::cluster::all is the same with a cluster
-    of one CTA (Triton clusters are refused before, translate.py).
+    of one CTA; in a cluster of n > 1 CTAs (TLX multi_ctas: the cluster's rank-0 CTA asks
+    for the next pending cluster, ISA clusterlaunchcontrol.try_cancel) the response lands
+    at the same address of every CTA of the cluster, its bytes completing on each one's
+    mbarrier at the same offset: `cta_mask` (1 << n) - 1. A try_cancel without it in such
+    a cluster is refused: only the asking CTA learns the response, while the schedule
+    model hands it to every CTA of the cluster.
   * ld.shared.b128 r, [a] -> r holds a CLC response token (ClcResponse, a Data: any use
     but the queries below is refused as data). A queried token must have been read from
     the response address of a try_cancel of the kernel (any role), after a wait of the
@@ -94,6 +99,7 @@ arrive) and mbarrier.complete_tx go to cluster.py.
 """
 
 import collections
+import math
 from dataclasses import dataclass
 
 from . import cluster, expr as E, regions as R
@@ -161,8 +167,19 @@ def _clc(tr: Translator, i, mn: str) -> None:
         resp = _address(tr, i)
         zero = E.const(0, 32)
         issued = len(tr.barriers)
+        n = math.prod(tr.k.cluster)
+        if n > 1 and ".multicast::cluster::all" not in mn:
+            tr.fail(i, f"{mn} in a cluster of {n} CTAs without .multicast::cluster::all: "
+                       "only the asking CTA receives the response (gap)")  # fmt: skip
+        fields = {"cta_mask": E.const((1 << n) - 1, 32)} if n > 1 else {}
         tr.barrier_event(
-            "tma_load", sym, off, "thread", desc="__clc_response", coords=[zero]
+            "tma_load",
+            sym,
+            off,
+            "thread",
+            desc="__clc_response",
+            coords=[zero],
+            **fields,
         )
         if len(tr.barriers) > issued:  # some thread issues it: it writes `resp`
             tr.clc_cancels.append((resp, (sym, tr.uniform(off))))

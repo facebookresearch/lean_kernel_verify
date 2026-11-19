@@ -9,6 +9,8 @@ references/kir.md change 11).
 
     mapa(tr, i)                       mem.py: mapa.shared::cluster d, a, rank
     peer(tr, v) -> Peer | None        interp.py: a shared address with the peer bit cleared
+    per_rank(tr, e) -> [int] | None   the value of a rank expression in each CTA of the
+                                      cluster (a TMA load's mapa'd mbarrier)
     execute(tr, i, mnemonic)          sync.py: barrier.cluster.*, mbarrier.arrive(.expect_tx)
                                       on shared::cluster, mbarrier.complete_tx
     pair(tr, i, mnemonic)             sync.py, here: a cta_group::2 instruction needs a
@@ -52,6 +54,12 @@ destination's bytes complete on the slot of the even CTA of its pair). A cta_gro
 load whose mbarrier is a shared::cta address completes on the issuing CTA's own slot (no
 leader: the ISA lets the mbarrier be in either CTA of the pair, the address says which);
 a Peer without .cta_group::2 is refused (the mbarrier must be in the destination CTA).
+TLX names the pair leader's mbarrier by mapa instead (`mapa d, a, rank & ~1`): a TMA
+load's mbarrier that is a Remote is decided per CTA rank (per_rank: the rank expression
+evaluated in each CTA of the cluster, refused unless it depends on the CTA only through
+its cluster rank, as the special registers fold): the issuing CTA's own rank in every CTA
+is its own slot (no leader), the even CTA of its pair in every CTA with .cta_group::2 is
+`leader`, anything else is refused.
 
 Events (the legacy frontend's, references/frontend_cute.md "Clusters"):
   * barrier.cluster.arrive{.relaxed}{.aligned}: an `arrive` of every thread of the role
@@ -83,8 +91,11 @@ measured on hardware (tests/ptx/test_gpu_tma_issue.py covers the other forms), s
 instruction is translated only where at most one lane of each warp executes it
 (elect.sync, a lane test), once per executing thread, and refused otherwise.
 
-The Triton family: clusters of more than one CTA are refused before translation, and
-its cluster-scope barrier forms are gaps.
+Both families: the TLX/Triton kernels launched with clusters (2-CTA GEMMs: remote arrives
+on the leader's barriers, cta_group::2 MMAs and loads, multicast commits, the cluster
+barrier around the warp-specialized region, CLC with clusters, sync.py) follow the same
+rules; the Triton family's own conventions (one event over the issuing threads,
+threads_per_issue 1) are policy.
 """
 
 import math
@@ -174,6 +185,47 @@ def pair(tr: Translator, i, mn: str) -> None:
         )
 
 
+def per_rank(tr: Translator, e) -> list | None:
+    """[the value of e in the CTA of rank r, for every rank r of the cluster] if e is the
+    same in every thread of the role and depends on the CTA only through its cluster rank:
+    pid.a only inside `pid.a urem c_a` (c_a the cluster dim of axis a, the folding of the
+    cluster special registers), no other variable; else None."""
+    u = tr.uniform(e)
+    if u is None:
+        return None
+    dims = tuple(tr.k.cluster)
+    names = [f"%crank{a}" for a in range(3)]
+    memo: dict = {}
+
+    def go(x):
+        if x in memo:
+            return memo[x]
+        if (x[0] == "bin" and x[2] == "urem" and x[3][0] == "pid"
+                and E.is_const(x[4], dims[x[3][2]])):  # fmt: skip
+            r = E.var(names[x[3][2]], 32)
+        elif x[0] in ("pid", "nprog", "load", "table") or (
+            x[0] == "var" and x[2] not in names
+        ):
+            r = None
+        else:
+            kids = [go(c) for c in E.children(x)]
+            r = None if None in kids else E.rebuild(x, kids) if kids else x
+        memo[x] = r
+        return r
+
+    v = go(u)
+    if v is None:
+        return None
+    out = []
+    for r in range(math.prod(dims)):
+        at = (r % dims[0], r // dims[0] % dims[1], r // (dims[0] * dims[1]))
+        x = E.subst(v, {n: E.const(c, 32) for n, c in zip(names, at)})
+        if not E.is_const(x):
+            return None
+        out.append(x[2])
+    return out
+
+
 def pair_mask(tr: Translator):
     """The CTA mask of the issuing CTA's pair, 3 << (rank & ~1) (i32)."""
     rank = tr.sreg("%cluster_ctarank")
@@ -184,8 +236,6 @@ def pair_mask(tr: Translator):
 
 
 def execute(tr: Translator, i, mn: str) -> None:
-    if tr.k.mem.policy.get("family") != "cute":
-        tr.fail(i, f"{mn} (gap: cluster scope is not supported in Triton kernels)")
     if mn.startswith("barrier.cluster"):
         _cluster_barrier(tr, i, mn)
     elif mn in (
@@ -265,7 +315,18 @@ def load_slot(tr: Translator, i) -> tuple:
         pair(tr, i, "TMA load .cta_group::2")
     v = _address(tr, i.operands[2])
     fields: dict = {}
-    if isinstance(v, Peer):
+    if isinstance(v, Remote):  # TLX: mapa to the pair leader (module doc)
+        n = math.prod(tr.k.cluster)
+        ranks = per_rank(tr, v.cta)
+        own = ranks == list(range(n))
+        if not own and not (group2 and ranks == [r & ~1 for r in range(n)]):
+            tr.fail(i, "TMA load completing on an mbarrier of another CTA (a mapa result) "
+                       "that is neither the issuing CTA's nor, with .cta_group::2, its pair "
+                       f"leader's (its CTA by rank: {ranks or 'not a function of the rank'})")  # fmt: skip
+        if not own:
+            fields["leader"] = True
+        v = v.addr
+    elif isinstance(v, Peer):
         if not group2:
             tr.fail(i, "TMA load completing on the pair leader's mbarrier (address & "
                        "0xFEFFFFF8) without .cta_group::2 (ISA: the mbarrier is in the "

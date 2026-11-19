@@ -319,19 +319,24 @@ Coordinates, footprints, transaction bytes, issuing threads, sub-byte formats:
 
 ## Clusters, tcgen05, CLC
 
-* **Clusters (CuTe).** The cluster dims come from the LaunchRecords and are the KIR
-  `cluster` (`kir.md` change 11); remote arrives (`cta`), multicast TMA loads and commits
-  (`cta_mask`), cta_group::2 loads completing on the pair leader's mbarrier (`leader`),
-  shared::cluster bulk copies (`complete_tx`) and the cluster barrier follow
-  `ir_ops_ptx.md`, "Thread barriers and clusters". P0-2 and P0-4 decide one barrier
-  ledger per cluster. Which CTA's data a copy carries is not checked. A TLX kernel
-  launched with clusters (2-CTA) is refused.
+* **Clusters (CuTe and TLX).** The cluster dims come from the LaunchRecords and are the
+  KIR `cluster` (`kir.md` change 11); remote arrives (`cta`), multicast TMA loads and
+  commits (`cta_mask`), cta_group::2 loads completing on the pair leader's mbarrier
+  (`leader`: CuTe's peer-bit mask, TLX's `mapa` of `rank & 254`), shared::cluster bulk
+  copies (`complete_tx`) and the cluster barrier follow `ir_ops_ptx.md`, "Thread barriers
+  and clusters". P0-2 and P0-4 decide one barrier ledger per cluster. Which CTA's data a
+  copy carries is not checked. TLX 2-CTA kernels: the cluster barrier is reached by every
+  role, the worker regions arrive on it at their end (the padding warps too, which
+  therefore keep a role, "Threads and roles"); `fence.mbarrier_init.release.cluster`
+  emits nothing.
 * **tcgen05 in P0.** No event except `tcgen05.commit`, an asynchronous `commit_arrive` on
   its mbarrier; the P0 specs do not see tensor memory.
 * **CLC (TLX).** `try_cancel` and its queries follow the schedule model of
   `frontend_ttgir.md`, "Cluster Launch Control": every role becomes
   `let __clc_k = 0; if __clc_launched[pid.x] != 0 { ... }` and its k-th query reads
-  `__clc_schedule[pid.x, k]`. CLC in a CuTe kernel is refused.
+  `__clc_schedule[pid.x, k]`. With clusters a try_cancel must multicast its response
+  (`.multicast::cluster::all`: a `tma_load` with `cta_mask` over the cluster) and the
+  schedule steals whole clusters. CLC in a CuTe kernel is refused.
 
 ## Work anchors
 
@@ -414,7 +419,7 @@ parser cannot read, an internal error): ERROR. Common reasons:
 | `a global access whose address has no tensor provenance` | an address from a loaded pointer, an integer or an unnamed parameter |
 | `... (sub-element access)`, `byte offset ... not provably a multiple ...` | an access that is not whole elements of its tensor |
 | `mbarrier address is not a shared-memory symbol plus an offset`, an unresolved array or index | a barrier the arrays cannot place |
-| `cluster (2, 1, 1): Triton kernels with clusters ...` | a TLX 2-CTA kernel |
+| `TMA load completing on an mbarrier of another CTA (a mapa result) ...`, `... in a cluster of N CTAs without .multicast::cluster::all` | a cluster idiom outside the supported ones (a load completing on neither the issuing CTA's nor its pair leader's barrier; a CLC response only the asking CTA receives) |
 | `... with only part of warp(s) [...] active (undefined in PTX)` | a full-mask collective or aligned instruction under a partial warp |
 | ``case `work`: ...``, metadata and stale-data messages | the case or the host run (`frontend_ttgir.md`, `frontend_cute.md`) |
 
@@ -443,7 +448,7 @@ assembly rerolls LLVM's unrolled blocks into `for` loops (the same trace).
 * Shared memory, TMEM, MMA math, named barriers and fences are outside the P0 slice; TMEM
   accesses, `tcgen05.wait` and named barriers are P1 events (CuTe), fences and TMEM
   lifetime are not checked.
-* Refused by design: TLX clusters (2-CTA), CuTe CLC, P1-1 on TLX, TMEM addresses relative
+* Refused by design: CuTe CLC, P1-1 on TLX, TMEM addresses relative
   to the allocation, multicast bulk copies, multicast or cta_group::2 TMA loads and
   shared::cluster bulk copies that several lanes of a warp may execute (issuing not
   measured, `ir_ops_ptx.md`), im2col TMA, packed sub-byte TLX descriptors, loads through

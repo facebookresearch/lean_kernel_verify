@@ -1,0 +1,506 @@
+{
+ "kir_version": 1,
+ "kernel": "cluster_pair_two_release",
+ "source": "tests/lean/cluster_pair_two_release.kir.json",
+ "ir": "ptx",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "cluster": [
+  2,
+  1,
+  1
+ ],
+ "params": [
+  {
+   "name": "N",
+   "type": "i32"
+  },
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "t",
+   "kind": "desc",
+   "elem_bytes": 1,
+   "shape": [
+    {
+     "e": "const",
+     "v": 1024,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false,
+   "box": [
+    128
+   ]
+  }
+ ],
+ "barriers": [
+  {
+   "name": "full",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "empty",
+   "count": {
+    "e": "const",
+    "v": 2,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "done",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "producer",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "k",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "N",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "loc": "pair.py:2",
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "pair.py:10",
+       "bar": "empty",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "xor",
+        "a": {
+         "e": "bin",
+         "o": "and",
+         "a": {
+          "e": "var",
+          "name": "k",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 1,
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "eq",
+        "a": {
+         "e": "bin",
+         "o": "urem",
+         "a": {
+          "e": "pid",
+          "axis": 0,
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 2,
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "expect_tx",
+         "loc": "pair.py:11",
+         "bar": "full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "bytes": {
+          "e": "const",
+          "v": 256,
+          "w": 32
+         }
+        },
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "pair.py:11",
+         "bar": "full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "pair.py:1"
+      },
+      {
+       "op": "event",
+       "ev": "tma_load",
+       "loc": "pair.py:12",
+       "desc": "t",
+       "coords": [
+        {
+         "e": "bin",
+         "o": "mul",
+         "a": {
+          "e": "var",
+          "name": "k",
+          "w": 32
+         },
+         "b": {
+          "e": "const",
+          "v": 128,
+          "w": 32
+         },
+         "w": 32
+        }
+       ],
+       "bar": "full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "leader": true
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "mma",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "bin",
+       "o": "urem",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 2,
+        "w": 32
+       },
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "for",
+       "var": "k",
+       "lb": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "ub": {
+        "e": "var",
+        "name": "N",
+        "w": 32
+       },
+       "step": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "loc": "pair.py:2",
+       "body": [
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "pair.py:20",
+         "bar": "full",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "bin",
+          "o": "and",
+          "a": {
+           "e": "var",
+           "name": "k",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 32
+         }
+        },
+        {
+         "op": "event",
+         "ev": "commit_arrive",
+         "loc": "pair.py:21",
+         "bar": "empty",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "cta_mask": {
+          "e": "const",
+          "v": 3,
+          "w": 32
+         }
+        },
+        {
+         "op": "event",
+         "ev": "commit_arrive",
+         "loc": "pair.py:22",
+         "bar": "done",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "cta_mask": {
+          "e": "const",
+          "v": 3,
+          "w": 32
+         }
+        }
+       ]
+      }
+     ],
+     "else": [],
+     "loc": "pair.py:1"
+    }
+   ]
+  },
+  {
+   "name": "second",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "k",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "var",
+      "name": "N",
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "loc": "pair.py:2",
+     "body": [
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "eq",
+        "a": {
+         "e": "var",
+         "name": "MODE",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "pair.py:30",
+         "bar": "done",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "bin",
+          "o": "and",
+          "a": {
+           "e": "var",
+           "name": "k",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "pair.py:1"
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "pair.py:31",
+       "bar": "empty",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "cluster_pair_two_release",
+  "inputs": [
+   {
+    "name": "n1",
+    "params": {
+     "N": 1,
+     "MODE": 0
+    },
+    "intended_writes": {}
+   },
+   {
+    "name": "n3",
+    "params": {
+     "N": 3,
+     "MODE": 0
+    },
+    "intended_writes": {}
+   },
+   {
+    "name": "n5",
+    "params": {
+     "N": 5,
+     "MODE": 0
+    },
+    "intended_writes": {}
+   },
+   {
+    "name": "early_release",
+    "params": {
+     "N": 3,
+     "MODE": 1
+    },
+    "intended_writes": {}
+   }
+  ]
+ }
+}
