@@ -6,7 +6,7 @@ LICENSE file in the root directory of this source tree.
 -/
 
 /-
-Shared vocabulary of the P0 specs: spec ids, counterexample and note lines, and the
+Shared vocabulary of the specs: spec ids, counterexample and note lines, and the
 footprint of an access (allocation, rows, TMA boxes, segment of the current work item).
 -/
 import KV.Eval
@@ -17,7 +17,7 @@ inductive SpecId where
   | bounds | tripCount | coverage | barrier | maskElision | namedBarriers | tmemReuse | storeReuse
   deriving BEq, Inhabited
 
-/-- The five P0 specs (every KIR). -/
+/-- The five P0 specs P0-1..P0-5 (decided on a P0 KIR, `runCase`). -/
 def SpecId.all : List SpecId := [.bounds, .tripCount, .coverage, .barrier, .maskElision]
 
 /-- The P1 specs (decided on a P1 KIR only, references/specs.md "P1-1" and "P1-2"). -/

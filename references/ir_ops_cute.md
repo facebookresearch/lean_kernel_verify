@@ -288,7 +288,9 @@ tmem_store/copy_s2t` (events in the P1 slice), `cute.apply_swizzle`); MMA (`cute
 `cute_nvgpu.make_umma_smem_desc`, `cute.mma_atom_call`, `cute.mma.make_fragment`,
 `cute.make_tiled_mma`); TMEM allocation (`cute_nvgpu.arch.sm100.*`,
 `cute_nvgpu.atom.make_tmem_copy/make_s2t_copy/get_copy_s2t_smem_desc_view`);
-`nvvm.fmax/fmin`, `nvvm.rcp.approx.ftz.f`; synchronization outside P0 (`nvvm.barrier`, `nvvm.barrier.arrive`, `nvvm.bar.warp.sync`, `nvvm.fence.proxy`,
+`nvvm.fmax/fmin`, `nvvm.rcp.approx.ftz.f`; synchronization outside the P0 slice
+(`nvvm.barrier` and `nvvm.barrier.arrive`, whose named barriers P0-6 checks in the
+variant's PTX, `frontend_ptx.md`, "The P0-6 barrier pass"; `nvvm.bar.warp.sync`, `nvvm.fence.proxy`,
 `nvvm.fence.mbarrier.init`, `nvvm.setmaxregister`, `nvvm.tcgen05.wait`, `nvvm.cp.async.bulk.commit.group/wait_group`,
 `nvvm.cp.async.commit.group/wait.group`); `cute_nvgpu.prefetch_tma_desc`.
 

@@ -21,7 +21,8 @@ keep), the jit_params naming of pointers and descriptor bases, and the KIR desc 
 of Facts.descs (a segmented base's segments on the walking dim; a bulk descriptor's
 extent). TTGIR assembly (frontend/ttgir/to_kir.py build_ptx): host descriptor blocks
 (equal in every launch), the KIR desc tensors of Facts.descs (annotations, role) and the
-CLC tables.
+CLC tables; translate_nb in forked processes (the sequential results) and its
+all-preferred `<spec>@cluster<dims>` P0-6 KIR, and translate_p1's P1 KIR per geometry.
 """
 
 import json

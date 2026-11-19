@@ -1,4 +1,4 @@
-# Design: kernel IR -> Lean program -> P0 specs (+ P1-1)
+# Design: kernel IR -> Lean program -> P0 specs (+ P1-1, P1-2)
 
 Two layers, no hand-written per-kernel model anywhere. This document is the
 architecture; the other references detail its pieces, and SKILL.md "References" maps
@@ -16,7 +16,7 @@ KIR program (roles, structured control flow, integer expressions, events)
    |  frontend/emit_lean.py  KIR -> Lean source
    v
 Lean: KV.Kernel value + KV.Inputs value
-   |  lean/KV                Layer 2: evaluator -> per-role event traces -> P0 specs
+   |  lean/KV                Layer 2: evaluator -> per-role event traces -> P0 and P1 specs
    v
 verdict per spec (theorem or counterexample with IR loc -> source file:line)
 ```
@@ -33,11 +33,13 @@ environment failed: a frontend error, invalid KIR, a Lean error, an
 INCONSISTENT verdict, an unexpected evaluation error; UNDECIDED at a known
 limit: a construct the frontend refuses by design, a model limit such as a
 division by zero, an out-of-bounds metadata load or a model assumption (KIR
-`assume`) that does not hold before anything certain, a
-barrier ledger that does not converge, another CTA's TMA bytes whose phases
-only lower bounds give);
+`assume`) that does not hold with nothing certain (for an assumption, outside its
+cluster), a barrier ledger that does not converge, another CTA's TMA bytes whose phases
+only lower bounds give, a named barrier P0-6 cannot count or pair for certain, a
+P1 pair only the lockstep reading orders (P1-2: also its other undecided pairs));
 then the FAIL, ERROR and UNDECIDED findings and the notes, grouped by spec and
-source line. `lkv.py export` exports sources at a
+source line, the P0-6 sections (variants that rest on the warp-ahead reading, barrier
+sites not counted) and a section per P1 spec. `lkv.py export` exports sources at a
 revision and records it in the tree, so `run --src` reports the analyzed
 revision; `lkv.py check` runs Layer 2 on existing KIR. End-to-end tests:
 `tests/e2e/test_e2e.py`.
@@ -48,10 +50,14 @@ revision; `lkv.py check` runs Layer 2 on existing KIR. End-to-end tests:
 
 - **TLX / Triton**:
   `triton.compile(ASTSource(fn, signature, constexprs), target=GPUTarget("cuda", 100, 32))`
-  (103 with `--target sm_103`) runs on a CPU-only machine and returns
-  `asm["ttgir"]` after warp specialization. Roles are the `default` and
-  `partitionN` regions of `ttg.warp_specialize`; barriers are `ttng.*_barrier`
-  ops; every op carries a `loc` that resolves to a Python source line.
+  (103 with `--target sm_103`) runs on a CPU-only machine; the dump keeps each
+  specialization's `asm["ttgir"]` (after warp specialization) and `asm["ptx"]`. The
+  PTX translation (the default, `frontend_ptx.md`) takes the roles from the PTX's
+  warp-specialize dispatch (`default`, `partition<k>`) and the barriers from its
+  mbarrier instructions; the TTGIR translation (`--frontend legacy`) takes the
+  `default` and `partitionN` regions of `ttg.warp_specialize` and the
+  `ttng.*_barrier` ops. Every op carries a `loc` that resolves to a Python source
+  line.
 - **CuTe DSL**: the kernel package's real host code (the case's entry point)
   runs on a CPU-only machine on real CPU tensors that the case's builder
   makes. Only device queries, device typing and the compile/launch calls are
@@ -76,25 +82,33 @@ imports the kernel from the build graph.
 JSON, specified in `kir.md` (the contract `frontend/kir.py` checks) and emitted
 one to one as the constructors of `lean/KV/IR.lean`. In short:
 
-- Top level: `kir_version`, `kernel`, `source`, `ir`, optional `target` and
-  `compiler`, `grid`, `params` (scalar kernel arguments), `tensors` (global
-  tensors and TMA descriptors, with segments, role and metadata flag),
-  `barriers`, `roles`, and `case` (the concrete inputs and the `elision_flags`).
+- Top level: `kir_version`, `kernel`, `source`, `ir`, optional `target`,
+  `compiler` and `cluster` (the thread-block cluster dims), `grid`, `params` (scalar
+  kernel arguments), `tensors` (global tensors and TMA descriptors, with segments,
+  role and metadata flag), `barriers`, `roles`, and `case` (the concrete inputs and
+  the `elision_flags`); a P1 KIR adds `tmem` (P1-1) or `p1` and `cta_threads`
+  (P1-2), a P0-6 KIR `nbar`.
 - `Role = {name, warps, threads_per_issue, body}`; statements are `let`, `for`,
-  `while` (with a `max_iters` budget), `if`, `assert` and `event`.
+  `while` (with a `max_iters` budget), `if`, `assert`, `assume` (a model assumption:
+  false on an input, the role stops there and the input is undecided) and `event`.
 - Expressions are integer and boolean ops of explicit width (1, 32 or 64 bits)
   with exact `BitVec` semantics, program ids, grid sizes and `load` of integer
   metadata (seqlens, tile tables); tensor-valued index expressions (`TExpr`) are
   evaluated per coordinate.
 - Events: `bar_init`, `arrive`, `commit_arrive` (the asynchronous completion of
-  the role's prior MMAs), `expect_tx`, `wait`, `tma_load`, `tma_store` /
-  `tma_reduce`, `gload` / `gstore` / `gatomic`, and `work` (the work item a role
-  is processing).
+  the role's prior MMAs), `expect_tx`, `wait`, `tma_load`, `complete_tx` (transaction
+  bytes completing on another CTA's slot), `tma_store` / `tma_reduce`, `gload` /
+  `gstore` / `gatomic`, and `work` (the work item a role is processing).
 - Every statement and event keeps the IR `loc` for reporting.
-- A P1 KIR (`.p1.json`, CuTe only) adds the TMEM events `tmem` (ld/st/cp/mma
-  with exact lane x column rectangles), `tmem_wait` and `named_bar`, and the
-  top-level `tmem` allocation; the CuTe frontend writes it in a second
-  translation pass, so P0 KIRs do not change (`kir.md` change 10).
+- A P1 KIR (`.p1.json`) comes from a second translation pass, so P0 KIRs do not
+  change: the CuTe frontend's adds the TMEM events `tmem` (ld/st/cp/mma with exact
+  lane x column rectangles), `tmem_wait` and `named_bar`, and the top-level `tmem`
+  allocation (P1-1, `kir.md` change 10); the TTGIR frontend's, in the PTX
+  translation, adds `bulk_store`, `bulk_commit`, `bulk_wait`, `smem_write`,
+  `tmap_write` and `named_bar`, and the top-level `p1` and `cta_threads` (P1-2,
+  change 15).
+- A P0-6 KIR (`.nb.json`, from every variant's PTX whatever the translation) has the
+  events `named_bar`, `nb_open` and `nb_rep` and the top-level `nbar` (change 14).
 - Host-selected flags (constexprs such as FULL_TILES) are resolved at compile
   time: each flag set is its own KIR, paired with the inputs that select it. The
   case names the flags that select a mask-elided fast path
@@ -122,7 +136,10 @@ constructs (e.g. lane-divergent barrier ops, indirect calls) are hard errors.
   `addr` add/sub/mul/shl that wraps or `addr` trunc that loses bits) is itself
   recorded as an event, and so is a metadata `load` outside its tensor, after
   which that role stops (later events depend on the unknown value; P0-1 fails,
-  P0-2..P0-5 are undecided and list only their certain counterexamples). A
+  P0-2..P0-6, P1-1 and P1-2 are undecided and list only their certain
+  counterexamples); a false `assume` stops its role the same way, without a P0-1
+  finding, and leaves P0-1 undecided too, with no counterexample from its cluster
+  (its other roles may have used a value the assumption made wrong). A
   scalar `select` evaluates only the operand it chooses, so a masked scalar load
   reads nothing where its mask is false. With thread-block clusters (KIR
   `cluster`) a barrier slot belongs to one CTA, named by its rank in the
@@ -132,9 +149,9 @@ constructs (e.g. lane-divergent barrier ops, indirect calls) are hard errors.
   cluster (the roles of all its CTAs; transaction bytes another CTA lands are
   attributed by its issue order, each landing to the first phase it can
   complete, and P0-4 is undecided where only those lower bounds break it).
-- `Spec/*.lean`: the five P0 specs as `Prop`s over traces, each with a
-  `Decidable` instance, plus a counterexample extractor and a note extractor for
-  reporting.
+- `Spec/*.lean`: the six P0 specs and the two P1 specs (`TmemReuse.lean`,
+  `StoreReuse.lean`) as `Prop`s over traces, each with a `Decidable` instance, plus a
+  counterexample extractor and a note extractor for reporting.
 - Verdicts are theorems closed by `native_decide` (T1: trusts the Lean compiler)
   for each concrete input in the case file. There are no symbolic obligations:
   integer semantics, wraparound included, are evaluated exactly on the concrete
@@ -146,17 +163,24 @@ constructs (e.g. lane-divergent barrier ops, indirect calls) are hard errors.
   the last wait) are notes: reported, outside the theorems.
 - A refuted theorem without a certain counterexample is not a FAIL
   (`SpecResult.certain`; Lean prints `UNDECIDED <input> <spec>`): every spec of an
-  input whose evaluation stops with an error that is not a kernel error, a spec
-  of an input with an out-of-bounds metadata load or an `assume` that does not hold
-  that finds nothing certain on the evaluated events, P0-2 and P0-4 with nothing certain outside a cluster whose
-  barrier ledger does not converge, P0-4 with nothing certain outside a slot whose
-  bytes from another CTA balance only if a landing completes a later phase than its
-  issue order shows, and P1-1 with only pairs that the lockstep
-  contents, named barriers used with two counts or another round of a ledger that
-  does not converge might order. `lkv.py` reports it as UNDECIDED (a known limit), or as an ERROR when the evaluation error is
-  unexpected (`Eval.lean` `ErrKind`: the case or LKV needs a fix).
+  input whose evaluation stops with an error that is not a kernel error, a spec of an
+  input with an out-of-bounds metadata load or an `assume` that does not hold that
+  finds nothing certain on the evaluated events (after an `assume`, outside its
+  cluster), P0-2 and P0-4 with nothing certain outside a cluster whose barrier ledger
+  does not converge, P0-4 with nothing certain
+  outside a slot whose bytes from another CTA balance only if a landing completes a
+  later phase than its issue order shows, P0-6 with only `nb_open`s not marked certain
+  or inside a repeated region, or pairings that may depend on timing (an `arrive` ran,
+  a repeated region, an arrival the warp-ahead reading held, an instance that a role
+  outside it could have joined), P1-1 with only pairs that the lockstep
+  contents, named barriers used with two counts or another round of a ledger that does
+  not converge might order, and P1-2 with only pairs it cannot decide (U1-U4, and F
+  pairs in a cluster with a named barrier used with two counts or a ledger that does
+  not converge; `specs.md` "P1-2"). `lkv.py` reports it as UNDECIDED (a known limit),
+  or as an ERROR when the evaluation error is unexpected (`Eval.lean` `ErrKind`: the
+  case or LKV needs a fix).
 
-### The five P0 specs
+### The P0 specs
 
 | P0  | Spec                      | FAIL                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Note                                                                                                                                                                                                        |
 | --- | ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -166,16 +190,22 @@ constructs (e.g. lane-divergent barrier ops, indirect calls) are hard errors.
 | 4   | mbarrier protocol         | a parity other than 0/1; a stale parity (a repeated parity that neither provably re-checks the previous phase nor provably skips one, nor skips one under the lockstep credit); a first wait at phase 0 (parity 1 on the fresh barrier) on a slot that receives TMA bytes; under every fitting share assignment: in a waited phase, expect_tx bytes != bytes landing in it, TMA bytes landing in a phase nobody waits for or on a slot nobody waits on, a load not covered by an earlier expect_tx of its role in its phase (or by none at all), or transaction bytes that cannot be attributed to a phase                                     | a lap (a wait synchronizing with a later phase than the one after its previous wait); expect_tx bytes pending in a phase nobody waits for, or on a slot nobody waits on                                     |
 | 5   | Mask-elision soundness    | an elided input (it sets one of the case's `elision_flags`, e.g. FULL_TILES) violates P0-1 or P0-3: its P0-1/P0-3 violations are reported here, not there                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | the P0-1/P0-3 notes of an elided input                                                                                                                                                                      |
 
-**P0-6 named barriers convergent** (`lean/KV/Spec/NamedBarriers.lean`, P0-6 KIR
-only: `frontend/ptx/nbar.py` makes it from every variant's PTX, both families, whatever
-the translation): holds iff no `nb_open` event is reached (a named barrier the frontend
-cannot count because a deciding condition may differ between its participants) and, per
-CTA, the lockstep pairing of the roles' named-barrier operations completes every
-instance with matching counts and no role waiting forever. FAIL on a reached certain
-`nb_open` (thread-index divergence, a spin loop on a strong load), on a count no warps
-meet, and on a mismatch or a wait forever when every operation is a `sync` (the pairing
-is then forced); UNDECIDED otherwise (`specs.md`, "P0-6"). A P0 spec: part of the
-outcome and exit status; its own KIR, so P0-1..P0-5 KIRs and verdicts do not change.
+**P0-6 named barriers convergent** (`lean/KV/Spec/NamedBarriers.lean`, P0-6 KIR only:
+`frontend/ptx/nbar.py` makes it from every variant's PTX, both families, whatever the
+translation, and for a TLX/Triton launch with a preferred cluster also from its
+all-preferred geometry): holds iff no `nb_open` event is reached (a named barrier the
+frontend cannot count because a deciding condition may differ between its participants)
+and, per CTA, the lockstep pairing of the roles' named-barrier operations completes
+every instance with matching counts and no role waiting forever. FAIL on a reached
+certain `nb_open` (thread-index divergence, a spin loop on a strong load), on a count no
+warps meet, and on a mismatch or a wait forever reached before any `arrive` ran in the
+pairing, outside every repeated region (for a wait forever, every blocked role) and (a
+wait forever) with no arrival held by the warp-ahead reading (the pairing up to it is
+then forced: it stops undecided at an instance that a role outside it could have joined;
+an instance of a barrier without a thread count also completes once the roles outside it
+have ended, PTX ISA `exit`); UNDECIDED otherwise
+(`specs.md`, "P0-6"). A CTA with a stopped role trace is not paired. A P0 spec: part of
+the outcome and exit status; its own KIR, so P0-1..P0-5 KIRs and verdicts do not change.
 
 **P1-1 TMEM reuse ordered** (`lean/KV/Spec/TmemReuse.lean`, P1 KIR only): holds
 iff every pair of TMEM accesses of different roles that touch a common cell, one
@@ -189,6 +219,20 @@ on a pair only that reading orders; notes for same-role hazards, intra-role
 cross-warp pairs and blocked waits (`specs.md`, "P1-1"). Reported apart; its
 FAIL and UNDECIDED are part of the outcome and exit status only with
 `--p1-strict`, its ERRORs (a failed P1 translation, a Lean error) always.
+
+**P1-2 async store sources reuse ordered** (`lean/KV/Spec/StoreReuse.lean`, P1 KIR
+whose `p1` names it: the TTGIR frontend's PTX translation writes one per
+specialization, and all-preferred cluster geometry, with a bulk async store): holds
+iff every write of shared memory that overlaps the source of a TMA or bulk store, and
+every write of the tensormap the store reads, is ordered with it: issued after a
+`cp.async.bulk.wait_group{.read}` of the store's issuing thread completed the store's
+group and that wait happens before the write (the P1 ledger's sound happens-before,
+exact named barriers, the issuer's program order), or it happens before the store is
+issued. FAIL (F1 shared memory, F2 tensormap) on a write unordered even in the
+lockstep reading; undecided (U1-U4) where only that reading or an issuer order the KIR
+does not pin down orders it, for a load's landing its mbarrier's bytes do not order,
+and after a blocked wait; notes for a store its issuer never waits for and for blocked
+waits (`specs.md`, "P1-2"). Reported apart, like P1-1.
 
 All specs are checked on every input of the case file. The case file picks the shapes
 and conditions the kernel's callers produce (partial last tiles, more work items than
@@ -207,7 +251,11 @@ it names in `elision_flags` the flags that select a mask-elided fast path.
    `references/ir_ops.md`, `references/ir_ops_cute.md`), identical for every kernel. Its issuing-thread rows for CuTe TMA stores follow
    the waterfall loop ptxas emits (measured on hardware for the compilers the DSLs
    embed), and those for TMA loads and reduces the `elect.sync` the DSL emits
-   (`ir_ops_cute.md`, "Issuing threads"; `tests/cute` checks the PTX).
+   (`ir_ops_cute.md`, "Issuing threads"; `tests/cute` checks the PTX). A TMA load
+   through an in-kernel descriptor reads the descriptor its role's
+   `tensormap.cp_fenceproxy` wrote: assumed, not checked, that no other role rewrites
+   that slot and that its role does not while a load through it is in flight
+   (`frontend_ptx.md`, "TMA descriptors").
 3. `native_decide` (Lean compiler) for whole-trace verdicts.
 4. The phase ledger (`lean/KV/Spec/Ledger.lean`) for P0-2 and P0-4: its
    classification of waits (happens-before over the role traces, each role taken
@@ -219,11 +267,13 @@ it names in `elision_flags` the flags that select a mask-elided fast path.
    of transaction bytes to phases (under every fitting share assignment until
    one satisfies P0-4; another CTA's landings by its issue order, with the
    induction argument in the module doc, which needs non-negative transaction
-   counts: the evaluator rejects negative ones), iterated to a fixpoint (a cluster without one leaves P0-2
-   and P0-4 undecided). The Props are stated over the ledger's output, and the
-   ledger's soundness against mbarrier semantics is argued informally in its
-   module doc, not proved. A P0-2/P0-4 verdict therefore says the ledger found
-   no violation.
+   counts: the evaluator rejects negative ones; a wait for phase k returns only
+   after loads bringing the expect_tx bytes that surely precede that phase's
+   completion were issued, "Bytes carry order"), iterated to a fixpoint (a cluster
+   without one leaves P0-2 and P0-4 undecided). The Props are stated over the
+   ledger's output, and the ledger's soundness against mbarrier semantics is
+   argued informally in its module doc, not proved. A P0-2/P0-4 verdict therefore
+   says the ledger found no violation.
 5. For P1-1 only: the P1 op-table rows (TMEM footprints, the SF footprints of
    the CuTe DSL's TMEM SF layouts: SFA 4 columns, SFB 4 per 128 rows of N; the
    issuing threads; the cp/mma are issued by one elected lane, checked in the DSL's
@@ -256,18 +306,23 @@ it names in `elision_flags` the flags that select a mask-elided fast path.
    the same instructions), the recorded contents of metadata tensors (as for P0), and
    for arrive-based protocols the lockstep pairing of barrier instances with the
    warp-ahead reading (no role runs a whole instance ahead of the others on a named
-   barrier; the summary line counts the arrivals that reading held). A FAIL that needs
-   no arrive is a forced pairing (every warp blocks in every operation, outside every
-   repeated region), or a certain divergence the model admits (strong loads may differ
-   between threads; spin loops end in different iterations).
+   barrier; the summary line counts the arrivals that reading holds or may hold), and
+   the PTX ISA's rule that exited threads release a barrier without a thread count. A
+   FAIL that needs no arrive is a forced pairing (no `arrive` ran before it in the
+   pairing, outside every repeated region), or a certain divergence the model admits
+   (strong loads may differ between threads; spin loops end in different iterations).
 8. For P1-2 only (`specs.md`, "P1-2"): item 6's P1 ledger and role splitting; the
    PTX ISA reading that `cp.async.bulk.wait_group.read` also waits for the reads
    of the store's tensormap (its `.read` text lists them); `elect.sync` electing the
    same lane for the same membermask; the write set of the P1-2 pass (every PTX
    instruction that writes shared memory is a `smem_write`, refused, or statically
-   disjoint from every store source; `frontend_ptx.md`, "P1-2 pass"); the
+   disjoint from every store source, and every global write of a buffer that holds a
+   store's tensormap a `tmap_write` or refused; `frontend_ptx.md`, "P1-2 pass"); the
    participants of a named barrier being its roles' threads, every thread of the
-   CTA for a barrier whose count is the CTA's (`cta_threads`).
+   CTA for a barrier whose count is the CTA's (`cta_threads`). A load's landing
+   issued before the store is ordered only through its mbarrier's bytes (a phase
+   completes only with its expected bytes landed, an `expect_tx` applies to the phase
+   current at its issue: `StoreReuse.landed`), else undecided (U3).
 
 A verdict covers the inputs in the case file, not all shapes. The report says
 so.

@@ -20,7 +20,7 @@ references/kir.md change 11).
                                       tma.py: a TMA load's mbarrier slot and its fields
                                       cta_mask (multicast) and leader (cta_group::2)
     own_cta(tr, i, k, what)           tma.py: memory operand k is the issuing CTA's
-    bulk_s2cluster(tr, i)             tma.py: cp.async.bulk.shared::cluster.shared::cta
+    bulk_s2cluster(tr, i)             tma.py: the shared::cluster bulk copy and reduce
     async_store(tr, i, mnemonic)      mem.py: st.async / red.async into another CTA
     pair_mask(tr) -> expression       the CTAs 3 << (rank & ~1) of the issuing CTA's pair
                                       (a cta_group::2 tmem access in P1)
@@ -87,12 +87,12 @@ Events (the legacy frontend's, references/frontend_cute.md "Clusters"):
     of an even number of CTAs.
 A load (TMA or bulk) must write the issuing CTA's shared memory unless it multicasts:
 a destination Remote of another rank is refused (the mbarrier must be in the destination
-CTA, and KIR has no remote tma_load). mbarrier.complete_tx and anything else on another
-CTA are gaps.
+CTA, and KIR has no remote tma_load). mbarrier.complete_tx and any other use of a Remote
+are gaps (ld/st/atom/red on .shared::cluster have no op table row: errors).
 
 Issuing. A remote arrive and a commit follow the ISA (per executing
 thread, as their shared::cta forms). The ptxas lowering of a multicast or cta_group::2 TMA
-load and of a shared::cluster bulk copy that several lanes of a warp execute was not
+load and of a shared::cluster bulk copy or reduce that several lanes execute was not
 measured on hardware (tests/ptx/test_gpu_tma_issue.py covers the other forms), so such an
 instruction is translated only where at most one lane of each warp executes it
 (elect.sync, a lane test), once per executing thread, and refused otherwise.

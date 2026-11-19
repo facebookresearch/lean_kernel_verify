@@ -13,12 +13,16 @@ tests/lean/p1_2/expected.txt; run by tests/lean/run_all.sh.
 The fixtures model the TLX/Triton patterns P1-2 was written for: an epilogue whose 128
 threads write a staging buffer in shared memory and whose elected lane of warp 0 stores it
 with a TMA store (`staging`, single and double buffered, with and without the `.read` wait
-and the named barrier); a partition that rebuilds an in-kernel tensor descriptor in global
-scratch at the top of every work item while the previous item's stores through it may still
-read it (`tmap_rebuild`); a cross-role handoff through mbarriers or a named barrier
-(`handoff`); the issuing thread's own program order (`same_thread`); a TMA load landing in a
-store source, completed through its mbarrier before the store or not (`landing`), also in a
-2-CTA pair whose loads complete on the pair leader's mbarrier (`pair_chain`).
+and the named barrier; `staging_wide`, its CTA-wide barrier without `cta_threads`); a
+partition that rebuilds an in-kernel tensor descriptor in global scratch at the top of
+every work item while the previous item's stores through it may still read it
+(`tmap_rebuild`); a cross-role handoff through mbarriers or a named barrier (`handoff`);
+the issuing thread's own program order (`same_thread`); a TMA load landing in a store
+source, completed through its mbarrier before the store or not (`landing`), also in a 2-CTA
+pair whose loads complete on the pair leader's mbarrier (`pair_chain`); a write after a
+wait that never returns in the lockstep model (`blocked`, U4; `blocked_cross`, a tensormap
+write in another CTA); an st.async into the other CTA's store source (`cluster_remote`);
+an `assume` that does not hold (`assume_stop`).
 """
 
 import json

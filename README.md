@@ -2,16 +2,19 @@
 
 LKV checks Blackwell GPU kernels written in TLX/Triton or the CuTe DSL for hangs,
 out-of-bounds or wrapped addresses, missing or duplicate output writes, mbarrier
-protocol errors and, for CuTe, unordered reuse of tensor memory (TMEM). Every check is
+protocol errors, named barriers that not all their warps reach alike, and unordered
+reuse of tensor memory (TMEM, CuTe) or of the shared memory and tensormaps a TMA store
+may still read (TLX/Triton). Every check is
 decided in Lean 4, with no GPU and no hand-written model of the kernel: the kernel's
-real host code and compiler produce its IR on a CPU-only machine, a mechanical
-frontend turns the IR into a small kernel IR (KIR), and Lean evaluates every role of
+real host code and compiler produce its PTX and IR on a CPU-only machine, a mechanical
+frontend turns one of them (TLX/Triton: the PTX by default; CuTe: the IR) into a small
+kernel IR (KIR), and Lean evaluates every role of
 every CTA on the concrete inputs of a case file and proves or refutes each spec by
 `native_decide`.
 
 Verdicts cover the inputs of the case file, not every shape. LKV does not check
-numerics, performance, CUDA C++ kernels, TLX/Triton 2-CTA kernels, or race and
-deadlock freedom in general ([Limits](#limits)).
+numerics, performance, CUDA C++ kernels, or race and deadlock freedom in general
+([Limits](#limits)).
 
 ## Status
 
@@ -33,15 +36,15 @@ deadlock freedom in general ([Limits](#limits)).
 | P0-5 mask-elision soundness         | an input on a host-selected mask-free fast path that violates P0-1 or P0-3                                                                                                 |
 | P0-6 named barriers convergent      | a named-barrier instance (`bar.sync`, `bar.arrive`) that the warps its count names do not all reach with one count, or a wait on one that never ends (from the PTX)       |
 | P1-1 TMEM reuse ordered (CuTe only) | two tcgen05 ld/st/cp/mma accesses of different roles to a common TMEM cell, one of them a write, that the kernel's barriers and waits do not order                         |
-| P1-2 async store sources reuse ordered (TLX/Triton, PTX translation) | a write to the shared memory or the tensormap a TMA or bulk store may still read (before its `cp.async.bulk.wait_group.read`, resp. its full wait) that the kernel's barriers and waits do not order after that read |
+| P1-2 async store sources reuse ordered (TLX/Triton, PTX translation) | a write to the shared memory or the tensormap a TMA or bulk store may still read (before a `cp.async.bulk.wait_group{.read}` of its issuing thread completed its group: `.read` covers both) that the kernel's barriers and waits do not order after that read |
 
 Each (compiled variant, input, spec) gets one of four verdicts: **PASS** (the theorem
 is proved), **FAIL** (a certain counterexample, reported at the kernel's source line),
 **ERROR** (LKV, the case or the environment failed and must be fixed) or **UNDECIDED**
 (a known limit, such as a construct the frontend refuses by design). Findings that can
 be harmless are notes and never change a verdict. A run exits with 1 if a verdict
-FAILs, else 2 on any ERROR, else 0 (P1-1's FAILs count only with `--p1-strict`). The
-exact definitions are in [references/specs.md](references/specs.md).
+FAILs, else 2 on any ERROR, else 0 (the FAILs of P1-1 and P1-2 count only with
+`--p1-strict`). The exact definitions are in [references/specs.md](references/specs.md).
 
 ## How it works
 
@@ -72,10 +75,11 @@ names the translation.
 
 The frontends keep only the ops that define control flow, addresses, masks, barrier
 operands or events, and stop with an error if a dropped op feeds one of them. A verdict
-rests on the compiler IR (nothing below it is checked), the op tables,
-`native_decide`, and for P0-2, P0-4 and P1-1 a phase-ledger algorithm that is argued
-sound but not proved. The architecture and the trust base are in
-[references/design.md](references/design.md).
+rests on the compiler output it translates (the PTX or the IR; nothing below it is
+checked), the op tables, `native_decide`, for P0-2, P0-4, P1-1 and P1-2 a phase-ledger
+algorithm that is argued sound but not proved, and for P0-6 the barrier pass's
+uniformity rules and, for arrive-based protocols, the warp-ahead reading. The
+architecture and the trust base are in [references/design.md](references/design.md).
 
 ## Requirements
 
@@ -145,11 +149,12 @@ python3 -I tests/e2e/test_e2e.py Unit    # lkv.py's reading of Lean's output, it
 python3 -I tests/ptx/test_translate.py   # PTX translation, pure Python (also the other tests/ptx/test_*.py)
 ```
 
-The other tests need the frontends: `tests/ttgir/test_translate.py` and
-`tests/ttgir/test_ttgir.py` (Triton with TLX), `tests/cute/test_frontend.py` (CuTe
-DSL), `tests/e2e/test_e2e.py EndToEnd` (`lkv.py run`) and
-`tests/ttgir/test_gpu_parity.py` (CPU-dumped TTGIR equals the TTGIR of a real launch;
-needs a Blackwell GPU).
+The other tests need the frontends: `tests/ttgir/test_translate.py`,
+`tests/ttgir/test_ttgir.py` and `tests/ttgir/test_ptx_capture.py` (Triton with TLX),
+`tests/cute/test_frontend.py` and `tests/cute/test_ptx_capture.py` (CuTe DSL),
+`tests/e2e/test_e2e.py EndToEnd` (`lkv.py run`) and `tests/ttgir/test_gpu_parity.py`,
+`tests/cute/test_gpu_parity.py` (CPU-dumped IR equals the IR of a real launch; need a
+Blackwell GPU).
 
 ## Repository layout
 
@@ -181,16 +186,21 @@ tests/         lean/ (Lean layer), cute/, ttgir/ and ptx/ (frontends), e2e/ (lkv
 ## Limits
 
 - Verdicts cover only the case's inputs and the compiled variants they select.
-- Clusters: CuTe DSL 2-CTA kernels get the P0 specs (remote barriers, multicast and
-  `cta_group::2` TMA loads and commits, distributed shared-memory bulk copies, the
-  cluster barrier) and P1-1 (a `cta_group::2` MMA or copy accesses the TMEM of both
-  CTAs of its pair).
-- Refused with an error naming the construct: TLX/Triton 2-CTA kernels and cross-CTA
-  constructs (remote barriers, distributed shared memory), im2col TMA, TTGIR
-  loop-carried pointers and side-effecting inline asm. CuTe DSL kernels are supported
-  on sm_100 with `nvidia-cutlass-dsl` 4.4.2 and 4.6.1.
-- Not checked: anything below the compiler IR, numerics, tcgen05 fences, TMEM lifetime
-  and P1-1 on TLX/Triton. A P0-2 or P0-4 PASS means the phase ledger found no
+- Clusters: CuTe DSL 2-CTA kernels and, in the PTX translation, TLX/Triton cluster
+  kernels (also with cluster launch control) get the P0 specs (remote barriers,
+  multicast and `cta_group::2` TMA loads and commits, distributed shared-memory bulk
+  copies, the cluster barrier); CuTe ones also P1-1 (a `cta_group::2` MMA or copy
+  accesses the TMEM of both CTAs of its pair), TLX/Triton ones P1-2. A TLX/Triton
+  launch with a preferred cluster is checked (PTX translation) with every cluster
+  regular and with every cluster preferred; a CuTe one is refused.
+- Refused with an error naming the construct: in the legacy TTGIR translation
+  (`--frontend legacy`), TLX/Triton 2-CTA kernels and cross-CTA constructs (remote
+  barriers, distributed shared memory), launches with a preferred cluster, loop-carried
+  pointers and side-effecting inline asm; in every translation, im2col TMA. CuTe DSL
+  kernels are supported on sm_100 with `nvidia-cutlass-dsl` 4.4.2 and 4.6.1.
+- Not checked: anything below the compiler output LKV translates (the PTX, or the IR),
+  numerics, tcgen05 fences, TMEM lifetime, P1-1 on TLX/Triton and P1-2 on CuTe and in
+  the legacy TTGIR translation. A P0-2 or P0-4 PASS means the phase ledger found no
   violation, not that the kernel is free of deadlocks or races.
 
 The full list is in [SKILL.md](SKILL.md) ("Limits") and

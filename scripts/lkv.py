@@ -7,9 +7,10 @@
 
     python3 -I lkv.py run CASE.json [--src DIR] [--out DIR] [--inputs a,b]
                                     [--target sm_100|sm_103] [--frontend legacy|ptx]
-                                    [--jobs N] [--no-p1] [--p1-strict]
-    python3 -I lkv.py check KIR.json... --out DIR [--src DIR] [--jobs N] [--p1-strict]
-    python3 -I lkv.py export REV OUT_DIR PATH...
+                                    [--jobs N] [--timeout S] [--no-p1] [--p1-strict]
+    python3 -I lkv.py check KIR.json... --out DIR [--name NAME] [--src DIR] [--jobs N]
+                                    [--timeout S] [--p1-strict]
+    python3 -I lkv.py export REV OUT_DIR PATH... [--package-root R]
 
 run    dump with the case's frontend (a buck2 binary: CuTe DSL if the case has a
        "builder", the binary of its `dsl`, else TTGIR for TLX/Triton; only TTGIR compiles
@@ -25,7 +26,10 @@ run    dump with the case's frontend (a buck2 binary: CuTe DSL if the case has a
        family's: ptx for TLX/Triton cases, legacy for CuTe DSL ones): legacy translates
        the TTGIR / CuTe DSL MLIR, ptx the kernel's PTX (references/frontend_ptx.md); run
        sets LKV_FRONTEND for the frontend, and the report names the translation
-       (report.json "translation").
+       (report.json "translation"). The PTX translation also checks a TTGIR variant whose
+       launches prefer other cluster dims in its all-preferred geometry, as a variant of
+       its own (`<spec>@cluster<dims>`, with the inputs whose grid the dims divide; a
+       failed one counts for those inputs).
 check  the Layer-2 half of `run` on existing KIR files (e.g. tests/lean fixtures).
 export write fbsource PATHs at REV under OUT_DIR with read-only `sl files`/`sl cat`: a
        file with the first-party modules it imports at OUT_DIR/<path below fbcode/>
@@ -53,8 +57,11 @@ TTGIR variant whose launches prefer other cluster dims one for that all-preferre
 geometry (`<spec>@cluster<dims>.nb.json`, as the PTX translation's P0 KIR). run checks
 it like a P0 KIR; its verdicts are P0 verdicts (the per-input table, the summary, the
 findings, the outcome and exit status) and report.json keeps them in "variants_nb" (with
-the frontend's classification of every barrier site, "nb_sites") and "nb_not_checked"
-(variants whose barrier pass refused or failed, or whose P0-6 KIR to_kir did not write).
+the frontend's classification of every barrier site, "nb_sites", and "nb_held", the most
+arrivals the warp-ahead reading holds or may hold on one input) and "nb_not_checked"
+(variants whose barrier pass refused or failed, or whose P0-6 KIR to_kir did not write);
+report.md lists the variants whose P0-6 verdicts rest on the warp-ahead reading and the
+barrier sites the pass could not count.
 
 A verdict is per (KIR variant, input, spec), and it has one of four outcomes:
   PASS       the theorem `KV.Holds` was proved by native_decide (a variant gets verdicts
@@ -74,11 +81,18 @@ A verdict is per (KIR variant, input, spec), and it has one of four outcomes:
              refuted without a certain counterexample (Lean prints
              `UNDECIDED <input> <spec>`: an `evaluation error (model limit)` such as a
              division by zero, a role trace stopped at an out-of-bounds metadata load
-             or a model assumption (KIR `assume`) that does not hold before anything
-             certain was found, a cluster whose barrier ledger does not
-             converge (P0-2, P0-4), or P1-1 pairs that only the lockstep contents or
-             named barriers used with two counts might order), or the variant is a
-             construct the frontend refuses by design (every spec of its inputs).
+             or a model assumption (KIR `assume`) that does not hold, with nothing
+             certain found (for an assumption, in the clusters where no trace stopped
+             at one), a cluster whose barrier ledger does not
+             converge (P0-2, P0-4), another CTA's TMA bytes that balance only if a
+             landing completes a later phase than its issue order shows (P0-4), a named
+             barrier P0-6 cannot count or pair for certain, P1-1 pairs that only the
+             lockstep contents or named barriers used with two counts might order, or
+             P1-2 pairs that only the lockstep reading or an issuing thread's program
+             order the KIR does not pin down might order, that involve a load's landing
+             not known to complete before the store is issued, or that follow a wait
+             that never returns in the lockstep model), or the variant is a construct
+             the frontend refuses by design (every spec of its inputs).
 Notes are findings that are not certain violations (references/specs.md); they are listed
 per spec and source line and never change a verdict. Verdicts cover only the case's
 inputs.
@@ -91,7 +105,8 @@ made no launch (TTGIR: of the case's `kernel`). Any other exception of the host 
 the frontend.
 
 Outcome of a run (report.md "Result", report.json "result") and exit status, from the P0
-verdicts, P1-1's ERRORs, and P1-1's FAIL and UNDECIDED with --p1-strict:
+verdicts (P0-6 included), the P1 specs' ERRORs, and their FAIL and UNDECIDED with
+--p1-strict:
   1 FAIL       some verdict FAILs: a certain violation, whatever else failed;
   2 ERROR      no FAIL, but something failed: an ERROR verdict, a variant that failed to
                translate or check, a pipeline error, or no KIR at all;
@@ -149,7 +164,8 @@ TITLES = {
 }
 LABELS = ["P0-1", "P0-2", "P0-3", "P0-4", "P0-5"]
 # P1 specs: decided on the P1 KIR (`<kernel>__<digest>.p1.json`, `<spec>.p1.json`) and
-# reported in their own section; they never change the exit status unless --p1-strict.
+# reported in their own section; their FAIL and UNDECIDED change the exit status only with
+# --p1-strict, their ERRORs always.
 LABELS_P1 = ["P1-1", "P1-2"]
 # P0-6: decided on the P0-6 KIR (`.nb.json`) of every variant, reported with the P0 specs.
 LABELS_NB = ["P0-6"]
@@ -951,8 +967,9 @@ def names(us):
 
 
 def reasons(prefix, variants, no_verdicts, counts):
-    """{outcome: report lines} of one part of a run (P0, or P1-1 with `prefix`): its
-    failures (ERROR) always, its certain violations and known limits only if `counts`."""
+    """{outcome: report lines} of one part of a run (P0, or with `prefix` P0-6 or one P1
+    spec): its failures (ERROR) always, its certain violations and known limits only if
+    `counts`."""
     fails, evals, inconsistent, refuted = tally(variants)
     errs, gaps = (
         [u for u in no_verdicts if u["outcome"] == o] for o in ("ERROR", "UNDECIDED")
@@ -1434,7 +1451,9 @@ P1_TEXT = {
             "wait_group of its issuing thread completed its group, under sound happens-before",
             '(references/specs.md, "P1-2"). A FAIL is a pair unordered even under the most',
             "generous reading; an UNDECIDED input has pairs only the lockstep reading, or a",
-            "program order of the issuing thread the KIR does not pin down, orders.",
+            "program order of the issuing thread the KIR does not pin down, orders, pairs with",
+            "a load landing not known to complete before the store is issued, or pairs after",
+            "a wait that never returns in the lockstep model.",
         ],
         [
             "N1 a bulk store its issuing thread never waits for; N2 a blocked wait makes",
@@ -1582,8 +1601,9 @@ def markdown(report):
         "evaluation error). UNDECIDED: not decided where LKV has a known limit (a construct",
         "the frontend refuses by design, an out-of-bounds metadata load or an assumption",
         "that does not hold, a division by zero,",
-        "a barrier ledger that does not converge, P1-1 pairs only the lockstep contents",
-        "order); not an error. Exit status: 1 FAIL, 2 ERROR, else 0. Notes are findings that",
+        "a barrier ledger that does not converge, a named barrier P0-6 cannot count or pair",
+        "for certain, P1 pairs neither proved ordered nor certainly unordered: each P1 section",
+        "says why); not an error. Exit status: 1 FAIL, 2 ERROR, else 0. Notes are findings that",
         "are not violations; they never change a verdict (references/specs.md).",
         "",
     ]
@@ -1740,7 +1760,7 @@ def main():
     for name in ("run", "check"):
         p = sub.add_parser(name)
         if name == "run":
-            p.add_argument("case", help="case file (cases/<frontend>/<case>.json)")
+            p.add_argument("case", help="case file (references/cases.md)")
             p.add_argument("--out", help="output directory")
             p.add_argument(
                 "--inputs", help="comma-separated subset of the case's inputs"
@@ -1764,7 +1784,11 @@ def main():
             )
             p.add_argument("--out", required=True, help="output directory")
             p.add_argument("--name", default="kir", help="report title")
-        p.add_argument("--src", help="exported source tree (default: the case's)")
+        p.add_argument(
+            "--src",
+            help="exported source tree (run: default the case's; check: none, so findings "
+            "keep their IR locs)",
+        )
         p.add_argument(
             "--jobs",
             type=int,
@@ -1777,8 +1801,8 @@ def main():
         p.add_argument(
             "--p1-strict",
             action="store_true",
-            help="P1-1's FAIL and UNDECIDED also count toward the outcome and exit status "
-            "(its ERRORs always do)",
+            help="the P1 specs' FAIL and UNDECIDED also count toward the outcome and exit "
+            "status (their ERRORs always do)",
         )
         if name == "run":
             p.add_argument(
@@ -1786,9 +1810,12 @@ def main():
                 dest="p1",
                 action="store_true",
                 default=True,
-                help="also check the P1 KIRs (default; CuTe only)",
+                help="also check the P1 KIRs (default; CuTe: P1-1, TLX/Triton in the PTX "
+                "translation: P1-2)",
             )
-            p.add_argument("--no-p1", dest="p1", action="store_false", help="skip P1-1")
+            p.add_argument(
+                "--no-p1", dest="p1", action="store_false", help="skip the P1 checks"
+            )
     p = sub.add_parser("export")
     p.add_argument("rev")
     p.add_argument("out", type=Path)

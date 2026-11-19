@@ -7,7 +7,8 @@ LICENSE file in the root directory of this source tree.
 
 /-
 KIR abstract syntax: one constructor per KIR node of `references/kir.md`, same names
-and field order (table fields first, then `w`, then `addr`, then `loc`).
+and field order (table fields first, then `w`, then `addr`, then `loc`; the few exceptions
+are listed at the top of references/kir.md).
 `frontend/emit_lean.py` produces values of these types from KIR JSON; nothing here is
 kernel specific. JSON details fixed by `frontend/kir.py` (inline event statements,
 `w` on tensor expressions, defaults) are mirrored here. The checker sees one input at a
@@ -118,7 +119,8 @@ inductive Event where
   | tma_load (desc : String) (coords : List Expr) (bar : String) (idx : Expr) (cta_mask : Option Expr)
       (leader : Bool) (loc : Loc)
   /-- `bytes` transaction bytes completing on the slot of CTA `cta`, asynchronously, from a copy
-  without a global source (a shared::cluster bulk copy or st.async into another CTA). -/
+  without a global source (a shared::cluster bulk copy or reduce, st.async or red.async into
+  another CTA). -/
   | complete_tx (bar : String) (idx bytes : Expr) (cta : Option Expr) (loc : Loc)
   | tma_store (desc : String) (coords : List Expr) (loc : Loc)
   | tma_reduce (desc : String) (coords : List Expr) (loc : Loc)
@@ -132,8 +134,8 @@ inductive Event where
   | tmem (inst : TmemInst) (warp : Expr) (rects : List TmemRect) (cta_mask : Option Expr) (site : Loc) (loc : Loc)
   /-- tcgen05.wait::ld (`ld = true`) or wait::st of the role (P1 KIR). -/
   | tmem_wait (ld : Bool) (loc : Loc)
-  /-- bar.sync (`sync = true`) or bar.arrive of the whole role on named barrier `id` with
-  `count` threads (P1 KIR, P0-6 KIR); `all` (P0-6 KIR only): the instruction names
+  /-- bar.sync or bar.red (`sync = true`) or bar.arrive of the whole role on named barrier
+  `id` with `count` threads (P1 KIR, P0-6 KIR); `all` (P0-6 KIR only): the instruction names
   no thread count, a barrier for all threads of the CTA (`count`), which threads that exit
   release (PTX ISA `exit`). -/
   | named_bar (id count : Expr) (sync : Bool) (all : Bool) (loc : Loc)

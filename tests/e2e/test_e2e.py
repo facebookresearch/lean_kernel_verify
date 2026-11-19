@@ -19,10 +19,12 @@
   ERROR (a refused all-preferred cluster geometry `<spec>@cluster<dims>` for the inputs
   of its spec whose grid the dims divide); a spec, or its all-preferred geometry, for
   which to_kir wrote neither a P0-6 KIR nor a P0-6 failure is an ERROR too; the outcome
-  and exit status are FAIL (1) on any FAIL, else ERROR (2) on any
-  failure, else UNDECIDED (0) on anything a known limit leaves open, else PASS (0); P1-1
-  ERRORs always count, its FAIL and UNDECIDED only with --p1-strict; inputs the host
-  rejects count as none; an export's revision marker names the analyzed revision;
+  and exit status are FAIL (1) on
+  any FAIL, else ERROR (2) on any failure, else UNDECIDED (0) on anything a known limit
+  leaves open, else PASS (0); the P1 specs' ERRORs always count, their FAIL and
+  UNDECIDED only with --p1-strict; a preferred geometry's P1-2 KIR
+  (`<spec>@cluster<dims>.p1.json`) is a P1 variant of its own; inputs the host rejects
+  count as none; an export's revision marker names the analyzed revision;
   --target reaches the TTGIR dump and is refused for CuTe cases (exit status 2, never 1);
   `run` translates with --frontend, else $LKV_FRONTEND, else the family's default (ptx for
   TLX/Triton, legacy for CuTe);

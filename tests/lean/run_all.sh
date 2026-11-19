@@ -4,7 +4,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-# run_all.sh: Layer-2 test suite (KIR validator, Lean evaluator, P0 specs).
+# run_all.sh: Layer-2 test suite (KIR validator, Lean evaluator, P0 and P1 specs).
 #
 # Usage: tests/lean/run_all.sh     exit 0 iff every check below passes
 #

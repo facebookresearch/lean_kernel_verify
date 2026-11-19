@@ -4,7 +4,9 @@ A case file names the kernel source at a revision, its public host entry point, 
 concrete inputs and the annotations the specs need. Verdicts cover only its inputs.
 Cases for public kernels go in `cases/`. `tests/e2e/cases/probe_tlx.json` (TLX/Triton)
 and `tests/e2e/cases/probe_cute.json` (CuTe DSL, builder in `tests/e2e/kernels/`) are
-minimal examples; each `description` says what its inputs trigger.
+minimal examples, and `tests/e2e/cases/store_reuse_staging_tlx.json` /
+`store_reuse_rebuild_tlx.json` are P1-2 examples (racy and drained inputs of two
+synthetic TLX kernels); each `description` says what its inputs trigger.
 
 ## Write a new case
 

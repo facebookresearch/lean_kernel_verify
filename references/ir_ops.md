@@ -1,11 +1,12 @@
 # IR op tables (trust base item 2)
 
-One meaning per IR op, identical for every kernel. The CuTe DSL table is in
-`ir_ops_cute.md`. Executable form of this TTGIR table: `frontend/ttgir/op_table.py`
-(classification and operand layouts) and `frontend/ttgir/to_kir.py` (translation); keep
-them in sync with this file.
+One meaning per IR op, identical for every kernel. This TTGIR table is the TTGIR
+translation's (`--frontend legacy`); TLX/Triton kernels default to the PTX translation,
+whose table is `ir_ops_ptx.md`. The CuTe DSL table is in `ir_ops_cute.md`. Executable
+form of this TTGIR table: `frontend/ttgir/op_table.py` (classification and operand
+layouts) and `frontend/ttgir/to_kir.py` (translation); keep them in sync with this file.
 
-## TTGIR (Triton with TLX, target cuda:100)
+## TTGIR (Triton with TLX, target cuda:100 or cuda:103)
 
 Sources for the semantics: the op definitions (`include/triton/Dialect/*/IR/*Ops.td`,
 operand order = printed `assemblyFormat`) and their NVIDIA lowering
@@ -23,7 +24,10 @@ it appears (it could hide an event).
 
 Module attributes: `ttg.num-warps` (warps of the `default` role) is required and
 `ttg.threads-per-warp` must be 32; `ttg.target` must be the target the dump compiled for
-(`cuda:100` = sm_100, `cuda:103` = sm_103), recorded as the KIR `target`.
+(`cuda:100` = sm_100, `cuda:103` = sm_103), recorded as the KIR `target`. `ttg.num-ctas`
+must be 1 and `ttng.two-ctas` / `tlx.enable_paired_cta_mma` not true (multi-CTA layouts,
+2-CTA paired MMA: error); `ttg.cluster-dim-x/y/z` (default 1) give the cluster, which CLC
+and `nvg.cluster_id` need to be 1x1x1.
 
 Notation: `[p]` = the event is emitted under `if p` (omitted when `p` is the constant
 true, the event is removed when it is the constant false). `bar(x)` resolves a memdesc
@@ -48,7 +52,7 @@ thread of the issuing role (leader pattern), so roles have `threads_per_issue = 
 | `tt.load %ptr [, %mask [, %other]]` | `gload(T, offsets, mask)` | Pointer-based global read. `T` = kernel pointer argument the pointer derives from; offsets = element offsets (below). A scalar access has shape `[1]`. If the (scalar, integer) result is on the slice it is also the value `load(T, [offset])`; masked: `select(mask, load(T, [select(mask, offset, 0)]), other)` (a disabled lane reads nothing, so its index is never out of range). T becomes metadata; the analyzed kernel must not write it nor any tensor sharing its storage (error). |
 | `tt.store %ptr, %val [, %mask]` | `gstore(T, offsets, mask)` | Pointer-based global write (the stored value is data). |
 | `tt.atomic_rmw op, sem, scope, %ptr, %val [, %mask]` / `tt.atomic_cas` | `gatomic(T, offsets, mask)` | Read-modify-write; footprint only. |
-| `ttng.tensormap_create %desc_ptr, %g, [box], [gdim], [gstride], [estride] {elem_type}` | none, or `let`s | Writes a TMA descriptor into `%desc_ptr` (a `ttg.global_scratch_alloc`) for base pointer `%g` (must be a kernel pointer argument, offset 0). Operand lists are innermost-first; KIR shape/box are outermost-first; `gstride` is in bytes (dims > 0); `gdim` is unsigned (the tensormap `global_dim` is a b32 that TMA reads unsigned: -64 is 2^32 - 64 elements), so KIR extents are the i32 operands zero-extended to i64. If every extent is a host-side expression (params, constants) loads through it read a `desc` tensor (named by `%desc_ptr`; another loaded descriptor printed with that name, in a sibling region: error) with those shape/strides; otherwise `let <d>.shape.i` / `<d>.stride.i` are emitted here and loads through it are an error. Stores and reduces through it always use the TMA footprint on `%g`. Element strides must be 1, `interleave_layout` 0, `elem_type` one of the byte-sized types 0-12 of the PTX `tensormap.replace .elemtype` encoding with the size of `%g`'s elements (13-15, packed sub-byte data: error). A second `tensormap_create` into the same scratch buffer: error (which one a use reads would depend on the execution order). |
+| `ttng.tensormap_create %desc_ptr, %g, [box], [gdim], [gstride], [estride] {elem_type}` | none, or `let`s | Writes a TMA descriptor into `%desc_ptr` (a `ttg.global_scratch_alloc`) for base pointer `%g` (must be a kernel pointer argument, offset 0). Operand lists are innermost-first; KIR shape/box are outermost-first; `gstride` is in bytes (dims > 0); `gdim` is unsigned (the tensormap `global_dim` is a b32 that TMA reads unsigned: -64 is 2^32 - 64 elements), so KIR extents are the i32 operands zero-extended to i64. If every extent and stride is a host-side expression (params, constants) loads through it read a `desc` tensor (named by `%desc_ptr`; another loaded descriptor printed with that name, in a sibling region: error) with those shape/strides; otherwise `let <d>.shape.i` / `<d>.stride.i` are emitted here and loads through it are an error. Stores and reduces through it always use the TMA footprint on `%g`. Element strides must be 1, `interleave_layout` 0, `elem_type` one of the byte-sized types 0-12 of the PTX `tensormap.replace .elemtype` encoding with the size of `%g`'s elements (13-15, packed sub-byte data: error). A second `tensormap_create` into the same scratch buffer: error (which one a use reads would depend on the execution order). |
 | `ttng.async_clc_try_cancel %b, %resp` | `tma_load(desc __clc_response, [0], bar(%b))` | Cluster Launch Control request: its 16-byte response is written through the async proxy and completes 16 transaction bytes on `%b`. `__clc_response` is a constant 16 x 1-byte descriptor. Clusters > 1 CTA: error. |
 | `ttng.clc_query_cancel %resp` (x, y, z) | `x := load(__clc_schedule, [pid.x, __clc_k]); __clc_k := __clc_k + 1`; y, z := `x == -1 ? -1 : 0` | Decodes the response: id of the cancelled CTA, or -1. The k-th query of a role returns the input's CLC schedule entry k for its CTA (`frontend_ttgir.md`, CLC). Advances the role's query counter even if unused, so it is kept like an event (also in a branch with no other event). Multi-dimensional grids: error. |
 | `tt.assert %cond, "msg"` | `assert(cond, msg)` | Scalar condition only (tensor condition: error). |
@@ -123,7 +127,7 @@ i32 tensor terms).
 | `scf.for %iv = lb to ub step s iter_args(...)` | `let` carried values; `for iv in [lb, ub) step s` (i32 bounds only; `scf.for unsigned`, i.e. unsignedCmp, is an error since KIR `for` compares signed); carried values reassigned at the end of the body through `.next` temporaries; results bound by a `let` of their carried variable after the loop (sibling loops reuse the `%argN` names) |
 | `scf.if` | results declared `let r := 0` before, assigned in both branches |
 | pointers carried by `scf.for` / `scf.while` or yielded by `scf.if` (the `ptrs += BLOCK` idiom) | error: KIR variables are integers |
-| `scf.while (args) {before; scf.condition(c) fwd} do {after; scf.yield}` | before-region emitted before the loop and at the end of the body; `while c` with `max_iters` = 65536 fuel; after-arguments assigned from `fwd` in parallel (through `.in` temporaries: they reuse the before-arguments' names). A loop that carries nothing prints without `(args)`: `scf.while : () -> () {` (e.g. a spin loop on a flag) |
+| `scf.while (args) {before; scf.condition(c) fwd} do {after; scf.yield}` | before-region emitted before the loop and at the end of the body; `while c` with `max_iters` = 65536 fuel; after-arguments assigned from `fwd` in parallel (through `.in` temporaries: they print with the before-arguments' names and share their variables where that is exact, `frontend_ttgir.md`, "KIR produced", Variables). A loop that carries nothing prints without `(args)`: `scf.while : () -> () {` (e.g. a spin loop on a flag) |
 | `cf.cond_br` / `cf.br` (early `return`) in a kernel or partition body | nested `if`s over the acyclic block graph; loops or block arguments: error |
 | `scf.yield`, `scf.condition`, `ttg.warp_yield`, `ttg.warp_return`, `tt.return` | consumed by their parent |
 
@@ -137,6 +141,7 @@ minimumf maxnumf minnumf truncf extf sitofp uitofp fptosi fptoui cmpf bitcast`,
 memdesc_subslice`, `ttng.tmem_alloc tmem_load tmem_store tmem_subslice tmem_copy`,
 `tt.trans reshape split join cat bitcast reduce reduce.return scan scan.return`),
 pure `tt.elementwise_inline_asm` (side-effecting asm is an error), fences and waits that
-order memory but are not P0 events (`ttng.fence_async_shared`, `ttng.fence`,
-`ttng.async_tma_store_wait`, `ttng.tensormap_fenceproxy_acquire`, `ttg.barrier`), and
-`tt.print`.
+order memory but are not events of the P0 KIR (`ttng.fence_async_shared`, `ttng.fence`,
+`ttng.async_tma_store_wait`, `ttng.tensormap_fenceproxy_acquire`, `ttg.barrier`, whose
+named barrier P0-6 checks in the PTX whatever the translation, `frontend_ptx.md`, "The
+P0-6 barrier pass"), and `tt.print`.

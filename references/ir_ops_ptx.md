@@ -15,7 +15,8 @@ more trust items are not ISA facts: the Triton warp-specialize dispatch protocol
 Executable form: `frontend/ptx/ops.py` (normalization and classes), `interp.py` (values,
 collectives, special registers), `mem.py` (global memory, parameters, mbarriers),
 `tma.py` (TMA, bulk copies, tensormaps), `sync.py` (tcgen05 in P0, CLC), `cluster.py`
-(cluster scope) and `tmem.py` (the P1 pass); keep them in sync with this file.
+(cluster scope), `tmem.py` (the P1 pass, P1-1 events) and `bulk.py` (its P1-2 events);
+keep them in sync with this file.
 `python3 -I frontend/ptx/coverage.py PTX...` classifies every instruction of PTX files and
 lists the mnemonics without a row.
 
@@ -28,7 +29,8 @@ defaults (`bra.uni`, the `.tile` load mode, setp's comparison) are dropped; an
 arithmetic, comparison, move or conversion op on any floating-point type is `<op>.f`;
 `.shared::cta` is `.shared`, `.param::entry` is `.param`; mbarrier's default
 `.sem.scope` is dropped (`.release.cta` for arrive, `.acquire.cta` for
-try_wait/test_wait, `.relaxed.cta` for expect_tx/complete_tx); tcgen05.mma's
+try_wait/test_wait, `.relaxed.cta` for expect_tx/complete_tx), and so is
+`bar`/`barrier`'s optional `.cta` (it does not change the instruction); tcgen05.mma's
 `.scale_vec::1X/2X/4X` is `.block32/.block32/.block16`; `ld`, `st`, `atom` and `red`
 drop memory ordering and scope (`.weak .relaxed .acquire .release .acq_rel .volatile`,
 `.cta .cluster .gpu .sys`: the model has no weak memory, as the fence rows; but a strong
@@ -53,7 +55,8 @@ Every normalized mnemonic has exactly one class. A mnemonic without a row is an 
   set of such a kernel, `translate.writes`, is unknown: the stale-data checks of a
   refused CuTe variant then take every tensor it may address as written, and P0-6 reads
   no weak global load as uniform or as metadata);
-* **drop**: affects no spec; its results are Data, and Data that reaches a root (an event
+* **drop**: no P0 event (the P1-2 pass reads some, "TMA and bulk copies"); its results
+  are Data (exceptions: "Drop and refuse"), and Data that reaches a root (an event
   operand, a branch condition, an address, a predicate, a barrier field, a work anchor)
   is the slice soundness refusal naming its origin, so a wrong drop cannot hide an event;
 * **refuse**: the variant is refused (a gap) with the row's reason.
@@ -63,9 +66,11 @@ and of the instruction's own `@p` guard; its thread-uniform part becomes a KIR `
 around the event. An instruction's issuing threads are the threads of the role with
 `mask` true. LANE, WARP and the elect symbols (true on the lane an `elect.sync` picks)
 are the thread model (`frontend_ptx.md`, "Threads and roles"). Per issuing thread means:
-one event if one thread issues it; else the TLX family emits one event whose offsets
-range over the issuing threads, and the CuTe family a KIR `for` over the role's threads
-with the thread's mask as an `if` (`frontend_ptx.md`, "Family conventions").
+one event if one thread issues it; else, for a global access, the TLX family emits one
+event whose offsets range over the issuing threads, and the CuTe family a KIR `for` over
+the role's threads with the thread's mask as an `if` (`frontend_ptx.md`, "Family
+conventions"); any other event is that thread loop in both families (an mbarrier event
+whose operands are uniform: a `for` over its statically known issuers).
 
 ## Values
 
@@ -81,7 +86,7 @@ with the thread's mask as an `if` (`frontend_ptx.md`, "Family conventions").
 | `setp` (with `.and/.or/.xor`), `selp`, `mov`, `cvt` (integer), `cvt.sat` (integer), `cvta.global` | `cmp` (and the combine), `select`, copy, `ext`/`trunc` (`.sat`: clamped to the destination type's range; rounding integer cvt: refused; a destination register wider than the type gets the value extended by the type's signedness, as ptxas does for `cvt.s8.s32`), identity |
 | `cvta.shared{::cluster}`, `cvta.to.shared{::cluster}`, `cvta.local`, `cvta.to.local` | between a window address and the generic address of the same bytes (the offset kept); of any other value, Data ("Global memory") |
 | 8- and 16-bit integers | their zero-extended i32 (signed ops on the sign extension) |
-| `ld.param` | a kernel parameter: a scalar is the KIR param of the parameter (or struct field) at its width, extended by the load type; a pointer is its tensor's base address (`frontend_ptx.md`, "Memory"); the bytes of a descriptor parameter: refused. Through a register: the address must be a select (nested) of parameter addresses plus constants whose conditions are one value in the role (LLVM merging `if c: f(a) else: f(b)`), read as the select of the values; any other computed address: refused |
+| `ld.param` | a kernel parameter: a scalar is the KIR param of the parameter (or struct field) at its width, extended by the load type; a pointer is its tensor's base address (`frontend_ptx.md`, "Memory"); the bytes of a descriptor parameter: refused. Through a register: the address must be a select (nested) of parameter addresses plus constants whose conditions depend on no thread index (no lane, warp or `elect.sync` value; LLVM merging `if c: f(a) else: f(b)`), read as the select of the values; any other computed address: an error (`ld.param from a computed address`) |
 | `cvta.param` | the address of a descriptor parameter (only TMA instructions may use it) |
 | `%tid.x`, `%tid.y/z`, `%ntid` | `32*WARP + LANE`, 0 (the block must be (32k, 1, 1)), the launch's block |
 | `%laneid`, `%lanemask_{eq,lt,le,gt,ge}` | LANE and its masks |
@@ -112,18 +117,19 @@ refused where an event or a per-thread slot needs it.
 | `st.global`, generic `st` on a global address | `gstore` per issuing thread | the stored value is data |
 | `atom.global.{add,min,max,inc,dec,and,or,xor,exch,cas}`, `red.global.*`, generic `atom`/`red` on a global address, `red.async.global.add` | `gatomic` per issuing thread, of the vector's elements | `atom.exch` is a `gstore`; atom results are Data; red.async names no mbarrier (no completion to model) |
 | `cp.async.{ca,cg}.shared.global [d], [s], n{, src-size \| ignore-src}` | `gload` of n bytes at s per issuing thread | constant n; a src-size of 0 (or a true ignore-src) reads nothing, any other src-size must be n (a KIR assert); commit/wait groups are drops |
-| generic `ld`/`st`/`atom`/`red` on a shared address, `atom.shared.*`, `red.shared.*` (`.shared::cta` too) | none | Data (refused in a TLX warp-specialized kernel if it writes: the dispatch's state bytes are checked against `st.shared` only); through `ld`/`st`/`atom`/`red.global` or `red.async`: an error (the hardware faults) |
+| generic `ld`/`st`/`atom`/`red` on a shared address, `atom.shared.*`, `red.shared.*` (`.shared::cta` too) | none | Data (refused, if it writes, in a TLX kernel with a switch-loop dispatch: its state bytes are checked against `st.shared` only; a direct dispatch has none); through `ld`/`st`/`atom`/`red.global` or `red.async`: an error (the hardware faults) |
 | `ld.local`/`st.local`, generic `ld`/`st` on a local address | none | the thread's own local memory (LLVM's `__local_depot`): a store must stay inside its variable (a KIR assert per thread); a load is the value the same thread stored at the same constant offset and width earlier in the basic block, unpredicated, else Data |
 
 An address is a tensor's base (a pointer parameter, or a pointer field of a struct
 parameter, named by the host adapter) plus a byte offset, through adds, subtracts, a
 select of two offsets of one base and per-lane tables of one base; a select between two
 tensors takes the arm the role's condition picks (CuTe: a condition uniform per warp
-splits the role); where that condition is one value in the role but not known (it
-depends on the program id or a parameter), the access becomes two, one per tensor, under
-the condition and under its negation (a load's value: the select of the two; a generic
-access through a select between a shared and a global address is refused). Any other
-address is refused. The element offset is the byte offset
+splits the role); where that condition is one value in the role but not known (e.g. it
+depends on the program id or a parameter), an `ld`, `st`, `atom` or `red` becomes two
+accesses, one per tensor, under the condition and under its negation (a load's value: the
+select of the two; a `cp.async` or bulk copy through it, or a generic access through a
+select between a shared and a global address, is refused). Any other address is
+refused. The element offset is the byte offset
 divided by the element size, which must be provably exact (known trailing zeros,
 factorization), else the access is refused (a sub-element access). A generic address is
 made only by `cvta` (shared and local memory; a global one is its own generic address).
@@ -217,7 +223,7 @@ LaunchRecord, refused for a dump without it) and the PTX target in `tma.ISSUE_TA
 compiler, or the same one on another target, may lower it otherwise. A new compiler
 release needs that test run and its version added. The mbarrier of a multi-lane load must be the same for every lane. Not measured,
 so translated only where at most one lane of each warp executes them: multicast and
-cta_group::2 TMA loads and shared::cluster bulk copies.
+cta_group::2 TMA loads and shared::cluster bulk copies and reduces.
 
 **Packed sub-byte formats** (CUtensorMap `16U4_ALIGN8B`, `16U4_ALIGN16B`,
 `16U6_ALIGN16B`; measured on GB200 and GB300, `tests/ptx/test_gpu_tma_subbyte.py`): the
@@ -247,6 +253,7 @@ writes of shared memory, also give these events in the P1 KIR:
 | `tensormap.cp_fenceproxy` | `tmap_write` per executing warp |
 | `st.async`, `red.async`, `cp{.reduce}.async.bulk.shared::cluster.shared` into another CTA | `smem_write` (`async`, `cta`: the destination's rank) |
 | `mbarrier.*`, `tensormap.replace.*.shared`, `tcgen05.alloc`, `clusterlaunchcontrol.try_cancel` | no event: their bytes must be disjoint from every store source |
+| a global store or atomic (`gstore`, `gatomic`: `st`, `atom`, `red`, a non-tensor bulk store or reduce) into a buffer that holds a bulk store's tensormap | refused |
 
 ## Thread barriers and clusters
 
@@ -254,8 +261,13 @@ writes of shared memory, also give these events in the P1 KIR:
 |---|---|---|
 | `bar.sync`, `bar.arrive`, `barrier.sync{.aligned}`, `barrier.arrive{.aligned}` `id{, count}` | no event; the aligned forms need a mask uniform per warp | `named_bar` of the whole role: id and count constants (one uniform per warp but not per role splits the role), count a positive multiple of 32, absent: the block's threads |
 | `barrier.red.{and,or,popc}{.aligned}`, `bar.red.*` `d, id{, count}, p` | as `bar.sync`; d: "Values" | as `bar.sync` |
-| `bar.warp.sync` | drop | drop |
+| `bar.warp.sync` | drop | drop (P1-2: a pair it may order, of a fixed-lane store issuer and another lane of its warp, is undecided, U2) |
 | `barrier.cluster.arrive{.relaxed}{.aligned}` / `.wait{.aligned}` | `arrive` of every thread of the role / `wait` on `cluster_barrier` | as P0 |
+
+P0-6 (`frontend_ptx.md` "The P0-6 barrier pass") counts a `barrier.sync`/`barrier.arrive`
+without `.aligned` that every lane of a warp reaches alike as the warp's arrival, as the
+aligned forms; lanes of a warp that diverge at one leave P0-6 undecided (each thread
+arrives on its own, which it does not count).
 
 Clusters (both families):
 
@@ -287,7 +299,9 @@ Clusters (both families):
   CTA) with dst and mbar mapa'd into one CTA: `complete_tx(bar, bytes, cta)` per
   executing thread, bytes the access's (vector width x element size; the data is not
   modeled). Outside a cluster of several CTAs, or through addresses that are not mapa
-  results: refused. `mbarrier.complete_tx` and any other access to another CTA: refused.
+  results: refused. `mbarrier.complete_tx` and any other use of a mapa address: refused;
+  `ld`, `st`, `atom` and `red` on `.shared::cluster` have no row (an error, "Drop and
+  refuse").
 * `barrier.cluster`: an arrive of every thread on `cluster_barrier`, a frontend-made
   barrier of one slot in the CTA of rank 0 counting one arrival per thread of the cluster;
   the role's j-th wait waits for phase j (`cluster_barrier_parity`, flipped after each
@@ -343,7 +357,9 @@ entry is the stolen cluster's first CTA, to which TLX adds `%cluster_ctarank`):
 
 ## Drop and refuse
 
-Drop (no spec effect; results are Data): floating-point arithmetic, comparison, moves
+Drop (no P0 event; results are Data; the P1-2 pass reads the shared-memory writes,
+`stmatrix` and the `cp.async.bulk` commit/wait groups: "TMA and bulk copies"):
+floating-point arithmetic, comparison, moves
 and conversions (`<op>.f`), `ld.shared`/`st.shared` and `atom`/`red.shared` (except the
 tensormap staging buffer's zeroing, the CLC response read and a TLX worker's load of a
 warp-specialize capture the default stored, `frontend_ptx.md`, "Threads and roles"; a

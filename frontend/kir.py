@@ -95,7 +95,8 @@ Rules of kir.md beyond its field tables, which lean/KV relies on:
   expect_tx, wait, complete_tx) is a w=32 Expr, its rank in the cluster; "cta_mask"
   (commit_arrive, tma_load, tmem) a w=32 Expr, a set of ranks; tma_load's "leader" (bool,
   default false) completes each destination's bytes on its pair leader's slot. They and the
-  `complete_tx` event (bar, idx, bytes) need a cluster of more than one CTA.
+  `complete_tx` event (bar, idx, bytes) need a cluster of more than one CTA, "leader" an
+  even cluster size.
 """
 
 import json

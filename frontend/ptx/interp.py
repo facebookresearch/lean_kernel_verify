@@ -1918,7 +1918,7 @@ class Translator:
     # ---------------------------------------------------------- instructions
     def execute(self, i, cls: str) -> None:
         mn = ops.mnemonic(i.opcode)
-        if self.k.p1 is not None:  # P1 pass: TMEM and named-barrier events (tmem.py)
+        if self.k.p1 is not None:  # P1 pass: TMEM, named-barrier, P1-2 events (tmem.py)
             self.k.p1.execute(self, i, mn)
         if C._is_fork(i):  # (cfg.py)
             self.forks += 1
@@ -1995,19 +1995,20 @@ class Translator:
         return [(sym, u[2] + b) for b in range(nb)]
 
     def _capture_store(self, i, maybe: bool) -> None:
-        """A shared write in a kernel with a warp-specialize dispatch (the captures,
+        """A st.shared in a kernel with a warp-specialize dispatch (the captures,
         frontend_ptx.md "Threads and roles"): the default's st.shared before its first
-        fork barrier records the bytes it writes if it runs unconditionally (statically
-        known issuing threads, no runtime condition: no predicate, uniform `if` or loop
-        around it, but the decision of a dispatch that may run no round on its round
-        side, under which the workers read it, run_gated) and stores one value in every
-        thread that depends on nothing but the launch (parameters, program id, shared
-        symbols, metadata): a worker reads that value between its first and second fork
-        barrier. Any other shared write before the workers' reads (at an unknown address,
+        fork barrier records the bytes it writes if every thread of the role runs it (a
+        store of only some may land before another thread's earlier one; no predicate,
+        `if` or loop around it, but the decision of a dispatch that may run no round on
+        its round side, under which the workers read it, run_gated) and stores one value
+        in every thread that depends on nothing but the launch (parameters, program id,
+        shared symbols, metadata): a worker reads that value between its first and
+        second fork barrier (a byte an earlier asynchronous or remote write may touch is
+        unknown).
+        Any other st.shared before its role's second fork barrier (an unknown address,
         under a condition, of a value of the role, a worker's, the default's after its
-        first fork barrier) makes the bytes it may touch unknown, all of them if its
-        address is not static. Roles are translated one after the other, the default
-        first: such a write of a byte a worker may already have read refuses the kernel."""
+        first fork barrier) records no capture: a write of the bytes it may touch
+        (_capture_clobber)."""
         caps = self.k.captures
         if caps is None or self.forks > 1:
             return
@@ -2196,8 +2197,9 @@ class Translator:
         and bulk copies and reduces into shared memory (asynchronous; multicast, or into
         another CTA: remote); st.async/red.async (remote); a CLC response (asynchronous; multicast:
         remote); tcgen05.alloc's address slot; tensormap.replace of a staging buffer;
-        mbarrier.inval. TMA tensor loads report theirs (tma.py), mbarrier events theirs
-        (barrier_event); st.shared, stmatrix, atom/red.shared are drops (_shared_drop)."""
+        mbarrier.inval. TMA tensor loads report theirs (tma.py); mbarrier objects are
+        checked by their arrays after every role (check_capture_barriers); st.shared,
+        stmatrix, atom/red.shared are drops (_shared_drop)."""
         from . import cluster  # (it imports this module)
 
         ops_, mem = i.operands, self.k.mem

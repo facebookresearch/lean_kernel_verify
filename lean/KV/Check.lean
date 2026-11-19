@@ -19,19 +19,27 @@ Entry points.
 * A refuted spec is a certain violation only if it has a certain counterexample
   (`SpecResult.certain`). Without one it is undecided, and an `UNDECIDED` line says so:
   on an evaluation error of kind `limit` or `unexpected` (every spec; a `kernel` error is
-  certain), after an out-of-bounds metadata load (below), for P0-2 and P0-4 on a cluster
+  certain), after a role trace stopped (below), for P0-2 and P0-4 on a cluster
   whose barrier ledger does not converge (Ledger.lean, `unconverged`), for P0-4 on a slot
   whose transaction bytes break it only through another CTA's landings that may complete
-  a later phase than their issue order shows (Ledger.lean, "Landers"), or for P1-1 pairs
-  that only the lockstep contents, named barriers used with two counts or another round of
-  a ledger that does not converge might order (TmemReuse.lean). The evaluation-error line names the kind (Eval.lean `ErrKind`).
+  a later phase than their issue order shows (Ledger.lean, "Landers"), for P0-6 on an
+  `nb_open` not marked certain or a pairing it cannot decide (NamedBarriers.lean), or for
+  P1-1 and P1-2 pairs that only the lockstep reading, named barriers used with two counts
+  or another round of a ledger that does not converge might order, and P1-2's other
+  undecided pairs (TmemReuse.lean, StoreReuse.lean). The evaluation-error line names the
+  kind (Eval.lean `ErrKind`).
 * A role that loads metadata outside the tensor stops there (Eval.lean): P0-1 fails with
-  that load, and P0-2..P0-5 hold only on runs where every role trace is complete. On
-  other runs they are false, listed with the counterexamples that are certain anyway:
-  P0-2/P0-4 on the CTAs whose roles all completed, P0-3/P0-5 on the events evaluated (no
-  coverage holes). A spec without such a counterexample is undecided. A role whose
-  `assume` does not hold (KIR change 16) stops the same way, without a P0-1 finding: the
-  `not decided` line and the summary name the assumption.
+  that load, and P0-2..P0-6, P1-1 and P1-2 hold only on runs where every role trace is
+  complete. On other runs they are false, listed with the counterexamples that are
+  certain anyway: P0-2/P0-4 (P1-1/P1-2) on the clusters whose roles all completed,
+  P0-3/P0-5 on the events evaluated (no coverage holes), P0-6 on the CTAs whose roles all
+  completed and the single events that ran. A spec without such a counterexample is
+  undecided. A role whose `assume` does not hold (KIR change 16) stops the same way,
+  without a P0-1 finding, and P0-1 then holds only on complete runs too. The other roles
+  of its cluster (its CTA without clusters) may have used a value the broken assumption
+  made wrong (a warp-specialize capture), so P0-1, P0-3 and P0-5 list only the
+  counterexamples of the clusters where no trace stopped at an `assume`
+  (`Run.certainPart`); the `not decided` line and the summary name the assumption.
 * On an input that sets an elision flag of the case (`Input.elisions`), the P0-1 and P0-3
   checks are P0-5's (MaskElision.lean); the summary line says so.
 -/
@@ -91,9 +99,9 @@ structure SpecResult where
   every spec is certain iff the error is a `kernel` error. -/
   certain : Bool
 
-/-- Why P0-2..P0-5 are undecided on `r`: the first role trace that stops (an
-out-of-bounds metadata load, an assumption that does not hold; none if every trace is
-complete), with every reason a trace stopped for. -/
+/-- Why P0-2..P0-6 (P0-1 too after an `assume` stop) are undecided on `r`: the first role
+trace that stops (an out-of-bounds metadata load, an assumption that does not hold; none
+if every trace is complete), with every reason a trace stopped for. -/
 def undecided (r : Run) : Array Issue :=
   let stops := r.ctas.flatMap fun c => (c.roles.filter (·.stopped)).map fun t => (c.pid, t)
   match stops[0]? with

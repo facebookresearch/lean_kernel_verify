@@ -4,9 +4,10 @@
 # LICENSE file in the root directory of this source tree.
 
 """Negative controls for frontend/kir.py: every mutation of a valid fixture in MUTATIONS
-must be rejected with the expected message; every mutation in ACCEPTED must stay valid.
+(and P1_MUTATIONS, P1_2_MUTATIONS, NB_MUTATIONS) must be rejected with the expected
+message; every mutation in ACCEPTED must stay valid.
 
-    python3 -I kir_negative.py      (exit 1 if some mutation is accepted)
+    python3 -I kir_negative.py      (exit 1 if some mutation is not handled as expected)
 """
 
 import copy

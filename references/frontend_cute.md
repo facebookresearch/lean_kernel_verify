@@ -20,6 +20,12 @@ KIR JSON         validated with frontend/kir.py, written only if valid, one file
   |          and named-barrier events
   v
 P1 KIR JSON      <Kernel>__<digest>.p1.json (P1-1 TMEM reuse ordered); the P0 KIR is unchanged
+
+the dump's PTX of every launched variant (ptx/NN_<digest>.ptx), whatever the translation
+  | P0-6     the PTX frontend's barrier pass (frontend/ptx/nbar.py), also for a variant the
+  |          P0 translation refuses
+  v
+P0-6 KIR JSON    <Kernel>__<digest>.nb.json (P0-6; kir.md change 14)
 ```
 
 ## Running
@@ -29,9 +35,10 @@ P1 KIR JSON      <Kernel>__<digest>.p1.json (P1-1 TMEM reuse ordered); the P0 KI
 python3 -I scripts/lkv.py run CASE.json --src DIR [--inputs a,b]
 # translation only (pure Python, no DSL): re-translate an existing dump
 python3 -I frontend/cute/to_kir.py CASE.json [--out DIR]
-# tests: tests/cute/test_core.py (pure Python: python3 -I tests/cute/test_core.py) and
+# tests: tests/cute/test_core.py (pure Python: python3 -I tests/cute/test_core.py),
 # tests/cute/test_frontend.py (tiny CuTe kernels through dump + to_kir; needs the DSL, and
-# runs once per supported release: tests/cute:test_frontend, :test_frontend_461)
+# runs once per supported release: tests/cute:test_frontend, :test_frontend_461) and
+# tests/cute/test_ptx_capture.py (the dump's PTX and LaunchRecords; needs the DSL)
 ```
 
 `scripts/lkv.py run` runs the frontend (`frontend/cute/main.py run`: dump + translate),
@@ -45,6 +52,7 @@ per input `"host_reads"`; per launch `"hinted"`, the storages its integer argume
 into, and `"sources"` on every tensor argument); `ir/NN_<digest>.mlir` (initial DSL
 MLIR of compile NN), `ir/<digest>.stage.mlir`, `ir/<digest>.host.mlir` (analyzed
 stages); `kir/<Kernel>__<digest>.json`; `kir/<Kernel>__<digest>.p1.json` (the P1 KIR);
+`kir/<Kernel>__<digest>.nb.json` (the P0-6 KIR, from the variant's `ptx/NN_<digest>.ptx`);
 `kir/report.json` (per variant: the inputs that launched it, KIR size and roles, or the
 construct or KIR contract violation that stopped it with its `"kind"`: `gap`, a construct
 the frontend refuses by design (UNDECIDED, not an error), or `error`, a failure the case,
@@ -52,7 +60,9 @@ the DSL install or LKV must fix (an ERROR: invalid KIR, a DSL version mismatch, 
 unaccepted verifier failure, `elision_flags` that are not flags of the variant, no
 analyzed stage); and `"p1"`: `checked` with the P1 KIR, `refused` with the refusal,
 `error` for a failed P1 translation (an internal error of the P1 pass, invalid P1 KIR),
-or `not_applicable` for a kernel without TMEM).
+or `not_applicable` for a kernel without TMEM; and, for every launched variant, `"nb"`:
+`checked` with the P0-6 KIR, or `refused` (P0-6 UNDECIDED) or `error` (a failure of the
+barrier pass, invalid P0-6 KIR: ERROR) with the message).
 `to_kir --no-p1` (and `lkv_cute run/to_kir --no-p1`) skips the P1 pass. One case per process: the DSL and the kernel package read their environment at
 import.
 
@@ -170,9 +180,10 @@ Checked, not assumed:
   launch is skipped, such data keeps its CPU contents; the inputs run in one process, so
   a launch of an earlier input counts, e.g. through a module-level cache; write sets come
   from the earlier kernel's KIR, or, when it was not translated, all its tensors and the
-  storages its address hints point into). Each is a hard error for the variant. Contents
-  are recorded by element offset from the data pointer (the elements between those of a
-  strided view included), as `load` indices are.
+  storages its address hints point into; the PTX translation takes a refused variant's
+  write set from its PTX where that bounds it). Each is a hard error for the variant.
+  Contents are recorded by element offset from the data pointer (the elements between
+  those of a strided view included), as `load` indices are.
 * host reads: P7 tracks where host data comes from, over the whole run. Every storage
   passed to a launch is a possible source from then on, and so is every storage an
   integer argument of the launch points into (an address hint: an integer scalar, or an
@@ -344,9 +355,10 @@ that select it. The kernel's `elision_flags` annotation becomes the KIR
 on the host slice) and must be constants; the KIR gets `cluster` (kir.md change 11). A
 launch that also asks for a preferred cluster shape (the launch attribute
 `cudaLaunchAttributePreferredClusterDimension`, LaunchRecord `attrs.preferred_cluster`)
-other than its cluster dims is refused in both translations (a gap: clusters of either
-size may run, and only the regular geometry would be checked; the PTX translation of
-TLX/Triton kernels checks both, frontend_ptx.md "Clusters").
+other than its cluster dims is refused in both translations, its P0-6 KIR too (a gap:
+clusters of either size may run, and only the regular geometry would be checked; the
+PTX translation of TLX/Triton kernels checks both, `frontend_ptx.md`, "Clusters,
+tcgen05, CLC").
 `%cluster_ctarank` is `x % cx + (y % cy) * cx + (z % cz) * cx * cy` over the CTA's
 `pid`, `%clusterid` / `%nclusterid` / `%cluster_ctaid` / `%cluster_nctaid` likewise.
 `nvvm.mapa.shared.cluster` makes a remote pointer (`interp.Remote`: a shared-memory
@@ -398,11 +410,11 @@ thread-0 arrive or wait makes runs of issuing and non-issuing warps roles of the
 because P1-1 takes a role's event as every warp's and an arrive releases, a wait
 acquires, only the issuing warps' TMEM accesses; any lane issues for its warp). It has its
 own KIR, ledger and verdicts, and P0 verdicts come only from the P0 KIR (the P0 pass keeps
-its roles). The P1 KIR's top-level `tmem` comes from the single
-`alloc_tmem` and the pointer bases (`zero` for the fake-zero-base idiom with 512 columns,
-`relative` for `retrieve_tmem_ptr`). Refusals, recorded as `report.json` `p1.error` and
-reported as "P1-1 not checked" (the P0 entry is unaffected; so is any other error of the
-P1 pass):
+its roles) and, for P0-6, from the P0-6 KIR. The P1 KIR's top-level `tmem` comes from the
+single `alloc_tmem` and the pointer bases (`zero` for the fake-zero-base idiom with 512
+columns, `relative` for `retrieve_tmem_ptr`). Refusals, recorded as `report.json`
+`p1.error` and reported as "P1-1 not checked" (the P0 entry is unaffected; so is any
+other error of the P1 pass):
 
 | # | Construct |
 |---|---|
@@ -431,7 +443,7 @@ instead.
 `tests/cute`: tiny CuTe kernels through dump + to_kir, and hand-written stages in
 `test_core`:
 
-* The TMA producer/consumer passes all five P0 specs in Lean; the seeded bug (producer
+* The TMA producer/consumer passes P0-1 to P0-5 in Lean; the seeded bug (producer
   `arrive_expect_tx` on all 32 lanes) fails P0-2 and P0-4. A TMA load through a view
   claiming 64 rows past its tensor fails P0-1 (the footprint `gload`); the correct view
   passes.
@@ -492,9 +504,11 @@ default, `legacy`, is the translation above.
 * `cute.assume` divisibility facts are taken as given; the elected lane of `elect.sync`
   is unspecified (operands under it must not depend on it).
 * Shared memory, TMEM, MMA ordering, named barriers and fences are outside the P0 slice
-  (data); TMEM accesses, tcgen05.wait and named barriers are events of the P1 slice only
-  (P1-1), fences and TMEM lifetime are not checked; so are values that travel through register memory (`rmem` fragments): a
-  predicate or index read back from registers that decides an event is a slice error
+  (data); TMEM accesses, tcgen05.wait and named barriers are events of the P1 slice
+  (P1-1), named barriers also of the P0-6 KIR, made from the variant's PTX (P0-6,
+  `frontend_ptx.md`, "The P0-6 barrier pass"); fences and TMEM lifetime are not checked;
+  so are values that travel through register memory (`rmem` fragments): a predicate or
+  index read back from registers that decides an event is a slice error
   (e.g. an epilogue's per-thread predicate fragments). A warp collective whose result
   is only data (a float `shfl.sync` of a reduction) is dropped with it, so its lane mask
   is not checked (the PTX translation checks every one).

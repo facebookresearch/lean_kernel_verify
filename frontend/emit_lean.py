@@ -16,11 +16,11 @@ one `KV.Input` per case input (each with the case's `elision_flags`), then
   (b) one theorem `KV.Holds .<spec> kernel <input>` per (spec, input), closed by
       `native_decide`, so a failing spec fails the check.
 A P1 KIR (top-level `tmem` or `p1`, file suffix .p1.json; references/kir.md changes 10
-and 15) emits `tmem := some {...}` and `p1 := [...]` in the kernel, `#eval KV.runP1
-kernel <input>` and the theorems of its P1 specs (`KV.Holds .tmemReuse`, `.storeReuse`)
-instead; the output for a P0 KIR is unchanged. A P0-6 KIR (top-level `nbar`, file suffix
-.nb.json; change 14) emits `#eval KV.runNb kernel <input>` and the P0-6 theorems
-(`KV.Holds .namedBarriers`).
+and 15) emits `tmem := some {...}`, `p1 := [...]` and `cta_threads := some n` in the
+kernel, `#eval KV.runP1 kernel <input>` and the theorems of its P1 specs
+(`KV.Holds .tmemReuse`, `.storeReuse`) instead; the output for a P0 KIR is unchanged. A
+P0-6 KIR (top-level `nbar`, file suffix .nb.json; change 14) emits
+`#eval KV.runNb kernel <input>` and the P0-6 theorems (`KV.Holds .namedBarriers`).
 """
 
 import argparse

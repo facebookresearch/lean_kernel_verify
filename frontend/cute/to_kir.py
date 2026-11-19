@@ -22,7 +22,12 @@ For every kernel variant (distinct initial MLIR) the host compiled and launched:
      the P1 slice and op table into <out>/kir/<Kernel>__<digest>.p1.json (the P0 events
      plus tmem, tmem_wait and named_bar events and the top-level `tmem`). A refusal there
      (or a failure: status "error") is recorded as the variant's "p1" entry in
-     report.json; the P0 KIR is not affected (`--no-p1` skips the pass).
+     report.json; the P0 KIR is not affected (`--no-p1` skips the pass);
+  7. P0-6 pass (named barriers convergent, frontend/ptx/nbar.py): every launched
+     variant's PTX, whatever the translation and also where it refused the variant, into
+     <out>/kir/<Kernel>__<digest>.nb.json (translate_nb), recorded as the variant's "nb"
+     entry in report.json; a variant refused for a preferred cluster (below) has no P0-6
+     KIR either.
 
 A construct without an exact translation stops that variant with the op name and its
 source location; every outcome is in <out>/kir/report.json, a stopped variant with its
@@ -33,9 +38,12 @@ an earlier (skipped) launch of the run may write, directly or through host compu
 is a hard error too: the KIR would read the recorded contents, not what the kernel
 reads. So is a host read, before a launch of the variant, of data an earlier launch may
 write (the host may branch or size the launch differently), and a dump made with a CuTe
-DSL other than the ones the op table was checked against (ops.DSL_NATIVE).
+DSL other than the ones the op table was checked against (ops.DSL_NATIVE). A variant
+some launch of which asks for a preferred cluster other than its cluster dims is refused,
+its P0-6 KIR too (a gap, preferred_cluster_gap): only the regular geometry would be
+checked.
 
-Translation switch (the PTX translation is experimental and opt-in):
+Translation switch (the PTX translation is opt-in for CuTe):
 LKV_FRONTEND=ptx translates each variant's PTX instead of steps 1-4 (translate_ptx: the
 PTX core's Facts, frontend/ptx/translate.py, assembled by PtxVariant with Variant's
 tensors, inputs, checks and report: parameters named by the LaunchRecords' jit_params,

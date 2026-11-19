@@ -154,7 +154,8 @@ structure Ctx where
   roles : Array RoleTrace
   ledger : Array SlotLedger
   named : Array NamedSlot
-  /-- Per named slot: bar.sync only, one count, the participating threads summing to it. -/
+  /-- Per named slot, `NamedSlot.exact`: bar.sync only, one count, the participating
+  threads summing to it or the count the CTA's (`cta_threads`). -/
   exact : Array Bool
   /-- Per role, its waits at their sound phase lower bounds, merged with its bar.syncs. -/
   waits : Array (Array PWait)
@@ -724,8 +725,8 @@ structure P2Out where
 /-- P1-2's verdict lines and notes on run `r` with its P1 ledgers `Ls` (module doc): a
 stopped-trace line, then per cluster its certain F1/F2 lines (or, with a named barrier used
 with two counts or a ledger that does not converge, a `not decided` line and them), the
-cross-cluster F2 lines, then the U1/U2 lines after a `not decided` line if nothing is
-certain. -/
+cross-cluster F2 lines, then the U1-U4 lines (each a `not decided` line), after a
+`not decided` head line if nothing is certain. -/
 def analyze (r : Run) (Ls : Ledgers) : P2Out := Id.run do
   let h := r.host
   let Cs := ctxs r Ls

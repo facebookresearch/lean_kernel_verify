@@ -2,8 +2,10 @@
 # "p1": ["P1-2"], written by make_fixtures.py); run_all.sh compares them with the VERDICT
 # lines KV.runP1 prints and with the native_decide theorems. An undecided input (a pair
 # ordered only under the lockstep reading, or only by a same-thread program order the KIR
-# does not pin down, or an unordered pair under an inconsistent named barrier) is a refuted
-# theorem: FAIL here; expected_messages.txt checks its `not decided` line.
+# does not pin down, a landing not shown to complete before the store, a pair after a
+# blocked wait, an unordered pair under an inconsistent named barrier, a stopped role
+# trace) is a refuted theorem: FAIL here; expected_messages.txt checks its `not decided`
+# line.
 # fixture       input                      P1-2
 staging         read_bar_1                 PASS
 staging         read_bar_3                 PASS

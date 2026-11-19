@@ -17,11 +17,11 @@ mask of a CTA pair's mbarrier (`leader` with .cta_group::2, LLVM's shrunken mask
 that clear a bit the offset may set or that the symbol's alignment does not cover,
 without .cta_group::2, outside a cluster of pairs); TLX's mapa of the pair leader's
 mbarrier (`leader` for rank & ~1 in clusters of 2 and 4, the own rank, refusals per
-rank); multicast TMA loads (`cta_mask`,
+rank; a P1-2 landing naming the leader's slot); multicast TMA loads (`cta_mask`,
 outside a cluster, issued by several lanes, as cta_group::2 ones); a load into another
 CTA refused; multicast
 tcgen05.commit (`cta_mask`) and cta_group::2 tcgen05 ops; shared::cluster bulk copies
-(`complete_tx` on the destination CTA, and their refusals); pair_mask; branches whose
+and reduces (`complete_tx` on the destination CTA; refusals); pair_mask; branches whose
 arms emit nothing (on data: not a root if the arms only set registers, a warp collective
 or a .sync.aligned instruction only under a condition the same in all lanes of a warp, a
 vote.sync of data; else, or if the trial refuses an arm, the condition is refused; on

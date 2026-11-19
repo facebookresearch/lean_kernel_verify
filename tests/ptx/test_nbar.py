@@ -20,8 +20,10 @@ against a single strong read doing the same (certain divergence); the roles spli
 one role inside a loop on uniform data sharing its region key, also where the loop's
 bound is a ballot of per-lane data alike in every warp; a loop bound read from a tensor
 with recorded contents (an exact KIR loop over a metadata `load`, without contents a
-repeated region, of a tensor the kernel writes undecided); a cycle entered at two
-blocks (made reducible by node splitting); a call (refused, P0-6 undecided); a
+repeated region, of a tensor the kernel writes undecided); a switch `brx.idx` lowered to
+its compare chain (exact `if`s, a role split per warp, an index not provably in range
+refused); a class loop that leaves its dead registers unclassified; a cycle entered at
+two blocks (made reducible by node splitting); a call (refused, P0-6 undecided); a
 warp-specialized kernel whose default may run no round (the workers' barriers under its
 decision, refused on a decision that is data); and the KIRs frontend/kir.py accepts.
 """

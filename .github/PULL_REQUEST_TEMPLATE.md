@@ -9,7 +9,8 @@ What you ran and what it showed, for example:
 - `tests/lean/run_all.sh` (for changes to `lean/`, `frontend/kir.py`,
   `frontend/emit_lean.py` or `tests/lean/`)
 - `python3 -I tests/cute/test_core.py` and `python3 -I tests/e2e/test_e2e.py Unit`
-- the frontend tests in `tests/ttgir/` or `tests/cute/`, for frontend changes
+- the frontend tests in `tests/ttgir/`, `tests/cute/` or `tests/ptx/` (the PTX
+  translation), for frontend changes
 
 A change to what a spec decides needs a `tests/lean` fixture that shows it.
 

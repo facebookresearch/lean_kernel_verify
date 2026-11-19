@@ -24,7 +24,7 @@ A violation is certain in the extracted model:
   iterations);
 * a count no set of warps meets, outside every repeated region: not a positive multiple of
   32, or above the CTA's threads;
-* with `sync` operations only in the CTA (each warp blocks in each one, so every instance
+* while only `sync` operations have run (each warp blocks in each one, so every instance
   holds exactly one operation of each warp that completes it), an instance whose
   operations name different counts, or roles that wait forever in the pairing below, each
   outside every repeated region (a count above the threads that arrive, a different number
@@ -60,12 +60,13 @@ region, on a bad count inside a repeated region, on a barrier several roles use 
 region without a key, on an instance mixing operations of different region nests, on more
 arrivals than the count, on an instance completed while a role outside it uses the barrier
 later, on an instance an `arrive` leaves incomplete when every role has ended, and on a
-count mismatch or a wait that never returns in a CTA with an `arrive`, inside a repeated
+count mismatch or a wait that never returns after an `arrive` ran, inside a repeated
 region (it may run no pass; a wait also while another blocked role waits inside one), with
 a role held by the warp-ahead reading, or with an instance whose operations partly name no
-thread count and whose other roles all ended. A CTA with a role trace stopped at an
-out-of-bounds metadata load is not paired (its later events are unknown; Check.lean's `not
-decided` line covers it): only the single-event checks above apply to the events that ran.
+thread count and whose other roles all ended. A CTA with a stopped role trace (an
+out-of-bounds metadata load, an `assume` that does not hold) is not paired (its later
+events are unknown; Check.lean's `not decided` line covers it): only the single-event
+checks above apply to the events that ran.
 -/
 import KV.Spec.Common
 
@@ -281,11 +282,12 @@ def pair (h : Host) (c : CtaTrace) : Option (Bool × Issue) × Nat := Id.run do
   return (none, nheld)
 
 /-- P0-6 findings of one CTA. A finding inside a repeated region (`nb_rep`; it may run no
-pass) is not certain. In a CTA with a role trace cut short at an out-of-bounds
-metadata load (`CtaTrace.complete` false) only the checks of single events that ran
-(certain whatever comes later): the repeated regions and the pairing need every role's
-whole trace, so they are not evaluated there (Check.lean's `not decided` line covers the
-CTA), as the ledger specs skip such clusters (`Run.clusters`). -/
+pass) is not certain. In a CTA with a role trace cut short (an out-of-bounds
+metadata load, an `assume` that does not hold; `CtaTrace.complete` false) only the checks
+of single events that ran (certain whatever comes later): the repeated regions and the
+pairing need every role's whole trace, so they are not evaluated there (Check.lean's
+`not decided` line covers the CTA), as the ledger specs skip such clusters
+(`Run.clusters`). -/
 def ctaOut (h : Host) (c : CtaTrace) : Out := Id.run do
   let mut out : Out := {}
   let threads : Int := c.roles.foldl (fun a t => a + roleThreads h t.role) 0

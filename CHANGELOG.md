@@ -21,15 +21,27 @@ First public release.
 - Tests: the Lean layer's KIR fixtures (`tests/lean`), the frontends' tests, the PTX
   translation's tests (`tests/ptx`) and the end-to-end tests of `lkv.py`.
 - KIR `ir` accepts `"ptx"` (KIR translated from PTX; references/kir.md change 12).
+- KIR changes 14 (the P0-6 KIR: top-level `nbar`, events `named_bar`, `nb_open`,
+  `nb_rep`), 15 (P1-2: top-level `p1` and `cta_threads`, events `bulk_store`,
+  `bulk_commit`, `bulk_wait`, `smem_write`, `tmap_write`) and 16 (the statement
+  `assume`, a model assumption: false on an input, its role stops there and the input
+  is undecided). `lkv.py` reports P0-6 with the P0 specs (report.json `variants_nb`,
+  `nb_not_checked`; report.md "P0-6 under the warp-ahead reading" and "P0-6 barrier
+  sites not counted") and each P1 spec in a section of its own; `--p1-strict` and
+  `--no-p1` apply to both P1 specs.
 - The PTX translation (the default for TLX/Triton kernels; `--frontend ptx` for CuTe
   kernels, which keep their IR translation by default; `--frontend legacy` translates
-  the TTGIR; `$LKV_FRONTEND` sets the translation of every run) makes both frontends
+  the TTGIR; `$LKV_FRONTEND` sets the translation of every run without `--frontend`)
+  makes both frontends
   translate the kernel's PTX instead of their IR, with one shared core (`frontend/ptx/`)
   and one PTX op table (references/frontend_ptx.md, ir_ops_ptx.md), into KIR with `ir`
   `"ptx"`: global and metadata accesses, mbarriers, TMA and bulk copies (packed sub-byte
   formats too), tcgen05 commits, CLC (TLX, also in clusters), clusters and 2-CTA kernels
-  of both families (a preferred cluster geometry as a second, all-preferred KIR) and the
-  P1 pass (CuTe). Refusals name the PTX instruction, its source line and its PTX line.
+  of both families (a preferred cluster geometry as a second, all-preferred KIR, for
+  P0-6 and P1-2 too; its P0 and P1-2 KIRs are refused with CLC, and all three where the
+  launches break a rule CUDA states for the preferred dims) and the P1 passes (CuTe:
+  P1-1; TLX/Triton: P1-2). Refusals name the PTX instruction, its source line and its
+  PTX line.
   report.json `translation` and a line of report.md name the translation of a run. With
   CuTe DSL 4.4.2 the source locations are best effort, as report.json `loc_quality` and
   report.md say.
@@ -68,6 +80,23 @@ First public release.
   TLX warp-specialized kernel, a carry-flag instruction under a predicate, an
   `mbarrier.inval` outside such a cycle; an explicit `.global` access through a shared
   address is an error.
+- PTX translation, more forms translated (each was refused): Triton's direct
+  warp-specialize dispatch (`tlx.async_tasks(exclusive=True)`: no state bytes, roles
+  `default` and `partition<k>` by first warp); a `brx.idx` jump table that is no
+  dispatch, as a compare chain whose index must be provably in range (in the P0-6
+  barrier pass too); values the default passes to the partitions through shared memory
+  (warp-specialize captures, forwarded only where every thread of the default stores
+  them and no shared write may overwrite them);
+  `ld.param` through a select of parameter addresses, and global accesses through a
+  select of two tensors; TMA loads through TLX in-kernel descriptors; `st.async`,
+  `red.async` and the `shared::cluster` bulk reduce into another CTA of the cluster;
+  mbarrier addresses through an induction variable or a select between two arrays;
+  work fields LLVM hoists out of the work loop.
+- A CuTe launch with a preferred cluster (both CuTe translations) and a TLX/Triton
+  launch whose function's required cluster (`cuFuncSetAttribute`) differs from its
+  cluster dims (both TTGIR translations) are refused: the geometry LKV would check may
+  not be the one the hardware runs (their P0-6 KIRs too). The legacy TTGIR translation
+  refuses a launch with a preferred cluster: it checks one geometry.
 - CuTe dump: the LaunchRecord address candidates of a launch whose TVM-FFI environment
   stream is not the jit function's last parameter are no longer shifted by one
   parameter.
@@ -109,6 +138,13 @@ First public release.
   fitting arrival share assignments, a slot is not decided as soon as one of them fails
   only through the lower bounds, and lists no transaction line as certain
   (`tests/lean/cluster_lander_shares`).
+- P0-4, another CTA's landings: a wait for phase k returns only after the loads and
+  landings that bring the expect_tx bytes surely preceding phase k's completion were
+  issued, counting only loads the wait's own return does not surely precede
+  (`lean/KV/Spec/Ledger.lean`, "Bytes carry order"; the landers' floors only). TLX CLC
+  in 2-CTA clusters (each try_cancel response multicast into the other CTA) and
+  cta_group::2 pipelines whose empty slot a second role also releases now PASS where
+  P0-4 was UNDECIDED (`tests/lean/cluster_clc_response`, `cluster_pair_two_release`).
 - A negative `expect_tx` or `complete_tx` byte count is an evaluation error (`unexpected`):
   PTX transaction counts are unsigned, and P0-4's attribution by issue order needs them
   non-negative (`tests/lean/cluster_dsmem_relay` `negative_bytes`).
@@ -137,10 +173,12 @@ First public release.
   stand-in); another device fails the dump.
 - TTGIR dump: `kernel.warmup(...)` returns the compiled kernel (with a stand-in function
   handle) instead of None, still without counting as a launch, and host code may set the
-  required cluster dims of that kernel through `ctypes.CDLL("libcuda.so.1")
-  .cuFuncSetAttribute` (other driver calls and attributes fail the dump): later launches
-  of the kernel record them in their LaunchRecord, `attrs.func_attributes`
-  (`{"required_cluster": [x, y, z]}`).
+  required cluster dims of that kernel through `cuFuncSetAttribute` of
+  `ctypes.CDLL("libcuda.so.1")` or `ctypes.cdll.LoadLibrary("libcuda.so.1")` (other
+  driver calls and attributes fail the dump): later launches of the kernel record them in
+  their LaunchRecord, `attrs.func_attributes` (`{"required_cluster": [x, y, z]}`). A
+  launch of a kernel whose handle the host loaded without setting an attribute that way
+  fails the dump.
 - PTX translation: a TLX work field the compiler folded away in a role (no register
   holds its value there) is refused only in a role that accesses a tensor whose segments
   it names, the only accesses whose check reads it; elsewhere it is -1.

@@ -1,8 +1,8 @@
 # Expected P0-6 verdicts of every (fixture, input) of tests/lean/nb (P0-6 KIR, written by
 # make_fixtures.py); run_all.sh compares them with the VERDICT lines KV.runNb prints and
 # with the native_decide theorems. An undecided input (an nb_open not certain, a barrier
-# shared with a repeated region, a pairing that depends on timing) is a refuted theorem:
-# FAIL here, and report_checks.txt checks its UNDECIDED line.
+# shared with a repeated region, a pairing that depends on timing, a stopped role trace) is
+# a refuted theorem: FAIL here, and report_checks.txt checks its UNDECIDED line.
 # fixture              input   P0-6
 uniform                one     PASS
 short                  one     FAIL

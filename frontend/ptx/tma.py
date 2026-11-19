@@ -152,7 +152,8 @@ PREFIXES = ("cp.async.bulk", "cp.reduce.async.bulk", "tensormap.")  # mem.py rou
 # The writes of shared memory but st.shared, generic st/atom/red and tensormap.replace,
 # each closing every open staging buffer of its role (mem.Memory.execute, interp.py):
 # stmatrix, cp.async, TMA and bulk copies and bulk reduces into shared memory, mbarrier
-# objects (a tcgen05.commit arrives on one), tcgen05.alloc's address, a CLC response.
+# objects (a tcgen05.commit arrives on one), tcgen05.alloc's address, a CLC response,
+# st.async/red.async.
 SHARED_WRITES = (
     "stmatrix", "cp.async.ca", "cp.async.cg", "cp.async.bulk.shared", "mbarrier.",
     "tcgen05.alloc", "tcgen05.commit", "clusterlaunchcontrol.try_cancel",

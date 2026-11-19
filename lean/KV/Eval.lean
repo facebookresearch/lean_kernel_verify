@@ -23,7 +23,8 @@ and returns one event trace per (CTA, role).
   (`ErrKind`, references/specs.md "Evaluation errors"). `kernel`, a certain error of the
   kernel or its host on the input, so every spec FAILs: a failed device `assert`, a barrier
   index out of range, a `for` that starts below its upper bound with a step that is not
-  positive (it never ends; with no trips it runs nothing), a negative grid dimension.
+  positive (it never ends; with no trips it runs nothing), a negative grid dimension, a
+  grid the cluster dims do not divide, an event naming a CTA outside the cluster.
   `limit`, a known limit of the model, so no spec is decided and it is not an error:
   division or remainder by zero (in a tensor expression on any lane, masked or not; the
   GPU computes an unspecified value, which the kernel may never use). `unexpected`, the

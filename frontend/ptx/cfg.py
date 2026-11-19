@@ -39,11 +39,11 @@ roles: a kernel with brx.idx, or (Triton family only) with a loop whose header l
 state byte as below and branches on comparing it (with at most 3 worker states LLVM
 lowers the switch to a compare chain, no jump table), is a Triton warp-specialized
 kernel, and its dispatch must match the protocol item by item, else a CfgError names the
-failing item; any other kernel is one role, "default". The match is on the CFG and on
-reaching definitions, never on adjacency: unrelated instructions may sit anywhere in
-between. A branch condition is a `setp.cmp p, a, b` whose only result p is the guard: of
-`setp p|q` the guard may be q, the complement, and a matcher reading cmp would get it
-wrong.
+failing item; any other kernel without a direct dispatch (below) is one role, "default".
+The match is on the CFG and on reaching definitions, never on adjacency: unrelated
+instructions may sit anywhere in between. A branch condition is a `setp.cmp p, a, b`
+whose only result p is the guard: of `setp p|q` the guard may be q, the complement, and
+a matcher reading cmp would get it wrong.
 
   entry    wid = shfl.sync.idx(%tid.x >> 5, 0, 31, -1), then a branch on wid < D (D
            default warps) of either polarity; one side reaches the worker switch loop,
@@ -128,7 +128,8 @@ only).
 Ceiling: the table/exit check sees st.shared whose address folds to smem + constant
 through mov/add; a computed-address st.shared into the state bytes would go unseen (the
 smem address-slot analysis can close this). atom/red.shared and a generic st/atom/red
-of shared memory (cvta.shared) in a kernel with a dispatch are refused (mem.py).
+of shared memory (cvta.shared) in a kernel with a switch-loop dispatch are refused
+(mem.py); the direct dispatch has no state bytes.
 """
 
 import functools

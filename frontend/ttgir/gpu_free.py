@@ -6,9 +6,11 @@
 """Run real Triton host code on a CPU-only machine.
 
 Everything this module changes is part of the trust base and is listed, with its
-justification, in references/frontend_ttgir.md ("What dump monkeypatches"). Only device
-*queries* and device *placement* are replaced; no host computation (tile tables, grids,
-flags, descriptor shapes) is touched. Launches are intercepted separately (capture.py).
+justification, in references/frontend_ttgir.md ("What dump runs, and what it
+monkeypatches"). Only device *queries* and device *placement* are replaced, and, while
+capture.launch_record runs, the driver's TMA descriptor fill (recorded_tma_fills); no
+host computation (tile tables, grids, flags, descriptor shapes) is touched. Launches are
+intercepted separately (capture.py).
 """
 
 import contextlib

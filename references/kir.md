@@ -5,12 +5,15 @@ Frontends emit it as JSON; `frontend/kir.py` checks it against this contract
 (also inside the frontends, before a KIR file is written) and
 `frontend/emit_lean.py` turns it into Lean constructors of `lean/KV/IR.lean` one
 to one (same names, same field order: table fields, then `w`, then `addr`, then
-`loc`).
+`loc`; except a TExpr's `shape` before its `w`, `tmem`'s `cta_mask` before
+`site`, `nb_rep`'s `begin` as `isBegin`, `smem_write`'s `bar`, `idx` and `leader`
+as one `slot` triple, `bulk_store`'s `tmap` object as a pair, and the top-level
+`tmem.base` as `zeroBase`).
 
 ## Changes
 
 Changes since the first KIR v1 contract (`kir_version` stays 1). Frontends must
-follow items 1 to 3 and 8.
+follow items 1 to 3, 6 and 8.
 
 1. **`addr` on `shl` and `trunc`.** `addr` now also has an effect on `bin` `shl`
    and on `trunc`, scalar and tensor (IR.lean's `trunc` constructors gained the
@@ -29,7 +32,7 @@ follow items 1 to 3 and 8.
    issued an `expect_tx` on the slot before it. Both frontends already emit
    this; other shapes fail P0-4.
 4. **Optional `target` and `compiler`.** Informational top-level fields (below);
-   the TTGIR frontend writes `target`, the CuTe frontend both.
+   both frontends write both.
 5. **Lean only, no JSON change.** `commit_arrive` arrives asynchronously, when
    the MMAs complete; `threads_per_issue` is the number of threads that run each
    event (warps x 32 when every thread of the role runs it); a global tensor's
@@ -41,7 +44,7 @@ follow items 1 to 3 and 8.
    entry) or `workspace`. Before, P0-3 skipped such a tensor silently.
 7. **Lean only, no JSON change.** A metadata `load` whose index lies outside the
    tensor's extents is a P0-1 violation, not an evaluation error: its role stops
-   there and P0-2..P0-5 are undecided on that input (references/specs.md). A
+   there and the other specs are undecided on that input (references/specs.md). A
    `bar_init` does not count as an event of its role on the slot for P0-2's
    static-waiter rule.
 8. **`case.elision_flags` replaces the `region` event (incompatible).** The
@@ -106,7 +109,11 @@ follow items 1 to 3 and 8.
     barrier, a tensor that is not a 1-D metadata tensor or any other event (memory
     events such as `gload`, `gstore`, `gatomic` and TMA included), and checks that
     `nb_rep` events nest in each statement list. Every event of a P0-6 KIR is
-    executed by every warp of its role (the pass splits roles so).
+    executed by every warp of its role (the pass splits roles so). Amended: a P0-6
+    KIR's `named_bar` may say `all` (true only with `sync`): the instruction names no
+    thread count, a barrier for all threads of the CTA (`count` is their number), which
+    threads that exit release (PTX ISA `exit`); IR.lean's `named_bar` gained the flag
+    (false in every other KIR).
 15. **P1-2 (async store sources reuse ordered).** A P1 KIR may name the P1 specs
     it is decided for in a top-level `p1` (`["P1-2"]`, as the TTGIR frontend's
     PTX translation writes; absent: `["P1-1"]`, change 10, so the CuTe P1 KIRs do
@@ -121,16 +128,20 @@ follow items 1 to 3 and 8.
     named `<partition>_w<first>_<last>`). `emit_lean.py` emits `p1 := [...]`,
     `cta_threads := some n` and the theorems of the named specs
     (`KV.Holds .storeReuse` for P1-2); a P0 KIR and a P1 KIR without `p1` emit as
-    before.
+    before. Amended: a landing `smem_write` may name the mbarrier slot of its pair
+    leader with `leader` (a cta_group::2 load; IR.lean's `slot` gained the flag);
+    without it nothing changes.
 16. **`assume` (a model assumption).** A new statement `assume` {`cond`, `msg`}: a
     condition the frontend relies on but could not prove statically (e.g. that a
     write misses the bytes of a warp-specialize capture, frontend_ptx.md). Where it
     is false on an input, that is not a certain violation of the kernel: the role
     stops there as at an out-of-bounds metadata load (change 7), its later events
-    unknown, so P0-2..P0-6, P1-1 and P1-2 are undecided on that input and only the
-    findings that are certain anyway are listed (P0-1 and P0-3 on the events that
-    ran, the CTAs whose roles completed for P0-2/P0-4); the `not decided` lines and
-    the summary name the assumption (`a model assumption that does not hold (msg)`).
+    unknown, so every spec, P0-1 included, is undecided on that input and only the
+    findings that are certain anyway are listed: none of the stopped trace's cluster
+    (CTA without clusters), whose other roles may have used a value the broken
+    assumption made wrong (P0-1, P0-3 and P0-5 on the other clusters' events, P0-2/P0-4
+    on complete clusters); the `not decided` lines and the summary name the assumption
+    (`a model assumption that does not hold (msg)`).
     It records no event and changes nothing where it holds; IR.lean's `Stmt` gained
     the constructor `assume`. A device `assert` (a certain error where false: every
     spec FAILs) is unchanged.
@@ -159,8 +170,9 @@ follow items 1 to 3 and 8.
   the case's `source`, the CuTe frontend names the jit class's module; a
   hand-written `tests/lean` fixture names its own file).
 - `target` (optional): the GPU architecture the IR was compiled for (TTGIR
-  `ttg.target`; the CuTe frontend compiles for sm_100). `compiler` (optional):
-  the compiler release that produced the IR, two strings (CuTe: the
+  `ttg.target`; the PTX translation: the PTX `.target` without its `a`; the CuTe
+  frontend compiles for sm_100). `compiler` (optional): the compiler release that
+  produced the IR, two strings (TTGIR: `triton` and its version; CuTe: the
   `nvidia-cutlass-dsl` distribution the dump loaded). Both are informational:
   Layer 2 ignores them and `emit_lean` does not emit them.
 - `params`: scalar kernel arguments (runtime ints). Values come from
@@ -171,7 +183,8 @@ follow items 1 to 3 and 8.
   `x % cx + (y % cy) * cx + (z % cz) * cx * cy`. A grid the cluster dims do not
   divide does not launch (a kernel error: every spec FAILs on that input).
   Barrier slots are per CTA; an event's `cta` / `cta_mask` names the CTA(s)
-  whose slot it uses, by rank (absent: the issuing CTA). A rank outside the
+  whose slot it uses (`tmem`: whose TMEM it accesses; `smem_write`: whose shared
+  memory it writes), by rank (absent: the issuing CTA). A rank outside the
   cluster, or a mask bit at or above the cluster size, is a kernel error. The
   `cta`, `cta_mask` and `complete_tx` forms need a cluster of more than one CTA,
   `leader` an even cluster size.
@@ -205,12 +218,21 @@ follow items 1 to 3 and 8.
   TMEM allocation. `zero`: addresses are absolute (the fake-zero-base idiom,
   `cute.inttoptr(0)`), allowed only with 512 columns; `relative`: relative to
   the allocation (`retrieve_tmem_ptr`). Present iff some `tmem`, `tmem_wait` or
-  `named_bar` event exists (in a KIR without `p1`; with `p1`, iff it names P1-1).
+  `named_bar` event exists (in a KIR without `p1` or `nbar`; with `p1`, iff it
+  names P1-1; never in a P0-6 KIR, whose `named_bar` events need none).
 - `p1` (P1 KIR only, change 15): the P1 specs the KIR is decided for, a
   non-empty list of distinct labels `"P1-1"`, `"P1-2"`; absent: `["P1-1"]`.
 - `cta_threads` (P1-2 KIR only, change 15): the CTA's thread count, a positive
   multiple of 32 at least the roles' threads (warps no role has, such as the
   idle warps of a Triton warp-specialized kernel, included).
+- `nbar` (P0-6 KIR only, change 14): an object, the barrier pass's record for
+  audit, which Layer 2 ignores and `emit_lean` does not emit: `block` (the CTA's
+  thread dims), `dispatch` (whether the kernel has a warp-specialize dispatch),
+  `split_blocks` (blocks copied by node splitting) and `sites` (every named
+  barrier instruction reached,
+  `{role, op, id, count, loc, ptx_line, status, kind, certain, rep, why}`,
+  `status` `counted` or `open`; report.json `nb_sites`). Not in a KIR with
+  `tmem` or `p1`.
 
 ## Roles and statements
 
@@ -255,7 +277,7 @@ width).
 | `var`    | `name`            | let/loop variable or scalar param                                                                                                                                    |
 | `pid`    | `axis`            | program id                                                                                                                                                           |
 | `nprog`  | `axis`            | grid size                                                                                                                                                            |
-| `bin`    | `o`, `a`, `b`     | `o` in add, sub, mul, sdiv, udiv, srem, urem, shl, ashr, lshr, and, or, xor, smin, smax, umin, umax (wrapping BitVec semantics; division by zero is a verdict error) |
+| `bin`    | `o`, `a`, `b`     | `o` in add, sub, mul, sdiv, udiv, srem, urem, shl, ashr, lshr, and, or, xor, smin, smax, umin, umax (wrapping BitVec semantics; division by zero is a `model limit`) |
 | `cmp`    | `o`, `a`, `b`     | `o` in eq, ne, slt, sle, sgt, sge, ult, ule, ugt, uge; result `w`=1                                                                                                  |
 | `select` | `c`, `a`, `b`     |                                                                                                                                                                      |
 | `ext`    | `signed`, `a`     | sign/zero extend to `w`                                                                                                                                              |
@@ -304,8 +326,8 @@ Tagged by `"ev"`; all carry `loc`.
 | `work`                         | `fields`: {name: Expr} (the work item the role is processing, e.g. batch, head, n-block; used for ownership in P0-1/P0-3)                                                                                                                                                                                                                                                                                                                                                         |
 | `tmem` (P1)                    | `inst` (`ld`, `st`, `cp`, `mma`), `warp` (w=32 Expr: the issuing warp, whose lane quarter an ld/st must stay in), `rects` [{`use` (`data`, `d`, `a`, `sf`), `write` bool, `lane` w=32 Expr, `nlanes` (16, 32, 64 or 128), `col` w=32 Expr, `ncols` (1..512)}], optional `site` (the kernel line that reached a DSL helper), optional `cta_mask` (the CTAs whose TMEM it accesses; a cta_group::2 cp or mma). ld: data reads only; st, cp: data writes only; mma: one `d` write, at most one `a` read, zero or two `sf` reads. A role with a cp or mma has one warp |
 | `tmem_wait` (P1)               | `ld` bool: `tcgen05.wait::ld` (true) or `::st` of the whole role; completes the role's earlier ld (st)                                                                                                                                                                                                                                                                                                                                                                            |
-| `named_bar` (P1)               | `id`, `count` (const Exprs; count a positive multiple of 32), `sync` bool: `bar.sync` (true) or `bar.arrive` of every thread of the role on named barrier `id` (`nvvm.barrier`: id 0, count = the block's threads)                                                                                                                                                                                                                                                                |
-| `nb_open` (P0-6)               | `kind` (`lane`, `cond`, `loop`, `operand`, `dispatch`), `certain` bool, `why` string, `id`, `count` (const Exprs or null), `sync` bool: a named barrier instruction the barrier pass cannot count, reached by the role under a condition its participants may not share (references/specs.md "P0-6"); reached and certain: a certain P0-6 violation, else P0-6 is undecided                                                                                                     |
+| `named_bar` (P1, P0-6)         | `id`, `count` (const Exprs; count a positive multiple of 32), `sync` bool: `bar.sync` or `bar.red` (true) or `bar.arrive` (false) of every thread of the role, each warp arriving with its 32 threads, on named barrier `id` (CuTe `nvvm.barrier`: id 0, count = the block's threads); `all` (optional bool, P0-6 KIR only, true only with `sync`): the instruction names no thread count, so threads that exit release it (PTX ISA `exit`) |
+| `nb_open` (P0-6)               | `kind` (`lane`, `cond`, `loop`, `operand`, `dispatch`), `certain` bool, `why` string, `id`, `count` (const Exprs or null), `sync` bool: a named barrier instruction the barrier pass cannot count (references/specs.md "P0-6"): reached by the role under a condition its participants may not share (`lane`, `cond`, `loop`), with an id or count that is not a constant or that no set of warps meets (`operand`), or barrier 1 of a warp-specialize dispatch used otherwise (`dispatch`); reached and certain: a certain P0-6 violation, else P0-6 is undecided |
 | `nb_rep` (P0-6)                | `begin` bool, `why` string, `key` (optional string, default empty): the begin (true) or end of a region that runs a number of times the model does not fix, the same in every warp of the role; begins and ends nest within one statement list; a non-empty key names the region of the role before warp splitting whose condition is uniform over that whole role (its split roles repeat it alike)                                                                                  |
 | `bulk_store` (P1-2)            | `kind` (`tensor`, `tensor_reduce`, `bulk`, `bulk_reduce`), `warp` (w=32 Expr) and optional `lane` (w=32 Expr; absent: the elected lane of an `elect.sync` of the full warp): the issuing thread; `sym` (shared symbol) and `src` (Expr: byte offset in it) with `bytes` (positive int): the shared-memory bytes the store reads; optional `tmap` {`base` (global buffer), `addr` (Expr: byte offset)}: the 128-byte tensormap of an in-kernel descriptor it reads. Joins the issuing thread's open bulk async-group |
 | `bulk_commit` (P1-2)           | (no field) `cp.async.bulk.commit_group` of the role (every issuing thread of the role's bulk stores executes it)                                                                                                                                                                                                                                                                                                                                                                   |

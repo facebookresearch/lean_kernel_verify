@@ -42,8 +42,11 @@ of shared memory is a `smem_write` per executing thread (`warp`, `lane` as above
 times element size), atom/red on shared memory, a stmatrix (`sync`: one warp-synchronizing
 instruction of the warp; each address-providing lane writes a 16-byte row), and, with
 `async`, the landing of a TMA load, a bulk copy or a cp.async (its box, size or copy size;
-the KIR orders an asynchronous write only by its issue: a store issued after it may read
-before it lands, which P1-2 leaves undecided). A write of another CTA's shared memory
+a TMA or bulk load's landing names its load's mbarrier slot (`bar`, `idx`; `leader`: the
+pair leader's; not when its load computes the slot index only after it), which lets P1-2
+order it before a later store through that mbarrier's bytes; otherwise the KIR orders it
+only by its issue: a store issued after it may read before it lands, which P1-2 leaves
+undecided). A write of another CTA's shared memory
 (st.async, red.async, a shared::cluster bulk copy or reduce through a mapa address) is such
 an `async` smem_write with `cta`, the destination's rank. tensormap.cp_fenceproxy is a
 `tmap_write` of every warp executing it (`.sync.aligned`).

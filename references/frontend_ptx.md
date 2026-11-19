@@ -13,7 +13,8 @@ set in the environment of `run` (the default of `--frontend`) or of a frontend's
 run by hand.
 
 Everything around the translation stays: the case files, the dump (it records the PTX and
-the launch records below whichever translation runs), the variant names,
+the launch records below whichever translation runs), the variant names (plus
+`<spec>@cluster<dims>` for a TLX launch's all-preferred cluster geometry),
 `kir/report.json`, the family's checks and the report. The KIR has `ir` `"ptx"`, the
 frontend's log shows `[to_kir] LKV_FRONTEND=ptx: translating the PTX` (TLX:
 `logs/to_kir.log`, CuTe: `logs/frontend.log`), and report.json `translation` (report.md:
@@ -41,12 +42,15 @@ dump.json: per compiled kernel its PTX; per launch a LaunchRecord (grid, block, 
   |   regions.py   region tree: ifs, loops, the blocking mbarrier wait
   |   interp.py    thread model, slicing, partition refinement: KIR statements per role
   |   ops.py       op table; event rules in mem.py, tma.py, sync.py, cluster.py, tmem.py (P1)
+  |                and bulk.py (P1-2)
   |   anchors.py   the case's work anchors
   v
 Facts (or the refusal that stopped the variant)
   | frontend/ttgir/to_kir.py build_ptx | frontend/cute/to_kir.py PtxVariant.assemble
   v
-KIR, `ir` "ptx", written only if frontend/kir.py accepts it; CuTe: a P1 KIR from a second pass
+KIR, `ir` "ptx", written only if frontend/kir.py accepts it; a P1 KIR from a second pass
+(CuTe P1-1, TLX/Triton P1-2); the P0-6 KIR from a pass of its own (nbar.py, both
+families, either translation); each again for a TLX launch's all-preferred geometry
 ```
 
 ## Launch records
@@ -63,8 +67,8 @@ are `pdl`, `cooperative` and `preferred_cluster`; a TLX record also has
 the launch: `{"required_cluster": [x, y, z]}` (frontend_ttgir.md, dump.json and patch
 13). A launch whose `required_cluster` differs from its `cluster` is refused (a gap:
 which of the two the hardware uses is not modeled, so the geometry LKV would check may
-not be the one that runs; `to_kir.check_required_cluster`, both TTGIR translations); an
-absent attribute is the launch's cluster.
+not be the one that runs; `to_kir.check_required_cluster`, both TTGIR translations, the
+P0-6 and the P1-2 pass); an absent attribute is the launch's cluster.
 
 Parameters are named by position, never by guessing from addresses: TLX by the jit
 argument names in Triton's own parameter packing (a host descriptor expands to its
@@ -73,7 +77,7 @@ trace (`jit_params`): a parameter that passes a jit argument through names that 
 also when it is empty (data pointer 0) or passed under two names, and a computed one (a
 descriptor, a view, a struct of pointers) names the tensor its address resolves to among
 the arguments it is computed from. A pointer no tensor can be named for exactly is
-unnamed: a load through it is Data.
+unnamed: its value is Data, so an access through it is refused (slice soundness).
 
 CuTe host code encodes its TMA descriptors in software; the decoder reads the tiled
 CUtensorMap layout (checked against the driver's `cuTensorMapEncodeTiled`,
@@ -115,7 +119,9 @@ reducible flow, every exit edge of a natural loop leaving to one block, exactly 
 8-bit `ld.shared`) or a switch (LLVM's jump table of a select chain or `switch`), which
 `cfg.lower_switches` rewrites into the compare chain `@(i == k) bra T_k` (the last target
 when no case matched); the interpreter requires the index to be provably in range (its
-interval; out of range is undefined in PTX). Anything else (a guarded `ret`, a loop with
+interval; out of range is undefined in PTX), for a table of one target too, and a kernel
+that already has a register or label named like the chain's (`%__sw<line>_<k>`,
+`$__sw<line>_<k>`) is refused. Anything else (a guarded `ret`, a loop with
 exits to two blocks) is refused naming the lines. An unguarded `trap`
 ends its block, which goes on at the other successor of its one predecessor, a
 conditional branch, as if the trap were not reached: Triton places a
@@ -159,7 +165,9 @@ values, so warp-cooperative code (a varlen tile scheduler's per-lane `cu_seqlens
 prefix sums and ballots) is exact. The block must be (32k, 1, 1), and every launch of a
 variant must have the same block and cluster.
 
-* **TLX/Triton.** A kernel without `brx.idx` is one role, `default`. A warp-specialized
+* **TLX/Triton.** A kernel without a warp-specialize dispatch (the switch loop's `brx.idx`
+  or compare chain, or the direct dispatch, below; a switch `brx.idx`, "Control flow", is
+  none) is one role, `default`. A warp-specialized
   kernel's dispatch must match Triton's protocol item by item, on the CFG and reaching
   definitions (not on adjacent instructions): `wid = shfl.sync.idx(%tid.x >> 5, 0)` and a
   branch on `wid < D` of either polarity; the worker switch loop (optional `setmaxnreg`,
@@ -167,10 +175,12 @@ variant must have the same block and cluster.
   `brx.idx s`, or, with at most 3 worker states, the chain of `s == v` branches LLVM
   lowers the switch to); the default role's immediate stores (a vector of immediates
   too) of every worker's state before its first fork barrier and of the exit state
-  before its last; a fork-barrier count that no path changes. Each branch condition must
-  be the only result of its `setp`. A generic write of shared memory (through
-  `cvta.shared`) or an `atom`/`red.shared` in such a kernel is refused: the state bytes
-  are checked against `st.shared` only. Each worker runs the switch loop twice, into its
+  before its last; a fork-barrier count that no path changes (a fork barrier: barrier 1
+  without a thread count, as `barrier.sync`, `barrier.sync.aligned` or `bar.sync`). Each
+  branch condition must be the only result of its `setp`. A generic write of shared
+  memory (through `cvta.shared`) or an `atom`/`red.shared` in such a kernel is refused:
+  the state bytes are checked against `st.shared` only (the direct dispatch below has no
+  state bytes and refuses neither). Each worker runs the switch loop twice, into its
   state and into exit, so state k's role `partition<k>` is the code before the dispatch,
   one pass of the loop header and the region from target k back to the header, then
   `ret`; `default` is warps 0..D-1. A state whose region only synchronizes (padding)
@@ -192,29 +202,33 @@ variant must have the same block and cluster.
   The direct dispatch of Triton's single-warp-specialize lowering
   (`tlx.async_tasks(exclusive=True)`: one warp_specialize in the module, no state bytes,
   no switch loop) is matched too: the entry as above; the worker side's first block with
-  a fork barrier (`barrier.sync 1`, optional `setmaxnreg`, pure instructions) ends a
-  chain of branches whose conditions compare wid with an immediate (any comparison and
-  type; each later link pure, with the previous one as its only predecessor); each
+  a fork barrier (outside every loop; `barrier.sync 1`, optional `setmaxnreg`, pure
+  instructions) ends in the first link of a chain of branches whose conditions compare
+  wid with an immediate (any comparison and type; each later link pure, with the previous
+  one as its only predecessor); each
   worker warp follows the comparisons, evaluated at its warp id, to its partition's
-  first block. Every partition region has one fork barrier on every path to `ret`, the
-  default two, and the regions share no block with the default, the dispatch or the code
-  before it but the `ret` block. Roles: `default`, then `partition<k>` numbered by first
-  warp, the partitions that do more than synchronize first, padding last (Triton gives
-  larger partitions the lower warps, so k is the TTGIR partition index where the warp
-  counts do not grow in TTGIR order).
+  first block (warps that reach one block through different links are refused, unless it
+  only synchronizes: that padding block has a role per path). Every partition region has
+  one fork barrier on every path to `ret`, the default two, and the regions share no
+  block with the default, the dispatch or the code before it but the `ret` block. Roles:
+  `default`, then `partition<k>` numbered by first warp, the partitions that do more
+  than synchronize first, padding last (Triton gives larger partitions the lower warps,
+  so k is the TTGIR partition index where the warp counts do not grow in TTGIR order).
   Captures: Triton passes the values a partition captures through shared memory: the
   default stores them before its first fork barrier, each worker loads them between its
   first and second one (both protocols). A worker's `ld.shared` there of bytes the
   default stored gets the stored value (byte by byte, so a capture split into bytes is
-  put back together) if the default's store runs unconditionally (statically known
-  issuing threads, no runtime condition: no predicate, branch on a uniform condition or
-  loop around it, but the decision of a dispatch that may run no round, on its round side,
-  under which the workers load it) and its value is one value in every thread that
+  put back together) if every thread of the default runs the store (no predicate or
+  thread condition, branch on a uniform condition or loop around it, but the decision of
+  a dispatch that may run no round, on its round side, under which the workers load it:
+  a store of only some threads may land before another thread's earlier store of the
+  bytes, or not happen) and its value is one value in every thread that
   depends on nothing but the launch (parameters, program id, shared symbols, metadata);
   otherwise the load is Data as any shared load (so is a worker's load before its region
   in a dispatch that may run no round). Every other write of shared memory
-  reports the bytes it may touch, over the role's executing threads (the bounds of its
-  offsets plus its size): `st.shared` (an unknown address, a condition, a value of a
+  reports the bytes it may touch, over the threads that may execute it, whichever lane
+  `elect.sync` elects (the bounds of its offsets plus its size; any byte where an offset
+  depends on the elected lane): `st.shared` (an unknown address, a condition, a value of a
   role, a worker's, the default's after its first fork barrier), `stmatrix` (a 16-byte
   row per address-giving lane), `atom`/`red.shared`, generic `st`/`atom`/`red` through
   `cvta.shared` (a direct dispatch does not refuse them) or a data address (any byte),
@@ -224,15 +238,17 @@ variant must have the same block and cluster.
   `st.async`/`red.async`, `tcgen05.alloc`'s address slot, `tensormap.replace` of a
   staging buffer and `mbarrier.inval` (the op-table rows that write shared memory are
   listed in interp.CAPTURE_WRITERS; tests/ptx/test_captures.py checks the table against
-  them). The bounds come from interval arithmetic, including masks and the ring-buffer
+  them, and that each reaches a capture hook). The bounds come from interval arithmetic, including masks and the ring-buffer
   index `x % k` as LLVM writes it for any x (`x - ((x + b) & -k)`, `x - q k` with q a
-  multiply-high quotient): bounds on the arithmetic, no claim about the quotient. Such a
+  multiply-high quotient, its multiplier a 32-bit one): bounds on the arithmetic, no
+  claim about the quotient, and none where the arithmetic may wrap at its width. Such a
   write before the workers' loads makes the captured bytes it may touch unknown (all of
   them if its address is no shared symbol plus an offset); roles are translated one
   after the other, the default first, so such a write of a byte another role already
-  read refuses the kernel. A write after its role's second fork barrier follows every
-  worker's loads, unless it lands in another CTA's shared memory (`st.async`,
-  `red.async`, a shared::cluster bulk copy, a multicast TMA, bulk copy or CLC
+  read refuses the kernel. A write after its role's second fork barrier (counted on its
+  path: each arm of an `if` from the count before it) follows every worker's loads,
+  unless it lands in another CTA's shared memory (`st.async`,
+  `red.async`, a shared::cluster bulk copy or reduce, a multicast TMA, bulk copy or CLC
   response): no barrier of the CTA orders that one, so it counts wherever it is issued.
   An asynchronous write (a landing, a CLC response) may land after a later store: the
   default records no capture over bytes an earlier asynchronous or remote write may
@@ -242,8 +258,9 @@ variant must have the same block and cluster.
   warp-specialize captures [lo, hi)`, per executing thread) that its bytes miss each
   run of known captures, evaluated on every input. Such a write over a capture is no
   certain violation (it may land after the workers read it), so where the assumption
-  does not hold the role stops there and the input is undecided (P0-2..P0-6, P1), never
-  a FAIL; the report names the assumption. An mbarrier object changes at all its events but waits (some
+  does not hold the role stops there: the input is undecided, not a FAIL (P0-1..P0-5,
+  P1-2: `specs.md`, "Undecided specs"; the P0-6 pass reads no captures), and the report
+  names the assumption. An mbarrier object changes at all its events but waits (some
   asynchronous, some from another CTA, at an index that may be loop-carried): after
   every role, each mbarrier array's bytes (a PASS needs every index in range) must miss
   every capture a worker read, else the kernel is refused.
@@ -294,12 +311,12 @@ contract:
 | tensor shape params (i64) | `T.shape.i`, `T.stride.i` | `T_shape<i>`, `T_stride<i>` |
 | barrier arrays | one per init run (a TLX `alloc_barriers`) | init runs split by the slots their dynamic uses take |
 | barrier names | the assignment target of the init's source line (`k_fulls`), else `mbar_<offset>` | `mbar_<offset>` |
-| TMA | `tma_load` / `tma_store` / `tma_reduce` on the host descriptor | `tma_load` plus its footprint `gload` on the base tensor; stores and reduces as footprint `gstore` / `gatomic` on the base |
+| TMA | `tma_load` / `tma_store` / `tma_reduce` on the host descriptor; through an in-kernel descriptor footprint `gload` / `gstore` / `gatomic` on its base, a load also a `tma_load` of its box descriptor | `tma_load` plus its footprint `gload` on the base tensor; stores and reduces as footprint `gstore` / `gatomic` on the base |
 | descriptor dims | outermost first | innermost first |
 | locations | `fbcode/<path>:line` | `<path>:line` (DSL 4.4.2: best effort) |
 | `while` budget | 65536 | the case's `max_iters` |
 | work events | gated (below) | at every anchor |
-| also | CLC | clusters, the P1 pass |
+| also | CLC (with clusters too), clusters, the all-preferred cluster geometry, the P1-2 pass | clusters, the P1-1 pass |
 
 ## Memory
 
@@ -309,11 +326,12 @@ variable's (LLVM's `__local_depot`), and the generic addresses of the same share
 local bytes, which only `cvta` makes (so a generic address is never taken for a window
 one). A global access (`ld`/`st.global`, generic `ld`/`st`/`atom`/`red` on a global
 address, `atom`/`red.global`, `red.async`, `cp.async`) peels its address into (tensor,
-byte offset) through adds, subtracts and selects; a select between two tensors takes the arm the role's condition picks (CuTe: a
-condition uniform per warp splits the role), and one whose condition is one value in the
-role but not known (a program id or parameter test) becomes one access per tensor under
-the condition and its negation (a generic access through a select between a shared and a
-global address: refused); the bases may come from `ld.param` through a select of
+byte offset) through adds, subtracts and selects; a select between two tensors takes the
+arm the role's condition picks (CuTe: a condition uniform per warp splits the role), and
+one whose condition is one value in the role but not known (e.g. a program id or
+parameter test) becomes one access per tensor under the condition and its negation (not
+for a `cp.async` or bulk copy, nor a generic access through a select between a shared
+and a global address: refused); the bases may come from `ld.param` through a select of
 two parameter addresses. The element offset is the byte offset over
 the element size, provably exact, else the access is refused. An integer global load of
 the register's width whose value reaches a root is a metadata read,
@@ -381,9 +399,9 @@ without mBarriers) is removed from the KIR; any other inval is refused (`ir_ops_
   other write of shared memory by the role that may overlap an open buffer closes it (a
   later replace or copy of it is refused): a `st.shared` or an `atom`/`red.shared` (also
   under a data predicate), a generic `st`/`atom`/`red` on those bytes, and `stmatrix`,
-  `cp.async`, TMA and bulk copies into shared memory, mbarrier and
-  `tcgen05.alloc`/`commit` and CLC writes whatever their bytes. The zeroing, the
-  replaces and the copy must be in one statement list; a `tensormap.replace` of a
+  `cp.async`, TMA and bulk copies or reduces into shared memory, `st.async`/`red.async`,
+  mbarrier and `tcgen05.alloc`/`commit` and CLC writes whatever their bytes. The zeroing,
+  the replaces and the copy must be in one statement list; a `tensormap.replace` of a
   descriptor in global memory is refused. A TMA instruction uses the descriptor a
   cp_fenceproxy of its role wrote at the same address earlier in the same loop
   iteration, on an enclosing path, or in that iteration before loops it entered since
@@ -427,7 +445,7 @@ Coordinates, footprints, transaction bytes, issuing threads, sub-byte formats:
   kind numbered as if the grid held only its kind (CUDA runtime API, the attribute's
   documentation). So every CTA of such a launch runs as in one of two geometries: all
   clusters regular (the variant's KIR, `<spec>`) or all preferred (a second KIR,
-  `<spec>@cluster<dims>`, with the inputs whose grid the preferred dims divide), and the
+  `<spec>@cluster<dims>`, with every input of the specialization), and the
   report names the geometry of each verdict. The P0-6 barrier pass writes both
   geometries too (`<spec>.nb.json`, `<spec>@cluster<dims>.nb.json`, whatever the
   translation): the rank and the cluster special registers may decide which warps reach a
@@ -436,17 +454,24 @@ Coordinates, footprints, transaction bytes, issuing threads, sub-byte formats:
   P0-1, P0-2, P0-4, P0-5 and P0-6 (per access, per cluster ledger, per CTA) hold for every
   mix if they hold in both;
   P0-3 counts writes over the whole grid and holds for a mix only if every aligned group
-  of CTAs writes the same elements in both geometries, which is not checked (Limits).
-  P1-2 has a KIR per geometry too (`<spec>@cluster<dims>.p1.json`); it decides each
-  cluster on its own except a tensormap that one cluster's stores read and another
-  cluster writes (F2 across clusters), so it holds for every mix if it holds in both,
-  except that cross-cluster check, which pairs only clusters of one geometry (Limits).
-  CLC with a preferred geometry is refused. If the launches disagree on the preferred
-  dims, the all-preferred geometry is the refused variant `<spec>@cluster` (a gap for
-  every input of the specialization) and the regular KIR is still checked. The P0-6 and
-  P1-2 KIRs are made from the regular geometry only. A CuTe launch with a preferred
-  cluster other than its cluster is refused (gap: the CuTe translations check one
-  geometry; `cute/to_kir.preferred_cluster_gap`).
+  of CTAs writes the same elements in both geometries, which is not checked
+  ("Limitations"). P1-2 has a KIR per geometry too (`<spec>@cluster<dims>.p1.json`); it
+  decides each cluster on its own except a tensormap that one cluster's stores read and
+  another cluster writes (F2 across clusters), so it holds for every mix if it holds in
+  both, except that cross-cluster check, which pairs only clusters of one geometry
+  ("Limitations"). With CLC the all-preferred P0 and P1-2 KIRs are refused (`CLC with a
+  preferred cluster geometry`, a gap: which clusters a try_cancel may cancel when the
+  sizes mix is not modeled); the regular ones and both P0-6 KIRs are still checked. If
+  the launches disagree on the preferred dims, or break a rule CUDA states for them
+  (`preferred_geometry`: every launch has a regular cluster, i.e. cluster dims other than
+  1 x 1 x 1 or the function's REQUIRED_CLUSTER, as a bare `.reqnctapercluster 1, 1, 1` is
+  not in the LaunchRecord; the preferred x and y are multiples of the regular ones and z
+  is the regular z; the preferred dims divide every launch's grid), the P0, P0-6 and
+  P1-2 passes report the failure `<spec>@cluster` for the all-preferred geometry (a gap
+  for every input of the specialization: what the device runs for such a launch is not
+  modeled); their regular KIRs are still checked. A CuTe launch with a preferred
+  cluster other than its cluster is refused, its P0-6 KIR too (gap: the CuTe frontend
+  checks one geometry; `cute/to_kir.preferred_cluster_gap`).
 * **tcgen05 in P0.** No event except `tcgen05.commit`, an asynchronous `commit_arrive` on
   its mbarrier; the P0 specs do not see tensor memory.
 * **CLC (TLX).** `try_cancel` and its queries follow the schedule model of
@@ -525,7 +550,8 @@ geometry also `<spec>@cluster<dims>.p1.json`, all clusters preferred ("Clusters,
 CLC").
 A specialization without a bulk store is `not_applicable`; a refusal or failure is
 logged as `P1 refused|error: <why>` and leaves its P1-2 "not checked"; the P0 KIR and
-its verdicts never change (`LKV_P1=0` skips the pass). The roles are split as the CuTe
+its verdicts never change (`LKV_P1=0` skips the pass of a `to_kir` run by hand;
+`lkv.py run --no-p1` skips the P1 checks). The roles are split as the CuTe
 pass splits them (a role whose warps issue an mbarrier wait, arrive or commit only in
 part; a TTGIR partition's parts are named `<partition>_w<first>_<last>`), since the P1
 ledger takes a role's mbarrier event as every warp's. The `let`s nothing reads are
@@ -553,17 +579,20 @@ TMA or bulk load names its load's mbarrier (`bar`, `idx`: the slot of the one
 its footprint `gload` between), which lets P1-2 order the landing before a later store
 through that mbarrier's bytes (`specs.md` P1-2); a cta_group::2 load completing on its
 pair leader's mbarrier names that slot with `leader`, as its `tma_load` does; a later
-message of a Triton block (no `tma_load` of its own), a multicast load or one whose
-mbarrier is a select between arrays names none.
+message of a Triton block (no `tma_load` of its own), a multicast load, one whose
+mbarrier is a select between arrays or one whose load computes the slot index only after
+the landing names none.
 `tensormap.cp_fenceproxy` is a `tmap_write` of each executing warp. Shared symbols:
 every `.extern .shared` variable starts at the dynamic shared memory, so all of them are
 the first one.
 
 Pruning and disjointness. The byte interval each write, store and fixed object covers
 is bounded statically over its executing threads (`expr.interval`, plus urem and srem
-by a positive constant, the ring index of a loop-carried counter; P0 keeps
-`expr.interval`). A `smem_write` that cannot meet any store source of its symbol is
-dropped. Shared bytes written outside the events must not meet a store source: the
+by a positive constant, the ring index of a loop-carried counter, with no bound where a
+value may wrap its width, as in `expr.interval`; P0 keeps `expr.interval`). A
+`smem_write` that cannot meet any store source of its symbol is dropped, and so are the
+loops and ifs it leaves empty (a loop left with `let`s stays: they may carry values out
+of it). Shared bytes written outside the events must not meet a store source: the
 mbarrier objects (8 bytes per initialized slot), tensormap staging buffers
 (`tensormap.replace`, 128 bytes), tcgen05.alloc's address slot (4 bytes) and CLC
 responses (16 bytes); a write under a predicate that depends on data must not meet one
@@ -571,21 +600,32 @@ either. (The pruning compares offsets across CTAs: every CTA has the same shared
 layout.) An
 interval that cannot be bounded counts as meeting everything.
 
-Refusals (`P1-2: ...`; P0 is unaffected): a store, write or group under a lane
-condition that depends on runtime values; a store several lanes of a warp may execute
-(its issuers are run-time values); a commit or wait that a bulk store issuer of its role
-does not execute (warp 0 alone executing one covers its elected lane, as Triton emits
-around a descriptor copy); `wait_group.sync_restrict::proxy::async`; an mbarrier wait
-executed by part of a warp; an address that is no shared symbol plus an offset, a
-tensormap address of unknown provenance; a packed sub-byte descriptor; a multicast TMA
-load; stmatrix shapes other than m8n8; the fixed objects and data-predicated writes
-above meeting a store source; `mbarrier.inval` (as P1-1's pass).
+Refusals (`P1-2: ...`; P0 is unaffected): a store, write or group under a lane condition
+that depends on runtime values, or that depends on which lane `elect.sync` elects (as
+every event: a lane condition beside `elect.sync`, an operand that differs between the
+lanes of a warp) or runs under a negated `elect.sync`; a commit or wait under a
+predicate that depends on data; a store several lanes of a warp may execute (its issuers
+are run-time values); a global store or atomic into a buffer that holds the tensormaps
+of bulk stores (only `tensormap.cp_fenceproxy` is a tensormap write); a commit or wait
+that a bulk store issuer of its role does not execute (warp 0 alone executing one covers
+its elected lane, as Triton emits around a descriptor copy);
+`wait_group.sync_restrict::proxy::async`; an mbarrier wait executed by part of a warp;
+an address that is no shared symbol plus an offset, a tensormap address of unknown
+provenance; a bulk copy whose size is no positive constant; a packed sub-byte
+descriptor; a multicast TMA load; stmatrix shapes other than m8n8; the fixed objects and
+data-predicated writes above meeting a store source; `mbarrier.inval` (as P1-1's pass).
+Tagged `R7:` as in the P1-1 pass (the `named_bar` events, the role split): a named
+barrier reached by part of the role, a named-barrier id or count that is not constant
+(one uniform per warp splits the role), a count that is not a positive multiple of 32,
+an mbarrier wait, arrive or commit under a runtime lane condition in a role of several
+warps.
 
 ## The P0-6 barrier pass (both families)
 
 `frontend/ptx/nbar.py` translates every variant's PTX once more, for P0-6 "named
 barriers convergent" (`specs.md` "P0-6"), into the P0-6 KIR (`<spec>.nb.json` next to
-the TTGIR dump, `<Kernel>__<digest>.nb.json` in the CuTe `kir/`; `kir.md` change 14):
+the TTGIR dump, also `<spec>@cluster<dims>.nb.json` for a preferred cluster geometry,
+`<Kernel>__<digest>.nb.json` in the CuTe `kir/`; `kir.md` change 14):
 in both families, whatever `LKV_FRONTEND` selects (also `legacy`), and also for variants
 whose P0 translation is refused, but for a cluster geometry LKV does not check ("Launch
 records", "Clusters, tcgen05, CLC"). It reuses this frontend's parser, CFG, regions, roles
@@ -596,15 +636,17 @@ is the control flow, the named barriers and the values that decide them.
   an event (its warps run the code before the dispatch too); split into warp ranges (SplitWarps) at every
   barrier-deciding condition that is uniform within each warp but differs over the role
   (`partition1:w12-12`, `warps4_7`). The dispatch's fork barriers (`barrier.sync 1`
-  without a count) are skipped: cfg.py checks their protocol.
+  without a count, in any spelling) are skipped: cfg.py checks their protocol.
 - **Values.** Exact expressions as above; data carries a class over the role's threads,
   `u` (one value), `l` (per lane, the same in every warp), `w` (per warp), `t` (any),
   `nondet` (strong loads, atomics, timers, test/try_wait outside the wait idiom) and the
   strong loads it comes from. Class-`u` data without a strong load becomes a fresh
   uniform symbol, so arithmetic on it stays exact (an address keeps its base tensor, a
   condition on it its comparison); a KIR expression never reads one (a branch on it is
-  an `nb_rep` region). Loads by address class: shared memory (`ld.shared`, generic,
-  `::cluster`, `ldmatrix`: per lane), weak loads of tensors the kernel never writes;
+  an `nb_rep` region). Loads by address class: shared memory (a weak `ld.shared`,
+  generic, `ldmatrix`: per lane; `ld.shared::cluster` has no op table row, so `t`; a
+  strong `ld.shared` is a strong load), weak loads of tensors the kernel never writes
+  (by name);
   collectives (`redux`, `vote`, `shfl.idx` from one lane) of per-lane data are uniform.
   A weak integer load of a 1-D tensor whose contents the dump recorded and the kernel
   never writes is an exact metadata `load` (mem.py, as in the P0 translation): the TTGIR
@@ -615,19 +657,26 @@ is the control flow, the named barriers and the values that decide them.
   1-D contiguous, no storage shared with a written tensor).
   A spin loop's accepted value (every source a strong load of a uniform address its exit
   test accepted; also LLVM's rotated `if accept(v0) skip; else spin`) is published
-  (`u`). An instruction without an op table row computes `t` data unless it may be a
-  barrier or a branch (error).
+  (`u`) in the register that holds it as loaded (or a copy) at every exit; a value
+  computed from it in the loop is `t`, not nondet. An instruction without an op table
+  row computes `t` data unless it may be a barrier or a branch (error).
 - **Control flow.** An If deciding no barrier runs both arms for their values; one
   deciding a barrier is a KIR `if` (exact uniform), a split (per warp), two `nb_rep`
   regions (class-u data or a symbol), or divergent: both arms translated with every
-  barrier in them an `nb_open` whose reason is the innermost certain enclosing
-  condition. A loop is exact (KIR `for`/`while`) if interp's `run_loop` takes it, else
+  barrier in them an `nb_open`, certain if every enclosing divergent condition is (for
+  a barrier without `.aligned`, none of them by lanes alone) and it lies in no `nb_rep`
+  region, with the innermost reason, else with the innermost condition that is not
+  certain. A loop is exact (KIR `for`/`while`) if interp's `run_loop` takes it, else
   iterated to a class fixed point (at most 8 rounds) and translated once more: an
   `nb_rep` region if its exit is uniform, divergent (`nb_open` kind `loop`) if not. Each
   class also records whether the value is uniform over the role before warp splitting
   (thread-index instances over all its warps; symbols and loads inherit it); an `nb_rep`
   region whose condition is gets the key `<role>@<PTX line>`, the same in every split
-  role, so Lean may pair a barrier the split roles share in it (`specs.md` "P0-6").
+  role, so Lean may pair a barrier the split roles share in it (`specs.md` "P0-6"),
+  unless the regions' path signatures differ: a split role records what each register
+  is computed from and under which decisions it resolved to one arm (or held as its own
+  warps' instance), and `_sign` appends `#<n>` to a key whose split roles' signatures
+  differ.
   Classes also record whether a value is alike in corresponding lanes of every warp of
   that role, so a warp collective (`vote`, `redux`, `shfl.idx` from one lane) of such
   per-lane data (e.g. a varlen tile scheduler's warp scan of sequence lengths) keys too.
@@ -643,8 +692,8 @@ is the control flow, the named barriers and the values that decide them.
   regions.py still refuse (several dispatches, a loop with exits to two blocks, several
   rets; a switch `brx.idx` is `cfg.lower_switches`' compare chain as in the P0
   translation, refused only if its index is not provably in range), a call, roles that
-  are not warp ranges, a parameter the launches do not give; failures are ERRORs (`kind`
-  `error`).
+  are not warp ranges; failures are ERRORs (`kind` `error`), among them a parameter the
+  launches do not give (`P0-6 pass: ...`).
 - **Audit.** The KIR's `nbar.sites` (copied into report.json `variants_nb[].nb_sites`)
   lists every barrier instruction reached with its role, PTX line, loc, status
   (`counted` or `open`), kind, certainty and reason.
@@ -655,9 +704,9 @@ is the control flow, the named barriers and the values that decide them.
   the loaded value's class depends on it (shared memory, a tensor the kernel never
   writes). The substitutions are memoized per translator across
   expressions (interp's `memo`; the values of a role share their thread-dependent
-  subexpressions). The TTGIR hook translates the specializations in up to `--jobs`
-  forked processes (`to_kir --jobs`, which `lkv.py run` passes; the results and files are
-  the same in any order).
+  subexpressions). The TTGIR hook makes its P0-6 KIRs (one per specialization and cluster
+  geometry) in up to `--jobs` forked processes, one KIR each (`to_kir --jobs`, which
+  `lkv.py run` passes; the results and files are the same in any order).
 
 ## Refusals
 
@@ -680,15 +729,19 @@ parser cannot read, an internal error): ERROR. Common reasons:
 | `data value from ... reaches ... (slice soundness)` | a dropped value (float, shared or tensor memory contents, a data load) decides an event, a branch, an address or a predicate; the origin names the instruction and line that produced it |
 | `irreducible control flow`, `the loop at ... exit edges`, `N ret/exit`, `guarded ret`, `trap at line N is not reached by one conditional branch` | a control-flow shape outside the supported ones |
 | `warp-specialize dispatch (<item>): ...` | a TLX dispatch that does not match the protocol (a Triton change of its lowering) |
-| `a generic write of shared memory in a warp-specialized kernel`, `atom.shared... in a warp-specialized kernel` | a TLX dispatch kernel that writes shared memory through `cvta.shared` or a shared atomic |
+| `a generic write of shared memory in a warp-specialized kernel`, `atom.shared... in a warp-specialized kernel` | a TLX kernel with a switch-loop dispatch (state bytes) that writes shared memory through `cvta.shared` or a shared atomic (a direct dispatch refuses neither) |
 | `mbarrier.inval of ... ends no private synchronous cycle ...` | an inval whose slot's events since its init are not exact arrivals and one wait of parity 0 in one statement list |
 | `no op table row for ...` (error) | an instruction without a row: `ir_ops_ptx.md` and `ops.py` need one |
 | `... that several lanes of a warp may execute, compiled by ptxas X for sm_N: its issuing is measured for ...` | a multi-lane TMA or bulk copy from a compiler or target whose issuing was not measured |
-| `a global access whose address has no tensor provenance` | an address from a loaded pointer, an integer or an unnamed parameter |
+| `a global access whose address has no tensor provenance` | an address from a loaded pointer or an integer (through an unnamed pointer parameter, whose value is Data: the slice soundness message; through a parameter's own address: `a global access through the address of the parameter ... (only ld.param reads it)`; through a descriptor's or the scratch's: `a global access through ... (only TMA instructions)`) |
 | `... (sub-element access)`, `byte offset ... not provably a multiple ...` | an access that is not whole elements of its tensor |
 | `mbarrier address is not a shared-memory symbol plus an offset`, an unresolved array or index | a barrier the arrays cannot place |
 | `TMA load completing on an mbarrier of another CTA (a mapa result) ...`, `... in a cluster of N CTAs without .multicast::cluster::all` | a cluster idiom outside the supported ones (a load completing on neither the issuing CTA's nor its pair leader's barrier; a CLC response only the asking CTA receives) |
-| `... with only part of warp(s) [...] active (undefined in PTX)` | a full-mask collective or aligned instruction under a partial warp |
+| `... with only part of warp(s) [...] active (undefined in PTX)`, `... under a condition that differs between the lanes of a warp` | a full-mask collective under a partial warp; a `.aligned` instruction under a mask that differs between the lanes of a warp |
+| `brx.idx at line N over K targets: its index is not provably in [0, K) ...`, `brx.idx at line N: the names of its compare chain ... are taken` | a switch whose index the interpreter cannot bound, or whose compare chain's names the kernel already uses ("Control flow") |
+| `a shared write that may overwrite a warp-specialize capture another role read ...`, `the warp-specialize capture at byte ... lies in an mbarrier array ...` | a shared write that may touch a known capture after a worker read one; a capture a worker read inside an mbarrier array ("Threads and roles") |
+| `... that several lanes of a warp may execute: its issuing is not measured ...` | a multicast or cta_group::2 TMA load or a shared::cluster bulk copy or reduce that more than one lane of a warp may issue |
+| `CLC with a preferred cluster geometry ...`, `... required cluster (cuFuncSetAttribute REQUIRED_CLUSTER) is ...`, `cuda.launch_ex: a preferred cluster ...`, `launches differ in their (preferred) cluster dims ...`, `preferred cluster dims ... without a regular cluster ...`, `... are no multiple of the regular ...`, `... do not divide the grid of input(s) ...` | a cluster geometry LKV does not check ("Launch records", "Clusters, tcgen05, CLC") |
 | ``case `work`: ...``, metadata and stale-data messages | the case or the host run (`frontend_ttgir.md`, `frontend_cute.md`) |
 
 To try a new case, run one input (`lkv.py run --inputs`), read the refusal, and open the
@@ -706,6 +759,11 @@ shared through `let`s, thread offsets fold into closed forms over the thread ind
 adjacent accesses of one source line merge into one multi-lane event, and the CuTe
 assembly rerolls LLVM's unrolled blocks into `for` loops (the same trace).
 
+Each variant gives Lean more than one KIR, each checked on its own: the P0 KIR, the P0-6
+barrier pass's (both families, whatever the translation), the P1 pass's (CuTe P1-1,
+TLX/Triton P1-2) and, for a TLX launch with a preferred cluster, each of them again in
+the all-preferred geometry.
+
 ## Limitations
 
 * Known gaps: the translation refuses some kernels and constructs that the legacy
@@ -714,24 +772,30 @@ assembly rerolls LLVM's unrolled blocks into `for` loops (the same trace).
 * A verdict covers the case inputs, the compiled variants they select and `max_iters`.
 * Below PTX nothing is checked (ptxas, SASS), except the TMA issuing rules measured on
   hardware (`ir_ops_ptx.md`).
-* Shared memory, TMEM, MMA math, named barriers and fences are outside the P0 slice; TMEM
-  accesses, `tcgen05.wait` and named barriers are P1 events (CuTe), fences and TMEM
-  lifetime are not checked.
+* Shared memory, TMEM, MMA math, named barriers and fences are outside the P0 slice:
+  named barriers are P0-6's (its own pass, both families) and `named_bar` events of both
+  P1 passes; TMEM accesses and `tcgen05.wait` are P1-1 events (CuTe); shared-memory
+  writes and bulk stores are P1-2 events (TLX/Triton); fences and TMEM lifetime are not
+  checked.
 * Preferred cluster geometries (TLX/Triton) are checked all-preferred and all-regular (P0-6
   and P1-2 too); P0-3 of a launch that mixes them is covered only where both geometries
   write the same elements per preferred-size group of CTAs, which is not checked, and
   P1-2's tensormap check across clusters only between clusters of one geometry ("Clusters,
   tcgen05, CLC"). A CuTe launch with a preferred cluster is refused (gap), as is a TLX
   launch whose function's required cluster (cuFuncSetAttribute) differs from its cluster
-  dims.
+  dims, their P0-6 KIRs too. The all-preferred KIRs of TLX launches that break a rule
+  CUDA states for the preferred dims (no regular cluster, a preferred x or y that is no
+  multiple of the regular one or another z, dims that do not divide the grid) are
+  refused (gap): what the device runs then is not modeled.
 * Refused by design: CuTe CLC, P1-1 on TLX, TMEM addresses relative
   to the allocation, multicast bulk copies, multicast or cta_group::2 TMA loads and
   shared::cluster bulk copies and reduces that several lanes of a warp may execute (issuing not
   measured, `ir_ops_ptx.md`), im2col TMA, packed sub-byte TLX descriptors, descriptors
   edited in global memory, `mbarrier.inval` outside
   a private synchronous cycle, carry-flag instructions under a predicate, generic writes
-  of shared memory and shared atomics in TLX warp-specialized kernels, the control-flow
-  shapes above, and anything whose value would have to come from Data.
+  of shared memory and shared atomics in TLX kernels with a switch-loop dispatch, CLC
+  with a preferred cluster geometry (the all-preferred KIRs), the control-flow shapes
+  above, and anything whose value would have to come from Data.
 * A value one role stores to shared memory and another role reads after an mbarrier
   handoff (a mailbox) is Data, so a branch, loop exit or address on it is refused. A TLX
   layer-norm backward with an affine epilogue hands its reducer warps a 32-word header

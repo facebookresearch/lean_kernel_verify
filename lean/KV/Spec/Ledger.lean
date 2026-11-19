@@ -85,7 +85,7 @@ arrivals; bytes are attributed under each of them (the representative first, at 
 `maxShareVectors` in all) until one satisfies P0-4's transaction clauses
 (`SlotLedger.TxOk`), so P0-4 fails only if none does.
 
-Precise needs (P1-1: `ledger` with `precise`, `Run.ledgersP1`; P0-4 only for the landers'
+Precise needs (P1-1, P1-2: `ledger` with `precise`, `Run.ledgersP1`; P0-4 only for landers'
 lower bounds, below; P0-2 and the classification of P0-4 use the default). Subtracting the other roles' arrivals over the whole run says nothing about a
 role whose co-arrivers have later arrivals: with compute warps split into roles of 1 and
 3 warps on one count-4 slot, phase k needs `4k - 3K` of the 1-warp role (K the run's
@@ -101,11 +101,11 @@ needs are as sound as the run-total ones and at least as large; the classificati
 them too (more laps and skips proved). Each wait also gets `lockPhase`, its phase lower
 bound under the lockstep reading: `assumedPhase`, at least the previous wait's
 `lockPhase` (+1 after a parity change), raised by the laps the lockstep credit shows. P1-1
-uses it, with each role's largest fitting share (`SlotLedger.lockNeeds`), only to tell a
-certain race from an undecided pair, never to prove ordering.
+and P1-2 use it, with each role's largest fitting share (`SlotLedger.lockNeeds`), only to
+tell a certain race from an undecided pair, never to prove ordering.
 
-Partial credit (P1-1 only, `precise`). The warps of a P1 role all issue its mbarrier
-events (the CuTe P1 pass splits roles so) but need not be at one point. A need of m
+Partial credit (P1 only, `precise`). The warps of a P1 role all issue its mbarrier
+events (the P1 passes split roles so) but need not be at one point. A need of m
 arrivals of a role of several warps shows that some warp issued the arrive event holding
 the m-th arrival, and that every warp issued it only if m takes more of its arrivals than
 all warps but one give (each warp at least one; an equal part under the lockstep credit);
@@ -251,7 +251,7 @@ structure WaitRec where
   /-- A wait that never returns in the optimistic progress pass: (arrivals that reach the
   slot before it, arrivals its `assumedPhase` needs). -/
   blocked : Option (Int × Int)
-  /-- The phase lower bound under the lockstep reading (P1-1 only, `ledger` with `precise`;
+  /-- The phase lower bound under the lockstep reading (P1 only, `ledger` with `precise`;
   else `assumedPhase`): `assumedPhase`, at least the role's previous `lockPhase` on the slot
   (+1 after a parity change), raised by the laps that the lockstep credit shows. -/
   lockPhase : Int := 0
@@ -1088,7 +1088,7 @@ def ClusterTrace.roles (c : ClusterTrace) (n : Nat) : Array RoleTrace :=
   c.ctas.flatMap fun ct => ct.roles.map fun rt => { rt with role := ct.rank * n + rt.role }
 
 /-- Ledger of every slot touched in cluster `c`, in (CTA rank, barrier, index) order. With
-`precise` (P1-1 only; P0-2 and P0-4 use the default), happens-before also uses `needsWith`
+`precise` (P1-1, P1-2; P0-2 and P0-4 use the default), happens-before also uses `needsWith`
 (the other roles' arrivals that may precede a wait's return instead of their totals over the
 run) and every wait gets its `lockPhase`. The landers' lower bounds (`TxRec.floor`) use
 `needsWith` either way (module doc, "Landers"). -/
@@ -1205,7 +1205,7 @@ abbrev Ledgers := Array ((Nat × Nat × Nat) × Array SlotLedger)
 
 def Run.ledgers (r : Run) : Ledgers := r.clusters.map fun c => (c.cid, ledger r.host c)
 
-/-- The ledgers P1-1 uses (`ledger` with `precise`). -/
+/-- The ledgers the P1 specs (P1-1, P1-2) use (`ledger` with `precise`). -/
 def Run.ledgersP1 (r : Run) : Ledgers := r.clusters.map fun c => (c.cid, ledger r.host c true)
 
 /-- `f`'s lines about every slot ledger of every cluster in `Ls` whose ledger converged (the

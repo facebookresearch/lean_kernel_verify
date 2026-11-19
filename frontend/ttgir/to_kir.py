@@ -5,7 +5,7 @@
 
 """TTGIR -> KIR (references/kir.md), Layer 1 for TLX/Triton.
 
-    to_kir --dump /tmp/lkv_out/tlx/<case>/dump.json --case CASE.json
+    to_kir --dump /tmp/lkv_out/tlx/<case>/dump.json --case CASE.json [--jobs N]
 
 For every specialization in dump.json: parse its TTGIR (mlir_text), slice it (slicing),
 translate the kept ops with the op table (op_table, references/ir_ops.md) and write
@@ -16,14 +16,25 @@ kind "gap" (refused by design) or "error" (the case or LKV must be fixed; `KirEr
 
 Translation switch: LKV_FRONTEND=ptx, the default (unset or empty), translates each
 specialization's PTX instead (build_ptx: the PTX core's Facts, frontend/ptx/translate.py,
-with this file's naming, tensors, inputs and checks; KIR `ir` "ptx"); "legacy" is the
-TTGIR translation above, which refuses such a
-specialization (check_preferred_cluster: it checks one geometry).
+with this file's naming, tensors, inputs and checks; KIR `ir` "ptx"), and where its
+launches prefer other cluster dims also the all-preferred geometry, <spec>@cluster<dims>
+(preferred_geometry; launches that disagree on the preferred dims or break a CUDA rule
+for them: `<spec>@cluster` refused, the regular KIR kept); "legacy" is the TTGIR
+translation above, which refuses such a specialization (check_preferred_cluster: it
+checks one geometry).
 
 P1 pass (LKV_FRONTEND=ptx only; LKV_P1=0 skips it): the PTX core's P1-2 events
 (frontend/ptx/bulk.py; references/kir.md change 15) give a P1 KIR <spec>.p1.json per
-specialization with a bulk async store, logged as `[to_kir] <spec>: P1 (P1-2): ...`, or
-`P1 refused|error|not_applicable: <why>`; it never changes the P0 KIR or the exit status.
+specialization with a bulk async store (and per all-preferred geometry; where
+preferred_geometry fails: `<spec>@cluster` refused), logged as
+`[to_kir] <spec>: P1 (P1-2): ...`, or `P1 refused|error|not_applicable: <why>`; it never
+changes the P0 KIR or the exit status.
+
+P0-6 pass (whatever the translation): the PTX's barrier pass (build_nb,
+frontend/ptx/nbar.py; references/kir.md change 14) gives a P0-6 KIR <spec>.nb.json per
+specialization (and per all-preferred geometry), in up to --jobs forked processes,
+logged as `[to_kir] <spec>: P0-6 ...`, or `P0-6 FAILED (<kind>): <why>`; it never
+changes the P0 KIR or the exit status.
 """
 
 import argparse
@@ -2445,7 +2456,7 @@ def main() -> None:
     ap.add_argument("--dump", required=True, type=Path)
     ap.add_argument("--case", required=True, type=Path)
     ap.add_argument("--jobs", type=int, default=1,
-                    help="processes for the P0-6 barrier pass (one specialization each)")  # fmt: skip
+                    help="processes for the P0-6 barrier pass (one P0-6 KIR each)")  # fmt: skip
     args = ap.parse_args()
     if frontend() == "ptx":  # shows in lkv.py's logs/to_kir.log that the switch arrived
         print("[to_kir] LKV_FRONTEND=ptx: translating the PTX", file=sys.stderr)

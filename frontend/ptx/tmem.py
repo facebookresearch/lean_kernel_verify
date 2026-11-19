@@ -3,12 +3,14 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""P1 pass of the PTX frontend (CuTe family only): the P1-1
+"""P1 pass of the PTX frontend: for the CuTe family the P1-1
 "TMEM reuse ordered" events of frontend/cute/ops_tmem.py read off the PTX instructions,
 so that the P1 KIR is the P0 KIR plus `tmem`, `tmem_wait` and `named_bar` events and the
-top-level `tmem` (references/kir.md change 10).
+top-level `tmem` (references/kir.md change 10); for TLX/Triton (specs ["P1-2"]) the P1-2
+events of bulk.py and `named_bar` (change 15).
 
-    P1()                            per-kernel state; translate.py hands it to
+    P1(specs, extern)               per-kernel state (the P1 specs; the .extern shared
+                                    symbols, bulk.State); translate.py hands it to
                                     interp.Kernel.p1 when the policy asks for P1 ("p1")
       .execute(tr, i, mn)           before the P0 rule of an instruction (interp.py): adds
                                     its P1 event, if any; the P0 rule still runs

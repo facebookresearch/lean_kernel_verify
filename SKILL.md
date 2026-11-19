@@ -1,36 +1,41 @@
 ---
 name: lean-kernel-verify
 description:
-  'Mechanical P0 safety checks of Blackwell GPU kernels (TLX/Triton, CuTe DSL)
+  'Mechanical safety checks of Blackwell GPU kernels (TLX/Triton, CuTe DSL)
   in Lean 4 with no hand-written kernel model: on a CPU-only machine the real
-  host code and compiler produce the IR (TTGIR, CuTe MLIR), a sliced op-table
-  frontend turns it into KIR, and Lean decides per case input, by native_decide,
+  host code and compiler produce the PTX and IR, a sliced op-table frontend
+  turns one of them into KIR (TLX/Triton: the PTX by default), and Lean decides
+  per case input, by native_decide,
   P0-1 bounds and address wrap, P0-2 role trip counts (hangs), P0-3 output
-  coverage exactly once, P0-4 mbarrier protocol (parity, expect_tx bytes) and
+  coverage exactly once, P0-4 mbarrier protocol (parity, expect_tx bytes),
   P0-5 mask elision on host-selected fast paths and P0-6 named barriers
-  convergent (from the PTX, also of variants the P0 translation refuses), plus
-  (CuTe only, reported apart) P1-1 TMEM reuse ordering (cross-warp tcgen05
-  ld/st/cp/mma races). For
+  convergent, plus, reported apart, P1-1 TMEM reuse ordering (CuTe) and P1-2
+  async store sources reuse ordering (TLX/Triton: a TMA store source or
+  tensormap rewritten too early). For
   checking a kernel revision or a fix for hangs, out-of-bounds or wrapped
-  addresses, missing or duplicate writes, barrier bugs and TMEM reuse races on the
+  addresses, missing or duplicate writes, barrier bugs and reuse races on the
   shapes callers use (partial tiles, multi-wave grids), or writing a case file for a
   new kernel; verdicts cover the case inputs only.'
 ---
 
-# lean-kernel-verify: compiler IR to Lean verdicts for six P0 specs and P1-1
+# lean-kernel-verify: compiler output to Lean verdicts for six P0 specs, P1-1 and P1-2
 
 The skill checks a TLX/Triton or CuTe DSL kernel at a given revision against
-six P0 safety specs, on the concrete inputs of a case file, with no model of
-the kernel: the real host code and compiler produce the IR on a CPU-only
-machine, a mechanical frontend turns it into KIR, and Lean proves or refutes
-each verdict as a `native_decide` theorem.
+six P0 safety specs (and, reported apart, two P1 specs), on the concrete inputs
+of a case file, with no model of the kernel: the real host code and compiler
+produce the PTX and IR on a CPU-only machine, a mechanical frontend turns one of
+them into KIR (TLX/Triton: the PTX by default; CuTe: the IR), and Lean proves or
+refutes each verdict as a `native_decide` theorem.
 
 **Use it** to formally check a Blackwell kernel, or a fix against its base, for
 hangs, out-of-bounds or wrapped addresses, missing or duplicate output writes,
-mbarrier parity or expect_tx bugs and (CuTe) unordered TMEM reuse across warps
-(P1-1, e.g. a scale-factor copy into a TMEM region that another warp is still
-loading), especially on partial and multi-wave shapes, including CuTe
-2-CTA (cluster) kernels for the P0 specs; or to add a case for a new kernel.
+mbarrier parity or expect_tx bugs, named barriers not all their warps reach alike
+(P0-6), (CuTe) unordered TMEM reuse across warps (P1-1, e.g. a scale-factor copy
+into a TMEM region that another warp is still loading) and (TLX/Triton) shared
+memory or a tensormap rewritten while a TMA store may still read it (P1-2),
+especially on partial and multi-wave shapes, including 2-CTA (cluster) kernels
+for the P0 specs (CuTe; TLX/Triton in the PTX translation, also with cluster
+launch control); or to add a case for a new kernel.
 **Do not use it** for numerics, performance, CUDA C++ kernels, or general
 race/deadlock freedom (see Limits).
 
@@ -52,17 +57,21 @@ kernel sources exported at REV + case file (host entry point, config, small conc
   v
 KIR JSON per compiled flag set: roles, structured control flow, exact-width integer exprs,
   |   events, inputs; frontend/kir.py (contract check) -> frontend/emit_lean.py
+  |   every variant, whatever the translation: the barrier pass (frontend/ptx/nbar.py)
+  |   writes the P0-6 KIR <spec>.nb.json / <kernel>__<digest>.nb.json from its PTX
+  |   TLX/Triton, a launch with a preferred cluster: also <spec>@cluster<dims> KIRs, every
+  |   cluster of the preferred size (P0-6; P0 and P1-2 in the PTX translation)
   |   CuTe: a second pass with the P1 slice writes <kernel>__<digest>.p1.json (+ TMEM,
   |   tcgen05.wait and named-barrier events); the P0 KIR does not change
   |   TLX/Triton, PTX translation: a second pass writes <spec>.p1.json (+ bulk store,
   |   group, shared-memory and tensormap write and named-barrier events; P1-2)
   v
 Layer 2: lean/KV evaluates every role of every CTA per input -> event traces
-  |   theorem : KV.Holds .<spec> kernel input := by native_decide   (5 specs x inputs;
-  |             P1 KIR: .tmemReuse / .storeReuse x inputs)
+  |   theorem : KV.Holds .<spec> kernel input := by native_decide   (P0 KIR: 5 specs
+  |             x inputs; P0-6 KIR: .namedBarriers; P1 KIR: .tmemReuse / .storeReuse)
   v
 report.md / report.json: verdict per (variant, input, spec), findings at source file:line;
-  P1-1 in a section of its own
+  P0-6 with the P0 specs; P1-1 and P1-2 each in a section of its own
 ```
 
 ## Setup (no GPU needed)
@@ -116,30 +125,39 @@ python3 -I $S/scripts/lkv.py check K.kir.json... --out DIR   # Layer 2 alone on 
   evaluation error such as a `while` over `max_iters` or a case annotation
   error); **UNDECIDED** (not decided where LKV has a known limit, not an error:
   a construct the frontend refuses by design, a role trace stopped at an
-  out-of-bounds metadata load (itself a P0-1 FAIL) or at a model assumption that does
-  not hold (KIR `assume`) when nothing certain is found for that spec, a division by zero, a barrier ledger that does not converge
-  (P0-2, P0-4), another CTA's TMA bytes that balance only if a landing completes a
-  later phase than its issue order shows (P0-4), P1-1 pairs only the lockstep contents order). A variant without verdicts gives every spec of each of its inputs its
-  outcome (UNDECIDED if refused by design, else ERROR).
-- Outcome and exit status of a run (P0 and P1-1's ERRORs; P1-1's FAIL and
-  UNDECIDED only with `--p1-strict`; `--no-p1` skips it): **1 FAIL** = some
-  verdict FAILs, whatever else failed; **2 ERROR** = no FAIL, but something
-  failed (also a pipeline error, no KIR at all, and any error of lkv.py itself,
-  so 1 always means a certain violation); **0 UNDECIDED** = no FAIL and no
+  out-of-bounds metadata load (itself a P0-1 FAIL) or at a model assumption that
+  does not hold (KIR `assume`) when nothing certain is found for that spec (for an
+  assumption, in the clusters where no role trace stopped at one), a
+  division by zero, a barrier ledger that does not converge (P0-2, P0-4), another
+  CTA's TMA bytes that balance only if a landing completes a later phase than its
+  issue order shows (P0-4), a named barrier P0-6 cannot count or pair for certain
+  (an `nb_open` not marked certain, a pairing that may depend on timing), P1-1
+  pairs only the lockstep contents order, P1-2's undecided pairs U1-U4). A variant
+  without verdicts gives every spec of each of its inputs its outcome (UNDECIDED if
+  refused by design, else ERROR).
+- Outcome and exit status of a run (P0-1..P0-6 and the P1 specs' ERRORs; the FAIL
+  and UNDECIDED of P1-1 and P1-2 only with `--p1-strict`; `--no-p1` skips both):
+  **1 FAIL** = some verdict FAILs, whatever else failed; **2 ERROR** = no FAIL, but
+  something failed (also a pipeline error, no KIR at all, and any error of lkv.py
+  itself, so 1 always means a certain violation); **0 UNDECIDED** = no FAIL and no
   ERROR, but a known limit leaves something open; **0 PASS** = every spec is
   proved on every input of every variant. Host-rejected inputs count as none:
   the exported sources raised for the input (a `raise` or `assert`, a failed
   torch check such as `torch._assert_async`) or launched nothing.
-- `report.md`: header (rev, src, target), the result (outcome, exit status and
-  why), the frontend's environment, PASS / FAIL / ERROR / UNDECIDED totals per
-  spec, verdicts per input (`FAIL (k/n)` = k of the n compiled variants that ran
-  it have a certain violation, `ERROR (e/n)` = e of them failed, `UNDECIDED
-  (u/n)` = u of them hit a known limit), a FAIL section (counterexamples by spec
-  and source line, kernel errors), an ERROR section (variants that failed to
-  translate or check, unexpected evaluation errors, INCONSISTENT verdicts), an
-  UNDECIDED section (variants refused by design, model limits, specs refuted
-  without a certain counterexample), notes, host-rejected inputs, the variants
-  table (flags, Lean time). Artifacts: `frontend/`, `lean/`, `logs/`.
+- `report.md`: header (case file, frontend, translation, target, rev, src, out),
+  the result (outcome, exit status and why), the frontend's environment, PASS /
+  FAIL / ERROR / UNDECIDED totals per spec (P0-6 with the P0 specs), verdicts per
+  input (`FAIL (k/n)` = k of the n compiled variants that ran it have a certain
+  violation, `ERROR (e/n)` = e of them failed, `UNDECIDED (u/n)` = u of them hit
+  a known limit), a FAIL section (counterexamples by spec and source line, kernel
+  errors), an ERROR section (variants that failed to translate or check,
+  unexpected evaluation errors, INCONSISTENT verdicts), an UNDECIDED section
+  (variants refused by design, model limits, specs refuted without a certain
+  counterexample), notes, host-rejected inputs, the variants table (flags, Lean
+  time), the P0-6 variants that rest on the warp-ahead reading and the barrier
+  sites the barrier pass could not count, then a section per P1 spec (totals,
+  verdicts per input, FAIL, ERROR, UNDECIDED, notes), the P1 variants and the
+  variants the P1 specs do not check. Artifacts: `frontend/`, `lean/`, `logs/`.
 - `report.json`: the same data, for scripts. CI reads `result.outcome` (or the exit
   status); every key and count: [references/specs.md](references/specs.md),
   "report.json".
@@ -149,7 +167,8 @@ python3 -I $S/scripts/lkv.py check K.kir.json... --out DIR   # Layer 2 alone on 
 A case file names the kernel source, its public host entry point, small concrete
 inputs and the annotations the specs need; its `description` says what the inputs
 trigger. Cases for public kernels go in `cases/`; `tests/e2e/cases/` has a small
-probe case per frontend. [references/cases.md](references/cases.md) says how to
+probe case per frontend and two TLX P1-2 cases (`store_reuse_staging_tlx`,
+`store_reuse_rebuild_tlx`). [references/cases.md](references/cases.md) says how to
 write a new case (source and public host entry point, inputs, annotations).
 **Choose common inputs**, because verdicts cover only the case inputs: the shapes and
 conditions the kernel's callers produce (partial last tiles, more work items than SMs
@@ -178,28 +197,33 @@ wrapper rule out, and opt-in modes nobody uses.
 | 1   | TMEM reuse ordered: every pair of tcgen05 ld/st/cp/mma accesses of different roles that touch a common TMEM cell (lane x 32-bit column), one writing, is ordered: one completes (ld/st at the role's next `tcgen05.wait::ld/st`, cp/mma at a landed later commit of the same warp) before the other is issued, under sound mbarrier and named-barrier happens-before between roles (trust item 6, with partial credit of a multi-warp role's arrivals; no lockstep contents) | F1 a conflicting cross-role pair unordered even under the most generous lockstep reading; F2 an access outside the allocation; F3 an ld/st outside its warp's lane quarter; undecided (U1): a pair ordered only under the ledger's lockstep contents, with no certain counterexample | N1 same-role hazards that are not PTX pipelined pairs; N2 intra-role cross-warp pairs no `bar.sync` orders; N3 a blocked wait |
 
 Decided on the P1 KIR, reported in its own report section and `report.json`
-`variants_p1`; a refused P1 translation (R1-R9, `frontend_cute.md`) is "not
-checked", TTGIR variants always. A PASS rests on sound happens-before between
-roles (trust item 6): a wait that returned for phase k needs, of each arriving
-role, k x count minus the other roles' arrivals that may precede its return (P1
-ledger, `SlotLedger.needsWith`), and those show every warp of a role issued an
-arrive only if they take more of its arrivals than all warps but one give
-(partial credit). The P1 pass splits a role whose warps issue an mbarrier wait,
-arrive or commit only in part (a thread-0 arrive or wait), so each such event of
-a role is issued by all its warps.
+`variants_p1`; a refused P1 translation (R1-R9, `frontend_cute.md`; R10 in the PTX
+translation, `frontend_ptx.md`) is UNDECIDED on every input of its variant (a failed
+one an ERROR), and P1-1 of TTGIR variants is "not checked". A PASS rests on sound
+happens-before between roles (trust item 6): a wait that returned for phase k
+needs, of each arriving role, k x count minus the other roles' arrivals that may
+precede its return (P1 ledger, `SlotLedger.needsWith`), and those show every warp
+of a role issued an arrive only if they take more of its arrivals than all warps
+but one give (partial credit). The P1 pass splits a role whose warps issue an
+mbarrier wait, arrive or commit only in part (a thread-0 arrive or wait), so each
+such event of a role is issued by all its warps.
 
 ### P1-2 async store sources reuse ordered (PTX translation; `references/specs.md`, "P1-2")
 
 | P1  | Spec | FAIL / undecided | NOTE |
 | --- | ---- | ---------------- | ---- |
-| 2   | Async store sources reuse ordered: every write of shared memory overlapping the source of a bulk async store (`cp.async.bulk.tensor` / `cp.reduce.async.bulk.tensor` / `cp{.reduce}.async.bulk` global <- shared::cta, bulk_group), and every write of the tensormap of an in-kernel descriptor it reads (`tensormap.cp_fenceproxy`), is ordered: issued after a `cp.async.bulk.wait_group{.read}` of the store's issuing thread completed its group (`.read` covers the tensormap read: PTX ISA, `wait_group`) and that wait happens before it (mbarrier and exact named-barrier happens-before, the issuer's program order), or happens before the store is issued | F1 a shared-memory write, F2 a tensormap write (also one by another cluster), unordered even in the lockstep reading; undecided: U1 ordered only in the lockstep reading, U2 by an issuer program order the KIR does not pin down, U3 a load's landing issued before the store, U4 a store or write after a wait the ledger finds blocked | N1 a store its issuer never waits for; N2 a blocked wait |
+| 2   | Async store sources reuse ordered: every write of shared memory overlapping the source of a bulk async store (`cp.async.bulk.tensor` / `cp.reduce.async.bulk.tensor` / `cp{.reduce}.async.bulk` global <- shared::cta, bulk_group), and every write of the tensormap of an in-kernel descriptor it reads (`tensormap.cp_fenceproxy`), is ordered: issued after a `cp.async.bulk.wait_group{.read}` of the store's issuing thread completed its group (`.read` covers the tensormap read: PTX ISA, `wait_group`) and that wait happens before it (mbarrier and exact named-barrier happens-before, the issuer's program order), or happens before the store is issued | F1 a shared-memory write, F2 a tensormap write (also one by another cluster), unordered even in the lockstep reading; undecided: U1 ordered only in the lockstep reading, U2 by an issuer program order the KIR does not pin down (for another lane of a fixed-lane issuer's warp: with a `bar.warp.sync`, which the KIR drops), U3 a load's landing issued before the store that its mbarrier's bytes do not show landed before the store is issued (trust item 8), U4 a store or write after a wait the ledger finds blocked | N1 a store its issuer never waits for; N2 a blocked wait |
 
 Decided on the P1 KIR `<spec>.p1.json` the TTGIR frontend writes in the PTX
-translation (the TLX/Triton default) for a specialization with a bulk store, one per cluster
-geometry (`<spec>@cluster<dims>.p1.json`: all clusters preferred) (`frontend_ptx.md`, "P1-2
-pass"; top-level `p1: ["P1-2"]`), reported with P1-1 in the P1 section (FAIL and
-UNDECIDED count only with `--p1-strict`). A refused P1-2 translation is "not checked"
-with its reason; the legacy TTGIR translation and the CuTe frontend do not check it.
+translation (the TLX/Triton default) for a specialization with a bulk store, and
+for a launch with a preferred cluster also `<spec>@cluster<dims>.p1.json` (all
+clusters preferred) (`frontend_ptx.md`, "P1-2 pass"; top-level `p1: ["P1-2"]`),
+reported in a section of its own after P1-1's (FAIL and UNDECIDED count only with
+`--p1-strict`). A refused P1-2 translation is UNDECIDED on every input of its
+specialization (of an all-preferred geometry: those whose grid its dims divide), with
+its reason (a failed one an ERROR); a specialization without a bulk store is "not
+applicable", and the legacy TTGIR translation and the CuTe frontend do not check P1-2
+("not checked").
 
 **How a verdict is decided.** Each host flag set compiles to its own KIR
 variant, paired with the inputs that select it. For each (variant, input, spec),
@@ -207,8 +231,9 @@ lkv proves or refutes `KV.Holds .<spec> kernel input` by `native_decide`, over
 an exact `BitVec` evaluation of the KIR: PASS iff the theorem is proved; a
 refuted theorem is a FAIL if Lean lists a certain counterexample for it (or the
 evaluation stopped at a certain kernel error), an ERROR if LKV failed to decide
-it, else UNDECIDED (a known limit). Roles are not interleaved: P0-2 and P0-4 are stated over the per-CTA
-phase ledger (`lean/KV/Spec/Ledger.lean`).
+it, else UNDECIDED (a known limit). Roles are not interleaved: P0-2 and P0-4 are
+stated over the phase ledger of each cluster (of each CTA without clusters;
+`lean/KV/Spec/Ledger.lean`).
 
 ## Trust base and reporting
 
@@ -229,7 +254,11 @@ A verdict depends on exactly these items (`design.md`, "Trust base"):
    executed by a whole warp is one write per distinct (coordinates, shared-memory
    source) among its lanes (ptxas issues it in a waterfall loop; DSL 4.4.2 compiles
    with its embedded ptxas 12.9.83); a TMA load or reduce is one per executing lane,
-   which is one per warp because the DSL emits it behind `elect.sync`.
+   which is one per warp because the DSL emits it behind `elect.sync`. A TMA load
+   through an in-kernel descriptor (PTX translation) reads the descriptor its role's
+   `tensormap.cp_fenceproxy` wrote: assumed, not checked, that no other role rewrites
+   that slot and that its role does not while a load through it is in flight (P1-2
+   checks that for stores).
 3. **`native_decide` (T1)**: the Lean compiler and the native `libKV.so`.
 4. **The ledger algorithm** for P0-2 and P0-4, argued sound in Ledger.lean but
    not proved: a PASS there means "the ledger found no violation".
@@ -259,18 +288,23 @@ A verdict depends on exactly these items (`design.md`, "Trust base"):
    allocation lifetime are not checked (the kernels checked so far have no tcgen05
    fences).
 7. **P0-6 only:** the barrier pass's uniformity rules (`specs.md` "P0-6": exact
-   thread-index instances; shared-memory data at a uniform address written before
-   a synchronization every reader passed; a value a spin loop accepted published
-   once by its producer; weak loads of tensors the kernel never writes), its node
+   thread-index instances; weak shared-memory loads at a uniform address written
+   before a synchronization every reader passed; the value a spin loop accepted, as
+   loaded, published once by its producer; weak loads of tensors the kernel never
+   writes, told apart by name: no other tensor argument shares a written one's
+   storage), its node
    splitting (copies of PTX blocks), the recorded contents of metadata tensors, and
    for arrive-based protocols the warp-ahead reading (no role runs a whole instance
-   of a named barrier ahead of the others; the report counts the arrivals it held).
+   of a named barrier ahead of the others; the report counts the arrivals it holds or
+   may hold), and the PTX ISA's rule that threads that exit release a barrier without a
+   thread count (`bar.sync a`).
 8. **P1-2 only:** the P1 ledger and the role splitting of item 6; the PTX ISA
    reading that `cp.async.bulk.wait_group.read` also covers the store's tensormap
    read; `elect.sync` electing the same lane for the same membermask (a store and a
    write of one elected lane are one thread's); the frontend's write set (every PTX
    instruction that writes shared memory is a `smem_write`, refused, or provably
-   disjoint from every store source, `frontend_ptx.md` "P1-2 pass"); and the
+   disjoint from every store source, and every global write of a buffer that holds a
+   store's tensormap a `tmap_write` or refused, `frontend_ptx.md` "P1-2 pass"); and the
    participants of a named barrier being its roles' threads, all of the CTA's for a
    barrier whose count is the CTA's (idle warps included). A load's landing issued
    before the store is ordered only through its mbarrier's bytes (a phase completes
@@ -299,30 +333,50 @@ When you report:
   arrivals can run ahead, e.g. credits arriving without a wait); a P1-1 PASS
   covers TMEM ordering only, on the case inputs, and assumes no warp of a role
   runs so far ahead that its arrivals stand in for another warp's (trust item
-  6). Without a GPU run, say "not reproduced on hardware".
+  6). A P0-6 FAIL names the barrier and the condition, loop or count its warps do
+  not share: confirm it in the source; a P0-6 PASS of a variant report.md lists
+  under "P0-6 under the warp-ahead reading" assumes no role runs a whole instance
+  of a named barrier ahead of the others (trust item 7). A P1-2 FAIL is a write of
+  a bulk store's source (F1) or tensormap (F2) that no
+  `cp.async.bulk.wait_group{.read}` of the store's thread orders in the model:
+  confirm the missing wait or barrier in the source; a P1-2 PASS covers
+  store-source reuse only (trust item 8). Without a GPU run, say "not reproduced
+  on hardware".
 
 ## Limits
 
 Clusters (CuTe, and TLX/Triton in the PTX translation, also with cluster launch control):
-remote mbarrier arrives, multicast commits, cta_group::2 and
-multicast TMA loads, DSMEM bulk copies and the cluster barrier are checked with one
-barrier ledger per cluster, and P1-1 runs per cluster (CuTe: a cta_group::2 MMA or copy
-accesses the TMEM of both CTAs of its pair); which CTA's data a copy carries is not
-checked. A TLX/Triton launch with a preferred cluster is checked in both geometries (all
-regular, all preferred; P0-3 of a mix is not checked); a CuTe launch with one, and a TLX
-launch whose function's required cluster differs from its cluster, are refused. A
+remote mbarrier arrives, multicast commits, cta_group::2 and multicast TMA loads, DSMEM
+bulk copies, `st.async`/`red.async` into another CTA and the cluster barrier are
+checked with one barrier ledger per cluster, and P1-1 and P1-2 run per cluster (CuTe: a
+cta_group::2 MMA or copy accesses the TMEM of both CTAs of its pair); which CTA's data a
+copy carries is not checked. A TLX/Triton launch with a preferred cluster is checked in
+both geometries (all regular, all preferred: P0, P0-6 and P1-2 KIRs each; the legacy
+TTGIR translation refuses its P0 KIR, checking one geometry); not covered: P0-3 of a
+launch that mixes them and P1-2's tensormap check across clusters of the two
+geometries. Refused: the all-preferred P0 and P1-2 KIRs of a kernel with CLC, the
+all-preferred KIRs of launches whose preferred cluster breaks a rule CUDA states for it
+(no regular cluster, a preferred x or y that is no multiple of the regular one or another
+z, dims that do not divide the grid), a CuTe launch with a preferred cluster and a TLX
+launch whose function's required cluster differs from its cluster (both with their P0-6
+KIRs). A
 warp-specialize capture (a value passed to the partitions through shared memory) is
-forwarded only where no shared write may overwrite it before the partitions read it
+forwarded only where every thread of the default stores it and no shared write may
+overwrite it before the partitions read it
 (a strength-reduced offset: assumed per input by a KIR `assume`, which leaves the input
-undecided where it does not hold). The PTX translation refuses some kernels and
+undecided where it does not hold). A TMA load through an in-kernel descriptor assumes
+that no other role rewrites the descriptor's slot and that its role does not while the
+load is in flight (trust item 2). The PTX translation refuses some kernels and
 constructs the legacy translations handle (`frontend_ptx.md`, "Refusals", "Limitations");
 `--frontend legacy` runs the TTGIR translation of a TLX/Triton kernel.
-Refused: TTGIR 2-CTA kernels in the legacy translation (remote
-barriers, DSMEM, multi-CTA layouts), CLC, im2col TMA, TTGIR loop-carried pointers (CuTe: a
-loop-carried value changing structure, e.g. a pointer into another tensor),
-side-effecting inline asm, a value that reaches an event through register
-memory (CuTe) and a per-CTA tile count the partitions capture from an `scf.if`
-(TTGIR). Not covered: completion/wait
+Refused in every translation: im2col TMA, CuTe CLC and CLC with a multi-dimensional grid;
+in the legacy TTGIR translation: 2-CTA kernels (remote barriers, DSMEM, multi-CTA
+layouts), launches with a preferred cluster, loop-carried pointers, side-effecting
+inline asm and a per-CTA tile count the partitions capture from an `scf.if`; in the
+legacy CuTe translation: a loop-carried value changing structure (e.g. a pointer into
+another tensor; the PTX translation: a loop-carried or merged address that changes its
+base) and a value that reaches an event through register memory.
+Not covered: completion/wait
 work-item correspondence, P1 bug classes other than P1-1 and P1-2 (P1-1 on TTGIR/TLX,
 P1-2 on CuTe and on the legacy TTGIR translation, the source of a DSMEM copy into
 another CTA,
@@ -337,7 +391,8 @@ The references detail the pipeline above, one piece each
 ([references/design.md](references/design.md) is the architecture they detail; the
 table says when to read each):
 
-- case file: [cases.md](references/cases.md) (the shipped cases, how to write one), with
+- case file: [cases.md](references/cases.md) (how to write one; examples in
+  `tests/e2e/cases/`), with
   its fields per frontend in [frontend_ttgir.md](references/frontend_ttgir.md) "Case
   file" and [frontend_cute.md](references/frontend_cute.md) "Case files";
 - Layer 1, IR to KIR: [frontend_ttgir.md](references/frontend_ttgir.md) and
@@ -369,11 +424,12 @@ table says when to read each):
 ## Tests
 
 ```bash
-$S/tests/lean/run_all.sh                    # Layer 2: positive/negative controls per spec (tests/lean/p1: P1-1, p1_2: P1-2)
+$S/tests/lean/run_all.sh                    # Layer 2: positive/negative controls per spec (tests/lean/p1: P1-1, p1_2: P1-2, nb: P0-6)
 python3 -I $S/tests/e2e/test_e2e.py         # lkv.py end to end, ~2 min (frontends + Lean, no GPU)
 python3 -I $S/tests/cute/test_core.py       # CuTe translation, pure Python
 python3 -I $S/tests/ptx/test_translate.py   # PTX translation, pure Python (and tests/ptx/test_*.py)
-# Frontend tests: tests/ttgir/test_translate.py, test_ttgir.py (Triton) and tests/cute/test_frontend.py
-# (CuTe DSL, run once per supported DSL release); tests/ttgir/test_gpu_parity.py and
+# Frontend tests: tests/ttgir/test_translate.py, test_ttgir.py, test_ptx_capture.py (Triton)
+# and tests/cute/test_frontend.py (CuTe DSL, run once per supported DSL release),
+# test_ptx_capture.py; tests/ttgir/test_gpu_parity.py and
 # tests/cute/test_gpu_parity.py: CPU-dumped TTGIR / CuTe MLIR == real launch (need a Blackwell GPU)
 ```

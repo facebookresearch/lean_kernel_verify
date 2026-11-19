@@ -22,9 +22,10 @@ select between two offsets of one base, a per-thread table of offsets of one bas
 for shared addresses, a truncation to 32 bits. A global access through a select between
 two bases takes the arm its condition picks in the role; a condition uniform in each warp
 but not in the role splits the role (CuTe; _pick_bases); a condition that is one value in
-the role but not known (a program id or parameter test) makes the access two, one per
-base under the condition and its negation (_global_arms; a generic access through a
-select between a shared and a global address is refused). An address that is no such sum
+the role but not known (e.g. a program id or parameter test) makes an ld, st, atom or red
+two, one per base under the condition and its negation (_global_arms; a cp.async or bulk
+copy through it, or a generic access through a select between a shared and a global
+address, is refused). An address that is no such sum
 is refused, never guessed. tma.py adds
 `%d:<param>`, a descriptor parameter's address, and `%x:<param>`, Triton's scratch
 pointer: only TMA instructions may use them (any other global access is refused).
@@ -343,7 +344,8 @@ class Memory:
 
     def _param_select(self, tr: Translator, i, a, extra: int, size: int):
         """The value ld.param reads at address a + extra: a is a parameter's address plus a
-        constant, or a select of such (nested), uniform in the role; else refused."""
+        constant, or a select of such (nested) whose conditions depend on no thread
+        index; else an error."""
         if not isinstance(a, Data) and a[0] == "select" and not E.thread_varying(a[2]):
             x = self._param_select(tr, i, a[3], extra, size)
             y = self._param_select(tr, i, a[4], extra, size)
@@ -555,8 +557,9 @@ class Memory:
 
     def _shared_write(self, tr: Translator, i, op, nbytes: int) -> None:
         """A generic st/atom/red of shared memory: it closes the staging buffers it may
-        overlap (tma.py); refused in a warp-specialized kernel, whose dispatch recognizer
-        sees the state bytes' st.shared writes only (cfg.py)."""
+        overlap (tma.py); refused in a kernel with a switch-loop dispatch (policy
+        `dispatch`), whose recognizer sees the state bytes' st.shared writes only
+        (cfg.py; a direct dispatch has no state bytes)."""
         if self.policy.get("dispatch"):
             what = "a generic write of shared memory"
             what = i.opcode if ".shared" in i.opcode else what

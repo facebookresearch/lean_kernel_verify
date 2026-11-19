@@ -97,11 +97,12 @@ Control flow (regions.py tree; registers live across it as in interp.py):
   both arms are translated and every barrier reached in them is an `nb_open`.
 * A loop is first translated exactly (interp.Translator.run_loop: a KIR `for`/`while`),
   which needs every exit condition exact and uniform. Else its classes are iterated to a
-  fixed point (the registers it writes start as their entry classes, every back and exit
-  edge joins in) and its exit class is the join of its exit conditions' classes: a loop
-  holding a barrier is an `nb_rep` region (its body once, between `nb_rep` begin and end
-  events) if that class is u, else divergent (its body once, every barrier an `nb_open`).
-  A loop without a barrier only computes values.
+  fixed point (the registers it writes that are live at its header or after its exit
+  start as their entry classes, every back and exit edge joins in; the others reach no
+  barrier decision and are not classified) and its exit class is the join of its exit
+  conditions' classes: a loop holding a barrier is an `nb_rep` region (its body once,
+  between `nb_rep` begin and end events) if that class is u, else divergent (its body
+  once, every barrier an `nb_open`). A loop without a barrier only computes values.
 An `nb_open` is `certain` when the model admits participants that diverge: thread-index
 constants that differ (an elect.sync leader), or nondet data (warps may read different
 values, and a spin loop's warps leave it in different iterations), for every divergent
@@ -124,8 +125,8 @@ by node splitting: the blocks entered from outside, up to the header, are copied
 entries. Still refused (Facts.refusals, P0-6 UNDECIDED for the variant): other control
 flow outside cfg.py / regions.py (a loop exiting to two blocks, several rets, several
 dispatches, a switch index not provably in range), a call of a device function, roles
-that are not warp ranges, an instruction without an op table row that may be a barrier or
-a branch.
+that are not warp ranges; an instruction without an op table row that may be a barrier
+or a branch is an error (ERROR).
 """
 
 import dataclasses
@@ -767,9 +768,10 @@ class _Nb(interp.Translator):
             self.own((reg,), self.cur.line if self.cur else 0)
 
     def _shared_load(self, i, mn: str) -> None:
-        """ld.shared(::cluster), ldmatrix: data by the class of the address (module doc;
-        assumed written before a synchronization every reader passed), a strong ld.shared
-        as a strong global load."""
+        """ld.shared, ldmatrix: data by the class of the address (module doc; assumed
+        written before a synchronization every reader passed), a strong ld.shared as a
+        strong global load. ld.shared::cluster has no op table row: its results are
+        class t (step)."""
         op = i.operands[1]
         try:
             a = cluster._address(self, op) if op[0] == "mem" else None

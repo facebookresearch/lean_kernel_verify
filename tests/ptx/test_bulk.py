@@ -13,7 +13,8 @@ groups (n, .read), named barriers, st.shared per thread (`warp`, `lane`), a writ
 when it cannot meet a store source, a TMA store through an in-kernel descriptor with its
 `tmap` and the cp_fenceproxy's `tmap_write`; the top-level `p1`, none without a bulk store;
 the role split by a thread-0 arrive (parts named <partition>_w<a>_<b>); a load's landing
-naming its mbarrier (`bar`, `idx`), its tma_load next; the `let`s nothing
+naming its mbarrier (`bar`, `idx`), its tma_load next; a shared::cluster bulk copy or
+reduce into the peer CTA (an `async` smem_write with `cta`); the `let`s nothing
 reads dropped (a split part's per-lane loads would make their tensors metadata). Refusals: a group
 the issuer does not execute, a store several lanes of a warp issue, a write under a data
 predicate that may overlap a source, an mbarrier object or tcgen05.alloc's slot inside a

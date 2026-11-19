@@ -26,7 +26,7 @@ Two caveats change the naive split:
 
 ## 2. Evidence
 
-Public reports of bugs in open-source GPU kernel libraries: examples for each P0 spec, and
+Public reports of bugs in open-source GPU kernel libraries: examples for P0-1..P0-5, and
 a few for classes the specs do not cover (status as of 2026-10-26). The Spec column names
 the LKV spec for the bug's class. LKV itself checks TLX/Triton and CuTe DSL kernels, so it
 would not run on the CUDA C++ kernels among these (FlashAttention 2, CUTLASS C++); the
@@ -51,8 +51,9 @@ rows show the classes.
 
 The specs also encode the correctness rules of the
 [PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/) for mbarrier (phases,
-arrival counts, transaction bytes), bulk copies and TMA, and `tcgen05` (`tcgen05.wait`,
-`tcgen05.commit`).
+arrival counts, transaction bytes), bulk copies and TMA (also the completion of bulk
+async-groups, `cp.async.bulk.commit_group` / `wait_group{.read}`: P1-2), named barriers
+(`bar` / `barrier`: P0-6), and `tcgen05` (`tcgen05.wait`, `tcgen05.commit`).
 
 Why ordinary tests miss bugs like these:
 
@@ -121,11 +122,12 @@ and a CTA with no work included; `cases.md` says which inputs a case checks.
 * Whole-kernel IR scans: one `cta_group` per kernel, single-thread issue of
   `tcgen05.mma`/`commit`/`cp.async.bulk`/`expect_tx`, warp-uniform collective operands,
   `try_wait` result looped, no `%warpid`/`%smid` in logic.
-* Cluster/2-CTA beyond the mbarrier protocol and TMEM reuse (CuTe: remote arrives,
-  multicast commits, cta_group::2 and multicast loads, DSMEM bulk copies and the cluster
-  barrier are P0 events, cta_group::2 MMAs and copies P1-1 accesses of both CTAs of the
-  pair): cross-CTA data flow, TTGIR 2-CTA; TMEM
-  rules beyond ordering (allocation lifetime, relinquish, fences) and the allocator
+* Cluster/2-CTA beyond the mbarrier protocol, TMEM reuse and store-source reuse (CuTe,
+  and TLX/Triton in the PTX translation: remote arrives, multicast commits, cta_group::2
+  and multicast loads, DSMEM bulk copies, `st.async` / `red.async` into another CTA and
+  the cluster barrier are P0 events; CuTe cta_group::2 MMAs and copies are P1-1 accesses
+  of both CTAs of the pair): cross-CTA data flow, TTGIR 2-CTA in the legacy translation;
+  TMEM rules beyond ordering (allocation lifetime, relinquish, fences) and the allocator
   protocol; cross-CTA flags and CLC schedulers.
 * TMA descriptor legality (box <= 256, swizzle span, 16 B alignment, box == smem tile).
 * Writer/reader index-map agreement (smem view stages, inter-kernel SF layouts).
@@ -150,17 +152,21 @@ extraction IR, multi-GPU signalling.
 
 A P0 result depends on exactly these things:
 
-1. the IR the compiler produced for the analyzed config (nothing below it is checked);
-2. the Lean semantics of each IR op the compiler front end extracts (one table per
-   dialect, written from the PTX ISA and TLX/CuTe docs, the same for every kernel);
+1. the compiler output for the analyzed config (nothing below it is checked): the kernel's
+   PTX in the PTX translation (the TLX/Triton default; CuTe with `--frontend ptx`), else
+   its IR;
+2. the Lean semantics of each op the frontend extracts (one table per dialect, PTX
+   included, written from the PTX ISA and TLX/CuTe docs, the same for every kernel);
 3. the Lean compiler (`native_decide`, T1), which decides every verdict;
 4. for P0-2 and P0-4, the phase ledger algorithm (references/design.md, trust base),
    whose soundness against mbarrier semantics is argued informally;
-5. for P0-6, its uniformity assumptions (shared-memory data written before a
-   synchronization its readers passed; a value a spin loop accepted is published once)
+5. for P0-6, the barrier pass's uniformity rules (exact thread-index instances;
+   shared-memory data at a uniform address written before a synchronization its readers
+   passed; a value a spin loop accepted is published once; weak loads of tensors the
+   kernel never writes), its node splitting, the recorded contents of metadata tensors
    and, for arrive-based protocols, the lockstep pairing of barrier instances with the
    warp-ahead reading (no role runs a whole instance ahead of the others; `specs.md`
-   "P0-6").
+   "P0-6", design.md trust base item 7).
 
 Nothing in the chain is hand-modeled per kernel.
 

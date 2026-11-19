@@ -11,9 +11,12 @@ Code: `frontend/ttgir/`. Tests: `tests/ttgir/`; a minimal case: `tests/e2e/cases
 ```
 export_src.py   the kernel + the first-party modules it imports (also relative imports), at a revision
 dump            pin the environment (host_env), host code on CPU, launch capture, triton.compile
-                -> <spec>.ttgir, dump.json
+                -> <spec>.ttgir, <spec>.ptx, dump.json
 to_kir          LKV_FRONTEND=legacy: TTGIR -> parse (mlir_text) -> slice (slicing) -> KIR
                 (op_table) -> <spec>.kir.json; ptx (the default): the PTX translation
+                -> <spec>.kir.json, <spec>.p1.json (P1-2); both: the PTX's barrier pass
+                (frontend/ptx/nbar.py) -> <spec>.nb.json (P0-6); every KIR made from the
+                PTX also as <spec>@cluster<dims> for a preferred cluster geometry
 ```
 
 `host_env.py` (environment pinning), `host_reads.py` (host-read tracking) and
@@ -24,24 +27,33 @@ library shared with the CuTe frontend.
 
 ```bash
 # dump (frontend/ttgir/dump.py --case CASE [--inputs a,b] [--out DIR] [--src DIR] [--target ...]):
-#   host run + capture + compile; writes dump.json and one <spec>.ttgir per specialization
-# to_kir (frontend/ttgir/to_kir.py --dump DIR/dump.json --case CASE): one KIR per
-#   compiled specialization, next to dump.json
+#   host run + capture + compile; writes dump.json and one <spec>.ttgir and <spec>.ptx per
+#   specialization
+# to_kir (frontend/ttgir/to_kir.py --dump DIR/dump.json --case CASE [--jobs N]): per
+#   compiled specialization its KIR, its P0-6 KIR and (PTX translation) its P1-2 KIR,
+#   next to dump.json; --jobs: processes for the P0-6 pass
 python3 -I scripts/lkv.py run CASE.json --src DIR [--inputs a,b] [--target sm_100|sm_103]
-# tests (CPU): tests/ttgir/test_translate.py (translation of handwritten TTGIR) and
-# tests/ttgir/test_ttgir.py (dump + to_kir on small TLX kernels); tests/ttgir/test_gpu_parity.py:
-# CPU-dumped TTGIR == TTGIR of a real launch (needs a Blackwell GPU)
+# tests (CPU): tests/ttgir/test_translate.py (translation of handwritten TTGIR),
+# tests/ttgir/test_ttgir.py (dump + to_kir on small TLX kernels, LKV_FRONTEND=legacy pinned;
+# the PTX translation is tested in tests/ptx) and tests/ttgir/test_ptx_capture.py (the
+# dump's PTX and LaunchRecords); tests/ttgir/test_gpu_parity.py: CPU-dumped TTGIR == TTGIR
+# of a real launch (needs a Blackwell GPU)
 ```
 
 `scripts/lkv.py run <case>` runs both steps, then the Lean checks, and writes the
 report. `--src` analyzes another export with the same case file; `--target` is passed to
-`dump`. `to_kir` exits non-zero if any specialization fails; the message
-(`[to_kir] <spec>: FAILED (<kind>): ...`) names the op, its source `file:line` and its
-TTGIR line, and its kind: `gap` for a construct the frontend refuses by design (slice and
-op-table refusals and the other unsupported constructs: UNDECIDED, not an error), `error`
-for what the case or LKV must fix (a TTGIR text the parser cannot read, a KIR contract
-violation, an internal error, a case annotation error, a target or location mismatch: an
-ERROR). Every KIR it writes has passed `frontend/kir.py`.
+`dump`, `--jobs` to `to_kir`. `to_kir` exits non-zero if any specialization fails; the
+message (`[to_kir] <spec>: FAILED (<kind>): ...`) names the op (PTX translation: the
+instruction), its source `file:line` and its TTGIR line (PTX line), and its kind: `gap`
+for a construct the frontend refuses by design (slice and op-table refusals and the other
+unsupported constructs: UNDECIDED, not an error), `error` for what the case or LKV must
+fix (a TTGIR or PTX text the parser cannot read, a KIR contract violation, an internal
+error, a case annotation error, a target or location mismatch: an ERROR). Whatever the
+translation, `to_kir` also writes each specialization's P0-6 KIR `<spec>.nb.json` from
+its PTX (`frontend_ptx.md`, "The P0-6 barrier pass"; up to `--jobs` at a time, in forked
+processes) or logs `[to_kir] <spec>: P0-6 FAILED (<kind>): ...` (P0-6 UNDECIDED or
+ERROR); like the PTX translation's P1-2 KIRs ("PTX translation") it never changes the
+exit status. Every KIR it writes has passed `frontend/kir.py`.
 
 The inputs run in order in one process. If the host refuses an input (`host_errors.py`:
 the innermost frame of the exception is under `src_root` and a `raise` or `assert`
@@ -96,8 +108,11 @@ the patches below do not answer, an error of Triton or of the frontend.
   for outputs with no exactly-once contract (e.g. dQ accumulated by TMA reduce-add).
   Stores through an in-kernel descriptor are writes of its base pointer argument, so
   that argument is the one named (e.g. `dK` for a descriptor `desc_dk` created over it).
-* `work` names, per KIR work field, the Python variable (TTGIR NameLoc) holding it. A
-  `work` event is emitted in every block that defines all fields, right after the last
+* `work` names, per KIR work field, the Python variable holding it: the TTGIR
+  translation finds it by its TTGIR NameLoc, the PTX translation by its assignments in
+  the kernel's source and the PTX `.loc` frames, and also accepts load anchors
+  `[{"load": T, "where": text}]` (`frontend_ptx.md`, "Work anchors"). A `work` event is
+  emitted in every block (PTX: region) that defines all fields, right after the last
   definition; roles that never compute some field get none.
 * `elision_flags` names the boolean constexprs that select a mask-elided fast path (e.g.
   `FULL_TILES`). Each must be a boolean constexpr of every specialization
@@ -118,25 +133,30 @@ read whose variable cannot be determined is an error) and every compiler switch:
 `triton.knobs` variables outside those prefixes (`USE_IR_LOC`, which points every TTGIR
 location at the IR file, `USE_PTX_LOC`, `DISABLE_PTXAS_OPT`, `PTXAS_OPTIONS`,
 `ENABLE_TILE`; `tests/ttgir` checks that every knob is covered), except those the case's
-`env` sets; then it applies the case's `env` and the frontend's own `TRITON_CACHE_DIR` (a
-process scratch directory: every compile runs, the cache is never read). Once Triton is
+`env` sets; then it applies the case's `env` and the frontend's own settings, which a case
+may not set: `TRITON_CACHE_DIR` (a process scratch directory: every compile runs, the
+cache is never read) and `TRITON_PRESERVE_PTX_SOURCE_PATHS=1` (Triton keeps each PTX
+`.file` path, which the PTX translation maps to the export). Once Triton is
 imported, the variables of libtriton's cache-invalidating list that the shell set (the
 ones its passes read, e.g. `DISABLE_MMA_V5`, `ALLOW_LHS_TMEM_LAYOUT_CONVERSION`) are
 dropped too. Until the dump ends, a read by the exported sources of any other variable
 (through an alias of `os` or `os.environ`, a key the scan cannot see) and any enumeration
 of the environment from them (`dict(os.environ)`) raise `EnvError` with the source line:
 their values would come from the shell. dump.json `"env"` records the case's `env`, the
-shell values it dropped (`unset`), the variables the sources read, the effective values
-at the end of the run (variables the sources read and compiler switches, including the
-knobs dump sets, e.g. `TRITON_ALWAYS_COMPILE`) and `triton_cache_invalidating`
-(`libtriton.get_cache_invalidating_env_vars()`, the variables Triton's own cache key
-includes; `{}` unless the case sets one). `lkv.py run` copies the record into its report.
+frontend's own settings (`own`), the shell values it dropped (`unset`), the variables the
+sources read, the effective values at the end of the run (variables the sources read and
+compiler switches, including the knobs dump sets, e.g. `TRITON_ALWAYS_COMPILE`) and
+`triton_cache_invalidating` (`libtriton.get_cache_invalidating_env_vars()`, the variables
+Triton's own cache key includes: the frontend's `TRITON_PRESERVE_PTX_SOURCE_PATHS` and any
+the case sets). `lkv.py run` copies the record into its report.
 
 ## What dump runs, and what it monkeypatches (trust base)
 
-Only device *queries*, device *placement* and the launch itself are replaced. Every host
-computation (tile tables, grids, flag selection, descriptor shapes, autotune pruning and
-pre-hooks, heuristics) is the real code at the analyzed revision.
+Only device *queries*, device *placement*, the launch itself and the driver side of
+compiled kernels (a warmup's function handle and attributes, 13; a host descriptor's
+CUtensorMap encoding, 14) are replaced. Every host computation (tile tables, grids, flag
+selection, descriptor shapes, autotune pruning and pre-hooks, heuristics) is the real code
+at the analyzed revision.
 
 | # | Patch (gpu_free.py, capture.py, dump.py) | Why it is faithful |
 |---|---|---|
@@ -145,14 +165,15 @@ pre-hooks, heuristics) is the real code at the analyzed revision.
 | 3 | `CudaOnCpu` TorchFunctionMode during import and the host call: any `device="cuda"`/`torch.device("cuda")` argument becomes cpu; `Tensor.pin_memory()` and `Tensor.cuda()` return the tensor; `pin_memory=` kwargs are dropped | values are unchanged; only placement differs. Where the GPU would copy (a move between host and device) the CPU run returns the same tensor, so a later write to it is refused (`HostReads`, below) |
 | 4 | `triton.knobs.nvidia.enable_c_cache = False` (before the kernel module is imported) | the C launch fast path would bypass `JITFunction.run`; no effect on the IR |
 | 5 | `triton.knobs.compilation.always_compile = True` | the compile cache is keyed by content, not path: a hit would return TTGIR whose locs name another export |
-| 6 | `JITFunction.run` wrapped to record `(args, kwargs, grid)`; `JITFunction._do_compile` replaced by a recorder that returns None (a `warmup` compile, e.g. `kernel.warmup(...)`, is not recorded: it does not launch; see 13) | `run` reaches `_do_compile` only after the real binder and `_pack_args` computed signature, constexprs, divisibility attrs and options; returning None makes `run` return before launching. The grid is evaluated on the binder's bound arguments, as `run` would; a grid callable is host code, and its reads are tracked like any other |
+| 6 | `JITFunction.run` wrapped to record `(args, kwargs, grid)`; `JITFunction._do_compile` replaced by a recorder that returns None for a launch (a `warmup` compile, e.g. `kernel.warmup(...)`, is not recorded: it does not launch, and returns the compiled kernel, 13) | `run` reaches `_do_compile` only after the real binder and `_pack_args` computed signature, constexprs, divisibility attrs and options; returning None makes `run` return before launching. The grid is evaluated on the binder's bound arguments, as `run` would; a grid callable is host code, and its reads are tracked like any other |
 | 7 | `Autotuner.run` replaced: for every config of `prune_configs()` (after `early_config_prune` / `perf_model`): if the tuner would benchmark (several configs, or `ir_config_prune`), zero the `reset_to_zero` arguments (`pre_hook(..., reset_only=True)`); set `best_config` to the config; call the config's `pre_hook`; then `fn.run(..., **config.all_kwargs())` | that is what `Autotuner.run` does for the config it selects on a cold tuning cache; analyzing every candidate covers whichever one benchmarking would pick. Host code that runs after the autotuned launch sees `best_config` = the last candidate. `include_npot` autotuners are refused |
 | 8 | a `torch.library.custom_op` entry point is called through its `_init_fn` | the Python body is the op; the dispatcher would only add fake-tensor checks |
 | 9 | the case's `env` (pinned, above) and `module_overrides` | explicit host configuration of the analyzed run; reported with the case |
 | 10 | `HostReads` TorchFunctionMode (with a TorchDispatchMode for aten ops) during the host calls, one for the whole run (`host_reads.py`) | observes torch calls (it calls each one unchanged) to track which data comes from launch arguments; see below |
 | 11 | `torch.cuda.current_stream(device)` -> one stand-in for device 0's default stream whose only attribute is the handle `cuda_stream` = 0; any other attribute raises, and so does any device but 0 (a `cpu` device stands for device 0: patch 3 placed its tensors on the CPU) | the CPU run creates no stream, so the current stream is the default one, and 0 is the handle patch 1 reports to the launch path; host code reads it, e.g. to key per-stream buffers |
 | 12 | `torch.cuda.device(device)` -> a context that changes nothing for device 0 (a `cpu` device stands for it, as in 11) and for -1 (torch's "no device"); any other device raises | device 0 is already the current device (2: `device_count` 1, `current_device` 0), so making it current is a no-op; placement only, like 3 |
-| 13 | `kernel.warmup(...)` (`_do_compile` with `warmup`) compiles the specialization the launch would compile (as Launch.compile, 6) and returns that CompiledKernel; a second warmup of the same kernel-cache entry returns the same one. Its `_init_handles()` loads nothing and sets `function` to a stand-in CUfunction handle; launching it through the CompiledKernel raises. During the host run `ctypes.CDLL("libcuda.so[.1]")` returns a stand-in with only `cuFuncSetAttribute`, on such a handle only, for `CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_{WIDTH,HEIGHT,DEPTH}` only (any other driver function, attribute or handle raises): it returns `CUDA_ERROR_NOT_PERMITTED` (800) for a kernel whose PTX fixes its cluster dims (`.reqnctapercluster`), else 0 after recording the value; every later launch with that kernel-cache entry carries the attributes set so far in its LaunchRecord, `attrs.func_attributes` | warmup compiles without launching on the GPU too, and later launches with that entry run the compiled kernel it cached, so attributes set on its function apply to them (not to other specializations, e.g. other constexprs); the driver documents the return codes (cluster dims set at compile time cannot be set at run time) and checks the values only at launch, so they are recorded as given (unset dims 0, the driver's default) |
+| 13 | `kernel.warmup(...)` (`_do_compile` with `warmup`) compiles the specialization the launch would compile (as Launch.compile, 6) and returns that CompiledKernel; a second warmup of the same kernel-cache entry returns the same one. Its `_init_handles()` loads nothing and sets `function` to a stand-in CUfunction handle; launching it through the CompiledKernel raises. During the host run `ctypes.CDLL("libcuda.so[.1]")` and `ctypes.cdll.LoadLibrary("libcuda.so[.1]")` return a stand-in with only `cuFuncSetAttribute`, on such a handle only, for `CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_{WIDTH,HEIGHT,DEPTH}` only (any other driver function, attribute or handle raises): it returns `CUDA_ERROR_NOT_PERMITTED` (800) for a kernel whose PTX fixes its cluster dims (`.reqnctapercluster`), else 0 after recording the value; every later launch with that kernel-cache entry carries the attributes set so far in its LaunchRecord, `attrs.func_attributes`, and a launch of a kernel whose handle the host loaded (`_init_handles()`) with no attribute recorded fails the dump | warmup compiles without launching on the GPU too, and later launches with that entry run the compiled kernel it cached, so attributes set on its function apply to them (not to other specializations, e.g. other constexprs); the driver documents the return codes (cluster dims set at compile time cannot be set at run time) and checks the values only at launch, so they are recorded as given (unset dims 0, the driver's default); a loaded handle may also reach a driver call the CPU run does not see (a library loaded before the host call, cuda-python), so a launch whose handle the stand-in never recorded an attribute for is not modeled |
+| 14 | while dump builds a launch's LaunchRecord, after the host call (`capture.launch_record`), the driver stand-in's `utils.fill_tma_descriptor_tiled` (`gpu_free.recorded_tma_fills`) returns its arguments (address, CUtensorMap data type, element size, box, shape, strides, swizzle, padding) instead of encoding a CUtensorMap; at any other time it is absent (host code calling it raises, 1), and the other descriptor fills (im2col, 1-D/2-D) always raise | Triton's own launcher code (`wrap_handle_tensordesc`, `make_tensordesc_arg`) derives each host descriptor's device parameter from the bound arguments, so the record is what the driver would be asked to encode; the parameter list is checked against the PTX `.entry` (count, kind, size, alignment) and block and cluster against `.reqntid` / `.reqnctapercluster`, any difference failing the dump; no host code runs while it is installed |
 
 Consequences that are checked, not assumed:
 
@@ -181,10 +202,11 @@ Consequences that are checked, not assumed:
   far in the run (`stale_reads`: one in an earlier input may have filled a cache).
   to_kir refuses a KIR whose metadata tensor has a stale writer (e.g. a later launch of
   the same kernel reading what an earlier one wrote, or a host copy of it, or rows a
-  kernel wrote into a pointer array's target), and an input with a stale host read before
-  the analyzed launch: the host may branch on it or size the launch with it (e.g.
-  `fill[(int(cnt.item()),)]` after a kernel computed `cnt`). Any such read refuses the
-  input; whether the host's control flow really depends on it is not decided.
+  kernel wrote into a pointer array's target), and a KIR with an input in which the host
+  read stale data before the analyzed launch: the host may branch on it or size the
+  launch with it (e.g. `fill[(int(cnt.item()),)]` after a kernel computed `cnt`). Either
+  way the whole specialization is refused (a gap), not only that input; whether the
+  host's control flow really depends on the read is not decided.
 * A move between host and device (`.cpu()`, `.cuda()`, `.to(device)`, `pin_memory()`,
   `as_tensor(device=)`) copies on the GPU unless the data is already there, but on the
   CPU host it returns its input. A later write (any aten op's mutable argument) to a
@@ -234,18 +256,23 @@ tensors)}` or `{"kind": "desc", dtype, elem_bytes, shape, strides, block_shape, 
 base}`.
 `<key>` hashes kernel, signature, constexprs, attrs and options.
 
-For the PTX translation (`frontend_ptx.md`) a spec also has `ptx`, `ptx_sha256`,
-`tensordesc_meta`, `global_scratch`, `profile_scratch_size` and `ptxas` (`path`,
-`version`: the release Triton reads, e.g. 13.3), and each launch a LaunchRecord `launch`
-(grid, block, cluster, dynamic shared memory, attrs, params) with `ptxas`, the full
-version `ptxas --version` prints (e.g. 13.3.33), which gates the TMA issuing rules.
+Whichever translation runs (the PTX translation, `frontend_ptx.md`, and the P0-6 barrier
+pass read them), a spec also has `ptx`, `ptx_sha256`, `tensordesc_meta`, `global_scratch`
+(`size`, `align`), `profile_scratch_size` and `ptxas` (`path`, `version`: the release
+Triton reads, e.g. 13.3), and each launch of `kernel` a LaunchRecord `launch` (`entry`,
+the PTX entry name, `grid`, `block`, `cluster`, `smem_dynamic`, `attrs`, `params`) with
+`ptxas`, the full version `ptxas --version` prints (e.g. 13.3.33), which gates the TMA
+issuing rules.
 Its `attrs` are the kernel's launch options, `pdl`, `cooperative` and
 `preferred_cluster` (TLX `preferred_ctas_per_cga`, or null), plus `func_attributes` if
 the host set function attributes on the launched kernel before the launch (patch 13):
 `{"required_cluster": [x, y, z]}`, the values of
 `CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_{WIDTH,HEIGHT,DEPTH}`, 0 where unset (e.g. a kernel
 launched with a preferred cluster of 3 that may fall back to single CTAs has
-`[1, 1, 1]`).
+`[1, 1, 1]`). Its `params` follow Triton's launcher, with one tensor-descriptor ABI per
+kernel: with the kernel's `tensordesc_meta` a host descriptor is its CUtensorMap record
+(patch 14) plus `<d>.shape.i` / `<d>.stride.i`, without it decomposed into `<d>.<j>` (a
+kernel mixing the two fails the dump).
 
 ## KIR produced
 
@@ -268,9 +295,10 @@ launched with a preferred cluster of 3 that may fall back to single CTAs has
   (gstore/gatomic/tma_store/tma_reduce), unless the case says otherwise. Every output
   needs an `intended_writes` entry in every input (or the opt-out `unchecked`), so P0-3
   never passes by omission.
-* Roles: `default` (the kernel's `num-warps`) and `partitionN` (`num_warps(N)`) of
-  `ttg.warp_specialize`; a kernel without it has one `default` role. The code before
-  the warp_specialize (barrier inits, shared values) runs in `default`; partition
+* Roles: `default` (the kernel's `num-warps`) and `partitionN` (partition region N, from
+  0, with its `num_warps(W)` warps) of `ttg.warp_specialize`; a kernel without it
+  has one `default` role. The code before and after the warp_specialize (barrier inits,
+  shared values) runs in `default`; partition
   captures are rebuilt from kernel arguments and bound with `let` at role entry.
   `threads_per_issue` is 1: every TTGIR barrier/TMA/MMA op is a single-thread (leader)
   operation; a `perThread` arrive is emitted with `n = count x warps x 32`.
@@ -281,18 +309,20 @@ launched with a preferred cluster of 3 that may fall back to single CTAs has
   loop and again at the end of the body; `max_iters` is a fuel of 65536 (the frontend
   does not prove loop bounds; exceeding it is a verdict error, never a pass). An early
   `return` (acyclic `cf` blocks without arguments) becomes nested `if`s.
-* Variables: each integer SSA value on the slice is one KIR variable, named by its
-  printed SSA name (`%tile_id_34` -> `tile_id_34`; its temporaries add `.next`, `.in`,
-  ...). The printer numbers sibling regions alike: an `scf.while`'s before and after
-  regions, the branches of an `scf.if` and consecutive loop bodies restart at the same
-  `%N`, `%argN` and `name_N`. The statements above also assign some values outside their
-  region (an `scf.while` before region and its arguments, loop-carried values). So
-  values with one printed name can meet. They share the variable only where that is
-  exact: wherever both are visible (kir.md scoping), they have the same width, neither is
-  a `for` variable, and neither is read after the other is assigned. For example, a
+* Variables: each integer SSA value on the slice that the translation binds (constants
+  are inlined, kernel arguments are params) is one KIR variable, named by its printed SSA
+  name (`%tile_id_34` -> `tile_id_34`; its temporaries add `.next`, `.in`, ...). The
+  printer numbers sibling regions alike: an `scf.while`'s before and after regions, the
+  branches of an `scf.if` and consecutive loop bodies restart at the same `%N`, `%argN`
+  and `name_N`. The statements above also assign some values outside their region (an
+  `scf.while` before region and its arguments, loop-carried values, the default
+  partition's values at the role's top level). So values with one printed name can meet.
+  They share the variable only where that is exact: neither is live (read before its own
+  next assignment) where the other is assigned, and wherever both are visible (kir.md
+  scoping) they have the same width and neither is a `for` variable. For example, a
   while's after-arguments share its before-arguments' variables, because the carry
-  reassigns those before any read. Otherwise the later value is named
-  `<name>@<TTGIR line>` (`frontend/ttgir/var_names.py`).
+  reassigns those before any read. Otherwise the value first assigned later is named
+  `<name>@<TTGIR line>`, the line that defines it (`frontend/ttgir/var_names.py`).
 * `addr` is set on every add/sub/mul/shl and trunc on an address path: the value flows
   into a pointer offset, a TMA coordinate, a descriptor's global address or a metadata
   load index through operands that carry it (not through comparisons, select/if
@@ -360,6 +390,13 @@ its cluster steals (`to_kir._with_clc`).
 
 ## Soundness checks (every failure is a hard error with op and loc)
 
+The TTGIR translation makes all of these. The PTX translation (the default) makes the
+host-side ones too (metadata provenance and host reads, metadata written in the analyzed
+launch, metadata layout, host descriptor extents, event locations, the case's names and
+`elision_flags`, CLC on 1-D grids only, the cluster); for the op table, slicing, TMA, the
+module and unsupported constructs it has its own rules and refusals (`frontend_ptx.md`,
+"Refusals"; `ir_ops_ptx.md`).
+
 * Every op is classified by the op table; unknown ops anywhere in the kernel are errors
   (they could hide events), not only those on the kept slice.
 * Slicing: the backward closure of event operands and control operands of live
@@ -371,7 +408,8 @@ its cluster steals (`to_kir._with_clc`).
   or (per input) one whose storage overlaps a written tensor's or a written
   descriptor's base, is refused: its recorded contents are not what the kernel reads.
 * Metadata layout: contents are recorded in index order and `load` indices are element
-  offsets, so a metadata tensor must be contiguous (stride 1).
+  offsets, so a metadata tensor must be contiguous (stride 1) at storage offset 0, with
+  recorded contents (integer tensors of at most 65536 elements).
 * TMA descriptor extents: Layer 2 checks TMA accesses against the descriptor's extents
   (TMA clips there), so per input every in-extent element of a host descriptor, and of
   an in-kernel descriptor with host-side extents that a TMA load reads, must be an
@@ -383,6 +421,11 @@ its cluster steals (`to_kir._with_clc`).
   descriptors with the block shape and element size of their type.
 * Module: `ttg.num-warps` present, `ttg.threads-per-warp` 32, `ttg.target` = the dump's
   target.
+* Cluster: a launch whose function's required cluster (`attrs.func_attributes`, patch 13)
+  differs from its `cluster` is refused (a gap: which of the two the hardware uses is not
+  modeled; `check_required_cluster`), its P0-6 KIR too. So is one with a preferred
+  cluster (`attrs.preferred_cluster`) other than its `cluster`, after the translation's
+  own refusals (a gap: this translation checks one geometry; `check_preferred_cluster`).
 * Unsupported constructs: cross-CTA barriers/arrives (`map_to_remote_buffer`,
   `ctaMask`, 2-CTA/multicast MMA, paired-MMA modules, `num-ctas > 1`), CLC with
   clusters or multi-dimensional grids, multicast/two_cta/im2col TMA, tensor-valued
@@ -400,21 +443,34 @@ its cluster steals (`to_kir._with_clc`).
 
 ## PTX translation
 
-By default (`LKV_FRONTEND` unset or `ptx`; `lkv.py run --frontend ptx`) `to_kir`
+By default (`LKV_FRONTEND` unset, empty or `ptx`; `lkv.py run --frontend ptx`) `to_kir`
 translates the PTX `dump` writes next to each TTGIR (`<spec>.ptx`) instead of the TTGIR,
 with the shared PTX translation of both frontends and its op table: `frontend_ptx.md` and
-`ir_ops_ptx.md` (TMA and bulk copies, clusters, CLC, refusals); it also writes the P1-2
-KIRs. The case file, the dump, the names, tensors, params, inputs, checks and
-`[to_kir] ... FAILED` lines stay. `--frontend legacy` (`LKV_FRONTEND=legacy`) selects the
-TTGIR translation above: it decides some constructs the PTX translation refuses, refuses
-2-CTA kernels and checks no P1-2.
+`ir_ops_ptx.md` (TMA and bulk copies, clusters, CLC, refusals). The KIR has `ir` `"ptx"`
+and, for launches in clusters, `cluster` (`kir.md` change 11). It also writes the P1-2
+KIRs (`<spec>.p1.json`, `frontend_ptx.md`, "P1-2 pass"; `LKV_P1=0` skips them in a
+`to_kir` run by hand, `lkv.py run --no-p1` skips their checks). A
+specialization whose launches prefer other cluster dims (`attrs.preferred_cluster`) is
+also checked in the all-preferred geometry, `<spec>@cluster<dims>`, on every input
+(refused where the launches break a rule CUDA states for the preferred dims): a P0 KIR
+(if the regular one translates) and a P1-2 KIR, both refused with CLC, and, whatever the
+translation, a P0-6 KIR (`frontend_ptx.md`, "Clusters, tcgen05, CLC", also for its
+limits). The case file, the dump, the variant,
+tensor and param names, the inputs, the host-side checks ("Soundness checks") and the
+`[to_kir] ... FAILED` lines stay; barrier and variable names are the PTX translation's
+(`frontend_ptx.md`, "Family conventions"). `--frontend legacy` (`LKV_FRONTEND=legacy`)
+selects the TTGIR translation above: it decides some constructs the PTX translation
+refuses, refuses 2-CTA kernels and launches with a preferred cluster, and checks no P1-2
+(P0-6, whose KIR comes from the PTX, is checked under both).
 
 ## Limitations
 
 * A verdict covers the case inputs and the analyzed specializations only. Variants the
   host selects only for huge inputs (e.g. `USE_I64_IDX` for >= 2^31 elements) or through
   non-default environment switches are checked only where a case selects them (`env`).
-* Below TTGIR nothing is checked (layouts, register allocation, PTX).
+* The TTGIR translation checks nothing below TTGIR (layouts, register allocation, PTX),
+  the PTX translation (the default) nothing below PTX (ptxas, SASS) except the TMA
+  issuing rules measured on hardware (`ir_ops_ptx.md`); P0-6 reads the PTX under both.
 * A pointer tensor and a host descriptor over the same allocation (e.g. dK pointer
   stores and `desc_dk` TMA stores) are separate KIR tensors; KIR v1 has no way
   to say they alias.
@@ -425,11 +481,20 @@ TTGIR translation above: it decides some constructs the PTX translation refuses,
   `numpy.from_dlpack`) escapes it. Address hints come only from integer scalars and the
   recorded contents of int64 tensors (not from pointers split into int32 halves, nor from
   tensors too large to record). Sources are whole storages, and any host read of stale
-  data before the analyzed launch, in the input or an earlier one, refuses the input,
-  so the checks are conservative (a later `zero_()` does not make data fresh).
+  data before the analyzed launch, in the input or an earlier one, refuses the
+  specialization (every input of it), so the checks are conservative (a later `zero_()`
+  does not make data fresh).
 * A write to a tensor a move between host and device returned fails the dump even where
   the GPU would not have copied (the data already on the target device): the CPU run
   does not know where the data would live.
+* The libcuda stand-in (13) answers only `ctypes.CDLL` and `ctypes.cdll` called during a
+  host call with a file named `libcuda.so` or `libcuda.so.1`: a host that loads the
+  driver otherwise (a `CDLL` or `cdll` bound before the call, e.g. at import, a versioned
+  file name, cuda-python) gets the real library, if there is one, which receives a
+  stand-in handle, and the attributes it sets are not recorded. A launch of a kernel
+  whose handle the host loaded fails the dump unless the stand-in recorded an attribute
+  for it; a host that sets some attributes through the stand-in and others through the
+  real library gets only the former recorded.
 * Environment variables read by name in the exported sources are pinned, as are
   compiler switches; variables read by libraries outside those prefixes (torch,
   torchao) are not.
@@ -438,3 +503,6 @@ TTGIR translation above: it decides some constructs the PTX translation refuses,
 * 2-CTA (cluster) kernels need cross-CTA events (target CTA of an arrive, DSMEM copies)
   that the TTGIR translation does not emit: the PTX translation (the default,
   `frontend_ptx.md`) checks them.
+* The TTGIR translation refuses a launch with a preferred cluster
+  (`attrs.preferred_cluster`) other than its cluster dims, as it checks one geometry;
+  P0-6 and the PTX translation check both ("PTX translation").
