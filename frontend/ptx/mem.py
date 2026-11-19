@@ -21,10 +21,15 @@ a pointer field of a struct parameter, named by the adapter) loads as its tensor
 select between two offsets of one base, a per-thread table of offsets of one base and,
 for shared addresses, a truncation to 32 bits. A global access through a select between
 two bases takes the arm its condition picks in the role; a condition uniform in each warp
-but not in the role splits the role (CuTe; _pick_bases). An address that is no such sum
+but not in the role splits the role (CuTe; _pick_bases); a condition that is one value in
+the role but not known (a program id or parameter test) makes the access two, one per
+base under the condition and its negation (_global_arms; a generic access through a
+select between a shared and a global address is refused). An address that is no such sum
 is refused, never guessed. tma.py adds
 `%d:<param>`, a descriptor parameter's address, and `%x:<param>`, Triton's scratch
 pointer: only TMA instructions may use them (any other global access is refused).
+`%p:<param>` is any other parameter's address (`mov r, k_param_0`), which only ld.param
+reads, also through a select of two of them (_param_select).
 `%l:<var>` is the local-window address of a `.local` variable (LLVM's __local_depot);
 `%S:<symbol>` and `%L:<var>` are the generic addresses of the same bytes, which only
 cvta makes (_cvta: cvta.shared(::cluster) %s: -> %S:, cvta.to.shared(::cluster) %S: ->
@@ -140,6 +145,8 @@ class Memory:
             return E.var(f"%l:{name}", w)
         if self.params.get(name, {}).get("kind") == "tensormap":  # tma.py: a descriptor
             return self.tma.symbol(name, w)
+        if name in self.params:  # the address of a parameter: only ld.param reads it
+            return E.var(f"%p:{name}", w)
         return Data(f"the address of {name} (no shared-memory or tensor provenance)")
 
     def address(self, tr: Translator, op):
@@ -269,11 +276,16 @@ class Memory:
 
     # ------------------------------------------------------------ parameters
     def _ld_param(self, tr: Translator, i) -> None:
+        """ld.param [p + off]; through a register, an address that selects between
+        parameters (LLVM merging `if c: f(a) else: f(b)` into a select of the two
+        parameter addresses): the select of their values."""
         addr = i.operands[1]
-        if addr[0] != "mem" or addr[1][0] != "sym":
+        if addr[0] != "mem" or addr[1][0] not in ("sym", "reg"):
             tr.fail(i, "ld.param from a computed address", "error")
-        p = self.params.get(addr[1][1])
-        if p is None:
+        p = a = None
+        if addr[1][0] == "reg":
+            a = self.address(tr, addr)
+        elif (p := self.params.get(addr[1][1])) is None:
             tr.fail(
                 i,
                 f"ld.param of {addr[1][1]}, which is not a parameter of the kernel",
@@ -285,8 +297,33 @@ class Memory:
         for k, r in enumerate(regs):
             if r[0] != "reg":
                 continue
-            v = self._param_value(tr, i, p, addr[2] + k * size, size)
+            if p is None:
+                v = self._param_select(tr, i, a, k * size, size)
+            else:
+                v = self._param_value(tr, i, p, addr[2] + k * size, size)
             tr.write(r[1], _extend(tr, r[1], v, _signed(i.opcode)))
+
+    def _param_select(self, tr: Translator, i, a, extra: int, size: int):
+        """The value ld.param reads at address a + extra: a is a parameter's address plus a
+        constant, or a select of such (nested), uniform in the role; else refused."""
+        if not isinstance(a, Data) and a[0] == "select" and not E.thread_varying(a[2]):
+            x = self._param_select(tr, i, a[3], extra, size)
+            y = self._param_select(tr, i, a[4], extra, size)
+            if isinstance(x, Data) or isinstance(y, Data):
+                return x if isinstance(x, Data) else y
+            return E.select(a[2], x, y)
+        base, off = a, 0
+        if (
+            not isinstance(a, Data)
+            and a[0] == "bin"
+            and a[2] == "add"
+            and E.is_const(a[4])
+        ):
+            base, off = a[3], a[4][2]
+        if isinstance(base, Data) or base[0] != "var" or not base[2].startswith("%p:"):
+            tr.fail(i, "ld.param from a computed address", "error")
+        p = self.params[base[2][3:]]
+        return self._param_value(tr, i, p, off + extra, size)
 
     def _param_value(self, tr: Translator, i, p, off: int, size: int):
         kind = p["kind"]
@@ -330,12 +367,38 @@ class Memory:
         return E.var(entry["name"], w)
 
     # ---------------------------------------------------------- global memory
+    def _global_arms(self, tr: Translator, i, op, nbytes: int) -> list:
+        """[(condition or None, _access)] of a global access of nbytes at operand op: one
+        arm, or, where the address is a select between two tensors' addresses whose
+        condition is one value in the whole role but not known (e.g. it depends on the
+        program id or a parameter: LLVM merged `if pid.y == 0: f(a) else: f(b)` into a
+        select of the bases), one arm under the condition and one under its negation. A
+        select between two shared addresses is one shared arm, [(None, None)]; one
+        between a shared and a global address is refused (the callers handle one address
+        space)."""
+        a = tr.as_int(self.address(tr, op), "a global address")
+        if peel(a) is None and peel(_pick_bases(tr, a)) is None:
+            arms = _select_arms(tr, a)
+            if arms is not None:
+                c, x, y = arms
+                gx, gy = self._access(tr, i, x, nbytes), self._access(tr, i, y, nbytes)
+                if (gx is None) != (gy is None):
+                    tr.fail(i, "a generic access through a select between a shared-memory "
+                               "and a global address")  # fmt: skip
+                if gx is None:
+                    return [(None, None)]
+                return [(c, gx), (E.not1(c), gy)]
+        return [(None, self._access(tr, i, a, nbytes))]
+
     def _global(self, tr: Translator, i, op, nbytes: int):
         """(tensor, element offset, elements) of a global access of nbytes at operand op,
         or None if its address is a shared one (generic ld/st/atom/red; through a global
         one, ld/st/atom/red.global or red.async: an error)."""
         a = self.address(tr, op)
-        a = tr.as_int(a, "a global address")
+        return self._access(tr, i, tr.as_int(a, "a global address"), nbytes)
+
+    def _access(self, tr: Translator, i, a, nbytes: int):
+        """_global for the integer address a."""
         p = peel(a)
         if p is None:
             p = peel(_pick_bases(tr, a))
@@ -347,6 +410,9 @@ class Memory:
             if mn.startswith(_EXPLICIT_GLOBAL):
                 tr.fail(i, f"{mn} on shared memory through a global address", "error")
             return None
+        if base[2].startswith("%p:"):
+            tr.fail(i, f"a global access through the address of the parameter "
+                       f"{base[2][3:]} (only ld.param reads it)")  # fmt: skip
         if not base[2].startswith("%g:"):  # tma.py's descriptor parameters and scratch
             tr.fail(i, f"a global access through {base[2][1:]} (only TMA instructions)")
         name = base[2][3:]
@@ -375,42 +441,79 @@ class Memory:
         dst = i.operands[0]
         regs = list(dst[1]) if dst[0] == "vec" else [dst]
         bits = _elem_bits(i.opcode)
-        g = self._global(tr, i, i.operands[1], len(regs) * bits // 8)
-        if g is None:  # a generic load of shared memory: data
+        arms = self._global_arms(tr, i, i.operands[1], len(regs) * bits // 8)
+        if arms[0][1] is None:  # a generic load of shared memory: data
             for r in regs:
                 if r[0] == "reg":
                     tr.env[r[1]] = Data(f"{i.opcode} at {tr.loc(i)}")
             return
+        vals = [self._under(tr, c, lambda g=g: self._load_values(tr, i, regs, bits, g, len(arms) == 1))
+                for c, g in arms]  # fmt: skip
+        for k, r in enumerate(regs):
+            if r[0] != "reg":
+                continue
+            vs = [v[k] for v in vals]
+            if any(isinstance(v, Data) for v in vs):
+                tr.env[r[1]] = next(v for v in vs if isinstance(v, Data))
+            else:  # one value per arm: their select
+                v = vs[0] if len(vs) == 1 else E.select(arms[0][0], vs[0], vs[1])
+                tr.write(r[1], _extend(tr, r[1], v, _signed(i.opcode)))
+
+    def _load_values(
+        self, tr: Translator, i, regs: list, bits: int, g, anchor: bool
+    ) -> list:
+        """The gload event of access g and per register its value (or Data); `anchor`:
+        the load may anchor a work field (not one arm of a select of tensors)."""
         name, off, n = g
         self._event(tr, "gload", name, off, n)
         eb = self.tensors[name]["elem_bytes"]
         per = n // len(regs)  # elements per register
         strong = ops.strong(i.opcode)
+        out = []
         for k, r in enumerate(regs):
-            if r[0] != "reg":
-                continue
-            if per != 1 or eb * 8 != bits or bits < 32 or _reg_type(tr, r[1]) == "f":
-                tr.env[r[1]] = Data(f"{i.opcode} of {name} at {tr.loc(i)}")
+            if (
+                r[0] != "reg"
+                or per != 1
+                or eb * 8 != bits
+                or bits < 32
+                or _reg_type(tr, r[1]) == "f"
+            ):
+                out.append(Data(f"{i.opcode} of {name} at {tr.loc(i)}"))
                 continue
             idx = E.bin("add", off, E.const(k, 64))
-            if k == 0:
+            if k == 0 and anchor:
                 self.loads[id(i)] = (name, off)
             if strong:  # another thread may write it during the run: no metadata read
-                tr.env[r[1]] = Data(f"{i.opcode} of {name} at {tr.loc(i)} (a strong "
-                                    "load: another thread may write it)")  # fmt: skip
+                out.append(Data(f"{i.opcode} of {name} at {tr.loc(i)} (a strong "
+                                "load: another thread may write it)"))  # fmt: skip
                 continue
-            v = E.load(name, tr.guard(idx, 0), bits)
-            tr.write(r[1], _extend(tr, r[1], v, _signed(i.opcode)))
+            out.append(E.load(name, tr.guard(idx, 0), bits))
+        return out
+
+    @staticmethod
+    def _under(tr: Translator, c, f):
+        """f() with the uniform condition c (None: none) added to the role's mask."""
+        if c is None:
+            return f()
+        tr.flush()
+        saved = tr.mask
+        tr.mask = E.and1(saved, c)
+        try:
+            return f()
+        finally:
+            tr.flush()
+            tr.mask = saved
 
     def _store(self, tr: Translator, i) -> None:
         val = i.operands[1]
         n = len(val[1]) if val[0] == "vec" else 1
         nbytes = n * _elem_bits(i.opcode) // 8
-        g = self._global(tr, i, i.operands[0], nbytes)
-        if g is None:  # a generic store to shared memory: data
+        arms = self._global_arms(tr, i, i.operands[0], nbytes)
+        if arms[0][1] is None:  # a generic store to shared memory: data
             self._shared_write(tr, i, i.operands[0], nbytes)
             return
-        self._event(tr, "gstore", *g)
+        for c, g in arms:
+            self._under(tr, c, lambda g=g: self._event(tr, "gstore", *g))
 
     def _shared_write(self, tr: Translator, i, op, nbytes: int) -> None:
         """A generic st/atom/red of shared memory: it closes the staging buffers it may
@@ -431,11 +534,16 @@ class Memory:
         ret = mn.startswith("atom")
         nbytes = _vec(i.opcode) * _elem_bits(i.opcode) // 8
         op = i.operands[1 if ret else 0]
-        g = None if ".shared" in mn else self._global(tr, i, op, nbytes)
-        if g is None:
+        arms = (
+            [(None, None)] if ".shared" in mn else self._global_arms(tr, i, op, nbytes)
+        )
+        if arms[0][1] is None:
             self._shared_write(tr, i, op, nbytes)
         else:
-            self._event(tr, "gstore" if mn.endswith(".exch") else "gatomic", *g)
+            kind = "gstore" if mn.endswith(".exch") else "gatomic"
+            for c, g in arms:
+                assert g is not None  # both arms of a select are global (_global_arms)
+                self._under(tr, c, lambda g=g: self._event(tr, kind, *g))
         if ret:
             dst = i.operands[0]
             for r in dst[1] if dst[0] == "vec" else [dst]:
@@ -670,12 +778,13 @@ class Memory:
 # ------------------------------------------------------------------ addresses
 
 
-_BASES = ("%g:", "%s:", "%S:", "%l:", "%L:", "%d:", "%x:")  # (_is_base)
+_BASES = ("%g:", "%s:", "%S:", "%l:", "%L:", "%d:", "%x:", "%p:")  # (_is_base)
 
 
 def _is_base(x) -> bool:
     """A tensor (%g:), shared symbol (%s:; generic: %S:), local variable (%l:; generic:
-    %L:), descriptor parameter (%d:, tma.py) or scratch (%x:, tma.py) address."""
+    %L:), descriptor parameter (%d:, tma.py), scratch (%x:, tma.py) or other parameter
+    (%p:, only ld.param reads it) address."""
     return x[0] == "var" and x[2][:3] in _BASES
 
 
@@ -719,6 +828,30 @@ def _peel_arms(e):
     if e[0] == "select":
         return ps[0][0], E.select(e[2], *offs)
     return ps[0][0], E.table(e[2], tuple(offs))
+
+
+def _select_arms(tr: Translator, a):
+    """(c, a_true, a_false) if a is select(c, x, y) (plus or minus offsets) with x and y
+    addresses (reserved) and c one value in the whole role, else None."""
+
+    def split(e):
+        if e[0] == "select" and E.reserved(e[3]) and E.reserved(e[4]):
+            return e[2], e[3], e[4]
+        if e[0] == "bin" and e[2] in ("add", "sub"):
+            for side in (3, 4) if e[2] == "add" else (3,):
+                s = split(e[side]) if E.reserved(e[side]) else None
+                if s is not None:
+                    c, x, y = s
+                    if side == 3:
+                        return c, E.bin(e[2], x, e[4]), E.bin(e[2], y, e[4])
+                    return c, E.bin(e[2], e[3], x), E.bin(e[2], e[3], y)
+        return None
+
+    s = split(a)
+    if s is None:
+        return None
+    c = tr.uniform(s[0])
+    return None if c is None or E.thread_varying(c) else (c, s[1], s[2])
 
 
 def _pick_bases(tr: Translator, e):

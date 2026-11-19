@@ -177,7 +177,8 @@ the peer's phase k bytes. E.g. TLX's CLC with clusters: the
 rank-0 CTA's k-th try_cancel multicasts the response into the other CTA, whose roles' k-th
 waits on their response barrier need its bytes, so their k-th releases of the rank-0 CTA's
 empty slot cannot precede the rank-0 CTA's next wait there, and its next try_cancel follows
-their (k-1)-th waits.
+their (k-1)-th waits. `returnCuts` asks for both bounds at many cuts and phases: through a
+per-slot `TxIndex` (bisection over prefix sums, the same values).
 -/
 import KV.Spec.Common
 
@@ -429,6 +430,40 @@ def SlotLedger.bytesNeeded (L : SlotLedger) (k : Int) : Int :=
     let need := L.needs i k false
     rs.tx.foldl (init := acc) fun acc x => if !x.load && x.arrivedBefore < need then acc + x.bytes else acc
 
+/-- Per entry of a slot's `roles`: the trace positions of its loads and landings (ascending,
+program order) with the prefix sums of their bytes, and the `arrivedBefore` of its
+expect_tx events (non-decreasing in program order) with the prefix sums of theirs; for
+`SlotLedger.landedBefore` and `SlotLedger.bytesNeeded` by bisection (`returnCuts` asks them
+for many cuts and phases). -/
+structure TxIndex where
+  loadPos : Array (Array Nat)
+  loadPre : Array (Array Int)
+  expectAt : Array (Array Int)
+  expectPre : Array (Array Int)
+  deriving Inhabited
+
+private def prefixSums (xs : Array Int) : Array Int :=
+  xs.foldl (init := #[0]) fun acc x => acc.push (acc.back! + x)
+
+def SlotLedger.txIndex (L : SlotLedger) : TxIndex :=
+  let loads := L.roles.map fun rs => rs.tx.filter (·.load)
+  let expects := L.roles.map fun rs => rs.tx.filter (!·.load)
+  { loadPos := loads.map (·.map (·.pos)), loadPre := loads.map fun xs => prefixSums (xs.map (·.bytes)),
+    expectAt := expects.map (·.map (·.arrivedBefore)),
+    expectPre := expects.map fun xs => prefixSums (xs.map (·.bytes)) }
+
+/-- `landedBefore` through the slot's `TxIndex`. -/
+def SlotLedger.landedFast (L : SlotLedger) (ix : TxIndex) (cuts : Array Nat) : Int :=
+  L.roles.zipIdx.foldl (init := 0) fun acc (rs, j) =>
+    let c := cuts[rs.role]!
+    acc + ix.loadPre[j]![searchFirst ix.loadPos[j]! (· ≥ c)]!
+
+/-- `bytesNeeded` through the slot's `TxIndex`. -/
+def SlotLedger.bytesNeededFast (L : SlotLedger) (ix : TxIndex) (k : Int) : Int :=
+  L.roles.zipIdx.foldl (init := 0) fun acc (_, j) =>
+    let need := L.needs j k false
+    acc + ix.expectPre[j]![searchFirst ix.expectAt[j]! (· ≥ need)]!
+
 /-- Per role the lower of two cut positions (`b` empty: `a`). -/
 def meetCuts (a b : Array Nat) : Array Nat :=
   if b.isEmpty then a else (Array.range a.size).map fun j => min a[j]! (b.getD j a[j]!)
@@ -547,7 +582,13 @@ a role's waits on one slot do not decrease in program order, so the first such w
 earlier wait, so `waits + 1` rounds reach the fixpoint (stopping earlier would only leave
 cuts higher, which is still sound). -/
 def returnCuts (L : Array SlotLedger) (ws : WaitsBySlot) (sizes : Array Nat) (role pos : Nat)
-    (bytes : Bool := false) (own : Nat → Nat → Array Nat := fun _ _ => #[]) : Array Nat := Id.run do
+    (bytes : Bool := false) (own : Nat → Nat → Array Nat := fun _ _ => #[])
+    (ix : Array TxIndex := #[]) : Array Nat := Id.run do
+  -- the slot's landed and needed bytes, through its `TxIndex` if given (same values)
+  let landedAt (s : Nat) (c : Array Nat) : Int :=
+    match ix[s]? with | some i => L[s]!.landedFast i c | none => L[s]!.landedBefore c
+  let neededAt (s : Nat) (k : Int) : Int :=
+    match ix[s]? with | some i => L[s]!.bytesNeededFast i k | none => L[s]!.bytesNeeded k
   let mut cuts := sizes.modify role fun _ => pos
   for _ in [0:ws.foldl (fun n r => r.foldl (fun n x => n + x.2.size) n) 1] do
     let mut changed := false
@@ -557,14 +598,14 @@ def returnCuts (L : Array SlotLedger) (ws : WaitsBySlot) (sizes : Array Nat) (ro
         let before := l.arrivedBefore cuts
         -- with `bytes`: nor the bytes its phase needs (module doc, "Bytes carry order");
         -- both bounds grow with the phase, so the first wait is still found by bisection
-        let landed := if bytes then l.landedBefore cuts else 0
-        let i := if !(bytes && l.roles.any (·.lander)) then
-            searchFirst xs fun (_, k) => before < k * l.count || (bytes && landed < l.bytesNeeded k)
-          else
+        let landed := if bytes then landedAt s cuts else 0
+        let first := searchFirst xs fun (_, k) => before < k * l.count || (bytes && landed < neededAt s k)
+        let i := if !(bytes && l.roles.any (·.lander)) then first else
             -- a lander's slot: only loads that the wait's own return does not surely
-            -- precede (`own`) can fill its phase; no longer monotone, so a scan
-            (xs.findIdx? fun (p, k) => before < k * l.count ||
-              l.landedBefore (meetCuts cuts (own r p)) < l.bytesNeeded k).getD xs.size
+            -- precede (`own`) can fill its phase; no longer monotone, so a scan, but only
+            -- of the waits before `first` (own cuts only lower the landed bytes)
+            ((xs.extract 0 first).findIdx? fun (p, k) =>
+              landedAt s (meetCuts cuts (own r p)) < neededAt s k).getD first
         match xs[i]? with
         | some (p, _) =>
           if p < cuts[r]! then
@@ -584,10 +625,11 @@ def mayBeforeReturn (L : Array SlotLedger) (waits : Array (Array WaitPos)) (size
   let own : Std.HashMap (Nat × Nat) (Array Nat) := if !bytes then {} else
     waits.zipIdx.foldl (init := {}) fun m (xs, r) => xs.foldl (init := m) fun m (p, s, _) =>
       if L[s]!.roles.any (·.lander) then m.insert (r, p) (returnCuts L ws sizes r p) else m
+  let ix := if bytes then L.map (·.txIndex) else #[]
   waits.mapIdx fun r xs => xs.map fun (p, s, _) =>
     let l := L[s]!
     if (l.roles.filter (!·.arrivals.isEmpty)).size ≤ 1 then #[] else
-    let cuts := returnCuts L ws sizes r p bytes fun r p => own.getD (r, p) #[]
+    let cuts := returnCuts L ws sizes r p bytes (fun r p => own.getD (r, p) #[]) ix
     l.roles.map fun rs => rs.arrivedBefore cuts[rs.role]!
 
 /-- Grow per-role trace prefixes `done` that surely happened before some event to a

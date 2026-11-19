@@ -263,7 +263,11 @@ local bytes, which only `cvta` makes (so a generic address is never taken for a 
 one). A global access (`ld`/`st.global`, generic `ld`/`st`/`atom`/`red` on a global
 address, `atom`/`red.global`, `red.async`, `cp.async`) peels its address into (tensor,
 byte offset) through adds, subtracts and selects; a select between two tensors takes the arm the role's condition picks (CuTe: a
-condition uniform per warp splits the role). The element offset is the byte offset over
+condition uniform per warp splits the role), and one whose condition is one value in the
+role but not known (a program id or parameter test) becomes one access per tensor under
+the condition and its negation (a generic access through a select between a shared and a
+global address: refused); the bases may come from `ld.param` through a select of
+two parameter addresses. The element offset is the byte offset over
 the element size, provably exact, else the access is refused. An integer global load of
 the register's width whose value reaches a root is a metadata read,
 KIR `load(T, [index])`, and T is a metadata tensor whose recorded contents the input

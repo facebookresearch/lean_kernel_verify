@@ -78,7 +78,7 @@ with the thread's mask as an `if` (`frontend_ptx.md`, "Family conventions").
 | `setp` (with `.and/.or/.xor`), `selp`, `mov`, `cvt` (integer), `cvt.sat` (integer), `cvta.global` | `cmp` (and the combine), `select`, copy, `ext`/`trunc` (`.sat`: clamped to the destination type's range; rounding integer cvt: refused; a destination register wider than the type gets the value extended by the type's signedness, as ptxas does for `cvt.s8.s32`), identity |
 | `cvta.shared{::cluster}`, `cvta.to.shared{::cluster}`, `cvta.local`, `cvta.to.local` | between a window address and the generic address of the same bytes (the offset kept); of any other value, Data ("Global memory") |
 | 8- and 16-bit integers | their zero-extended i32 (signed ops on the sign extension) |
-| `ld.param` | a kernel parameter: a scalar is the KIR param of the parameter (or struct field) at its width, extended by the load type; a pointer is its tensor's base address (`frontend_ptx.md`, "Memory"); the bytes of a descriptor parameter: refused |
+| `ld.param` | a kernel parameter: a scalar is the KIR param of the parameter (or struct field) at its width, extended by the load type; a pointer is its tensor's base address (`frontend_ptx.md`, "Memory"); the bytes of a descriptor parameter: refused. Through a register: the address must be a select (nested) of parameter addresses plus constants whose conditions are one value in the role (LLVM merging `if c: f(a) else: f(b)`), read as the select of the values; any other computed address: refused |
 | `cvta.param` | the address of a descriptor parameter (only TMA instructions may use it) |
 | `%tid.x`, `%tid.y/z`, `%ntid` | `32*WARP + LANE`, 0 (the block must be (32k, 1, 1)), the launch's block |
 | `%laneid`, `%lanemask_{eq,lt,le,gt,ge}` | LANE and its masks |
@@ -116,7 +116,11 @@ An address is a tensor's base (a pointer parameter, or a pointer field of a stru
 parameter, named by the host adapter) plus a byte offset, through adds, subtracts, a
 select of two offsets of one base and per-lane tables of one base; a select between two
 tensors takes the arm the role's condition picks (CuTe: a condition uniform per warp
-splits the role). Any other address is refused. The element offset is the byte offset
+splits the role); where that condition is one value in the role but not known (it
+depends on the program id or a parameter), the access becomes two, one per tensor, under
+the condition and under its negation (a load's value: the select of the two; a generic
+access through a select between a shared and a global address is refused). Any other
+address is refused. The element offset is the byte offset
 divided by the element size, which must be provably exact (known trailing zeros,
 factorization), else the access is refused (a sub-element access). A generic address is
 made only by `cvta` (shared and local memory; a global one is its own generic address).

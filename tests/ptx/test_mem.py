@@ -12,7 +12,10 @@ divided exactly), a byte offset that is no multiple of the element refused, loop
 pointers (uniform and per thread) whose slots' trailing zeros prove it, a vector access
 as consecutive elements, a sub-element access refused, a generic load of shared memory
 as data, an address of unknown provenance refused, a select between two tensors (the
-CuTe policy splits the role by its warp-uniform condition), a per-lane table of
+CuTe policy splits the role by its warp-uniform condition; a condition that is one
+value in the role but not known gives one access per tensor under it and its negation,
+also through ld.param of a select of two parameter addresses; a global access through a
+parameter's address refused), a per-lane table of
 addresses of one base, unrolled loads of one instruction family merged into one event;
 metadata loads (value in an address: load node, metadata tensor), strong
 (.volatile/.relaxed/.acquire) loads as Data; cp.async with src-size and with a
@@ -186,6 +189,76 @@ LOOP:
         for limit, family in (("16", "cute"), ("64", "ttgir")):
             f = run(body.replace("LIMIT", limit), family, ptrs=("x", "y"), scalars=())
             self.assertIn("no tensor provenance", f.refusals[0]["msg"])
+
+    def test_select_between_tensors_uniform(self):
+        # The same select under a condition that is one value in the whole role but not
+        # known (here pid.y == 0, as LLVM merges `if pid.y == 0: f(x) else: f(y)`): one
+        # access per tensor, under the condition and under its negation (both families);
+        # the base addresses may come from ld.param through a select of two parameters.
+        body = """
+    mov.u32 %r1, %tid.x;
+    mov.u32 %r9, %ctaid.y;
+    setp.eq.s32 %p1, %r9, 0;
+    BASE
+    mul.wide.u32 %rd4, %r1, 4;
+    add.s64 %rd5, %rd3, %rd4;
+    st.global.b32 [%rd5+64], %r1;
+    ret;
+"""
+        sel = """ld.param.u64 %rd1, [k_param_0];
+    ld.param.u64 %rd2, [k_param_1];
+    selp.b64 %rd3, %rd1, %rd2, %p1;"""
+        par = """mov.b32 %r6, k_param_0;
+    mov.b32 %r7, k_param_1;
+    selp.b32 %r8, %r6, %r7, %p1;
+    ld.param.u64 %rd3, [%r8];"""
+        for base in (sel, par):
+            for family in ("ttgir", "cute"):
+                f = run(body.replace("BASE", base), family, ptrs=("x", "y"), scalars=())
+                self.assertEqual(f.refusals, [], (family, base))
+                got = []
+                for st in statements(f.roles[0]["body"]):
+                    if st["op"] == "if":
+                        got += [(str(st["cond"]), e["tensor"]) for e in statements(st["then"])
+                                if e["op"] == "event"]  # fmt: skip
+                self.assertEqual([t for _, t in got], ["x", "y"], family)
+                self.assertNotEqual(got[0][0], got[1][0])
+                self.assertEqual(kir_errors(f), [])
+        # a thread-varying select of parameter addresses: refused
+        f = run(body.replace("BASE", par).replace("%ctaid.y", "%tid.x"), ptrs=("x", "y"),
+                scalars=())  # fmt: skip
+        self.assertIn("ld.param from a computed address", f.refusals[0]["msg"])
+
+    def test_global_access_through_a_parameter_address(self):
+        # a parameter's address (`mov r, k_param_0`) is read by ld.param only
+        f = run("    mov.u32 %r1, %tid.x;\n    mov.b64 %rd1, k_param_0;\n"
+                "    st.global.b32 [%rd1], %r1;\n    ret;\n")  # fmt: skip
+        self.assertIn("a global access through the address of the parameter k_param_0 "
+                      "(only ld.param reads it)", f.refusals[0]["msg"] if f.refusals else "")  # fmt: skip
+
+    def test_select_between_shared_and_global(self):
+        # A generic access through a select between a shared-memory and a global address
+        # under a uniform condition: refused (taking the first arm's address space would
+        # drop the global arm's access, or crash on it); two shared arms stay data.
+        uniform = "    mov.u32 %r9, %ctaid.y;\n    setp.eq.s32 %p1, %r9, 0;\n"
+        for sel in (
+            "selp.b64 %rd6, %rd5, %rd1, %p1;",
+            "selp.b64 %rd6, %rd1, %rd5, %p1;",
+        ):
+            for line in ("ld.u32 %r6, [%rd6];", "st.u32 [%rd6], %r1;",
+                         "atom.add.u32 %r6, [%rd6], 1;"):  # fmt: skip
+                with self.subTest(sel=sel, line=line):
+                    f = run(
+                        PRE + SHARED + uniform + f"    {sel}\n    {line}\n    ret;\n"
+                    )
+                    self.assertIn(
+                        "a select between a shared-memory and a global address",
+                        f.refusals[0]["msg"],
+                    )
+        f = run(PRE + SHARED + uniform + "    add.s64 %rd7, %rd5, 16;\n"
+                "    selp.b64 %rd6, %rd5, %rd7, %p1;\n    ld.u32 %r6, [%rd6];\n"
+                "    st.u32 [%rd6+4], %r6;\n    ret;\n")  # fmt: skip
+        self.assertEqual((f.refusals, events(f)), ([], []))
 
     def test_peel_table(self):
         # A per-lane table of addresses of one base is that base plus a table of offsets.
