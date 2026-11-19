@@ -189,10 +189,12 @@ def p1_2(name):
         return json.load(f)
 
 
-def first(k, ev):  # the first event `ev` of the KIR (depth first)
+def first(
+    k, ev, field=None
+):  # the first event `ev` (with `field`) of the KIR (depth first)
     def walk(stmts):
         for x in stmts:
-            if x["op"] == "event" and x["ev"] == ev:
+            if x["op"] == "event" and x["ev"] == ev and (field is None or field in x):
                 return x
             for key in ("then", "else", "body"):
                 got = walk(x.get(key, []))
@@ -689,6 +691,18 @@ P1_2_MUTATIONS = [
         "bulk_wait with a negative count",
         lambda k: first(k, "bulk_wait").update(n=-1),
         ".n: must be >= 0",
+    ),
+    (
+        "landing",
+        "a landing's mbarrier slot on a write that is not async",
+        lambda k: first(k, "smem_write", "bar").pop("async"),
+        "bar and idx name the mbarrier of an async landing",
+    ),
+    (
+        "landing",
+        "a landing's mbarrier without its index",
+        lambda k: first(k, "smem_write", "bar").pop("idx"),
+        "bar and idx name the mbarrier of an async landing",
     ),
     (
         "staging",

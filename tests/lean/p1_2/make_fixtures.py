@@ -16,7 +16,8 @@ with a TMA store (`staging`, single and double buffered, with and without the `.
 and the named barrier); a partition that rebuilds an in-kernel tensor descriptor in global
 scratch at the top of every work item while the previous item's stores through it may still
 read it (`tmap_rebuild`); a cross-role handoff through mbarriers or a named barrier
-(`handoff`); and the issuing thread's own program order (`same_thread`).
+(`handoff`); the issuing thread's own program order (`same_thread`); and a TMA load landing
+in a store source, completed through its mbarrier before the store or not (`landing`).
 """
 
 import json
@@ -114,7 +115,7 @@ def splat(x):
     return {"t": "splat", "shape": [1], "w": 32, "a": x}
 
 
-def write1(off, nbytes, loc, warp, lane=None, sync=False, async_=False):
+def write1(off, nbytes, loc, warp, lane=None, sync=False, async_=False, bar=None):
     e = ev(
         "smem_write",
         loc,
@@ -130,6 +131,8 @@ def write1(off, nbytes, loc, warp, lane=None, sync=False, async_=False):
         e["sync"] = True
     if async_:
         e["async"] = True
+    if bar is not None:  # a landing's mbarrier slot (index 0)
+        e["bar"], e["idx"] = bar, c(0)
     return e
 
 
@@ -150,7 +153,9 @@ def tmapw(addr, warp, loc):
     return ev("tmap_write", loc, base=SCR, addr=addr, warp=c(warp))
 
 
-def kernel(name, roles, inputs, params, barriers=(), grid=1, cta_threads=None):
+def kernel(
+    name, roles, inputs, params, barriers=(), grid=1, cta_threads=None, tensors=()
+):
     out = {
         "kir_version": 1,
         "kernel": name,
@@ -158,7 +163,7 @@ def kernel(name, roles, inputs, params, barriers=(), grid=1, cta_threads=None):
         "ir": "ptx",
         "grid": [c(grid), c(1), c(1)],
         "params": [{"name": p, "type": "i32"} for p in params],
-        "tensors": [],
+        "tensors": list(tensors),
         "barriers": [{"name": n, "count": c(k), "num": c(1)} for n, k in barriers],
         "roles": roles,
         "p1": ["P1-2"],
@@ -401,6 +406,54 @@ def same_thread():
     return kernel("same_thread", roles, inputs, ("MODE",))
 
 
+# ------------------------------------------------------------------ landings
+
+
+def landing():
+    """A 1-warp role, one mbarrier `full` (count 1): per tile i of T, the elected lane
+    expects 1024 bytes on `full`, a TMA load of 1024 bytes lands in the store source
+    [0, 1024) on `full` (the landing names that slot, its tma_load next), the role waits
+    for phase i + 1, the elected lane stores the source and waits `.read` for it. MODE:
+    0 as described (the wait's phase needs the bytes of every load issued before it, so the
+    landing is complete before the store: PASS); 1 the store before the wait (undecided);
+    2 a second load (into [4096, 5120)) on `full` without its own expect_tx, before the wait
+    (the phase can complete with either load's bytes: undecided); 3 the landing names no
+    slot (undecided)."""
+    f = "landing.py"
+    i = var("i")
+    w0 = c(0)
+
+    def load(loc, off, bar):
+        return [write1(c(off), 1024, loc, w0, async_=True, bar=bar),
+                ev("tma_load", loc, desc="src", coords=[c(0)], bar="full", idx=c(0))]  # fmt: skip
+
+    wait_ = wait("full", b("urem", i, c(2)), f"{f}:5")
+    store_ = [store(c(0), 1024, f"{f}:6", kind="bulk"), commit(f"{f}:6")]
+    body = [
+        for_("i", c(0), var("T"), [
+            ev("expect_tx", f"{f}:2", bar="full", idx=c(0), bytes=c(1024)),
+            arrive("full", f"{f}:2"),
+            if_(mode_is(3), load(f"{f}:3", 0, None), load(f"{f}:3", 0, "full"), f"{f}:3"),
+            when(mode_is(2), load(f"{f}:4", 4096, "full"), f"{f}:4"),
+            if_(mode_is(1), store_ + [wait_], [wait_] + store_, f"{f}:5"),
+            bwait(0, True, f"{f}:7"),
+        ], f"{f}:1"),
+    ]  # fmt: skip
+    src = {"name": "src", "kind": "desc", "elem_bytes": 4, "shape": [c(256)],
+           "strides": [c(1)], "box": [256], "segments": None, "role": "input",
+           "metadata": False}  # fmt: skip
+    roles = [role("w", 1, body)]
+    inputs = [
+        inp("resolved_1", MODE=0, T=1),
+        inp("resolved_2", MODE=0, T=2),
+        inp("store_before_wait_2", MODE=1, T=2),
+        inp("load_ahead_1", MODE=2, T=1),
+        inp("no_slot_1", MODE=3, T=1),
+    ]
+    return kernel("landing", roles, inputs, ("MODE", "T"), barriers=(("full", 1),),
+                  tensors=[src])  # fmt: skip
+
+
 # ------------------------------------------------------------ another CTA's write
 
 
@@ -428,7 +481,7 @@ def cluster_remote():
 
 
 def main():
-    for k in (staging(), staging_wide(), tmap_rebuild(), handoff(), same_thread(),
+    for k in (staging(), staging_wide(), tmap_rebuild(), handoff(), same_thread(), landing(),
               cluster_remote()):  # fmt: skip
         (HERE / f"{k['kernel']}.kir.json").write_text(json.dumps(k, indent=1) + "\n")
 

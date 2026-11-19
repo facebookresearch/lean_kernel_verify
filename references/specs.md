@@ -664,9 +664,20 @@ of the cluster), or writes the 128-byte tensormap S reads (F2:
 of an in-kernel descriptor; a host descriptor lives in param space, which the
 kernel cannot write). The pair is ordered if S completes before X (W happens
 before X in every thread executing X) or X happens before S is issued. An
-asynchronous write (a load's landing) counts only in the first direction: its
-data may land after a later store reads (that race is a data-ready hazard, not
-P1-2's).
+asynchronous write X (a load's landing) happens before S is issued only if the
+bytes of its mbarrier show it complete (`StoreReuse.landed`): X's load t (the
+role's next transaction event on the slot X names, `smem_write`'s `bar`/`idx`,
+only gload footprints between) may land before the return of a wait W on that
+slot that surely returned before S is issued (`returnCuts`: positions from
+which every event surely follows that return), and the loads that may land
+before that return bring no more bytes than the `expect_tx` bytes phases 1..k
+surely hold, k W's phase bound (`bytesIn`: each role's `expect_tx` before the
+last of its arrivals those phases surely hold, `k x count` minus what the other
+roles can contribute, a role contributing no arrival after its own wait for
+phase k or later). A phase completes only with as many bytes landed as expected
+(PTX ISA, mbarrier tx-count), so every byte of those loads landed before W
+returned, X's included, however the copy splits its complete-tx. Otherwise X
+may land after S reads (U3).
 
 **Happens-before** over the cluster's role traces, per role the trace prefix
 some thread surely passed (`done`) and the one every thread surely passed
@@ -705,7 +716,7 @@ another cluster.
 | --------- | --------- |
 | FAIL F1   | a shared-memory write overlapping a store's source, unordered even in the lock reading, that no same-thread order the KIR cannot pin down might order |
 | FAIL F2   | the same for a write of the tensormap a store reads; also a tensormap that a store of one cluster reads and another cluster writes (no happens-before across clusters) |
-| undecided | U1 a pair ordered only in the lock reading; U2 a pair the issuing thread's own program order might order, which the KIR cannot pin down (a fixed lane of the issuer's warp and the elected issuer, or a warp-synchronizing write of its warp after the completing wait); F pairs while a named barrier id is used with two counts or in a cluster whose ledger does not converge; a stopped role trace. First line `not decided on this input` |
+| undecided | U1 a pair ordered only in the lock reading; U2 a pair the issuing thread's own program order might order, which the KIR cannot pin down (a fixed lane of the issuer's warp and the elected issuer, or a warp-synchronizing write of its warp after the completing wait); U3 a load's landing issued before the store that its mbarrier's bytes do not show complete before the store is issued; F pairs while a named barrier id is used with two counts or in a cluster whose ledger does not converge; a stopped role trace. First line `not decided on this input` |
 | NOTE N1   | a bulk store no wait of its issuing thread completes before its role ends |
 | NOTE N2   | the P1 ledger finds a blocked wait: happens-before after it is vacuous |
 
@@ -727,8 +738,9 @@ instruction that writes shared memory is an event, refused, or provably disjoint
 from every store source); the named-barrier participants being the KIR roles'
 threads, idle warps only in a CTA-wide barrier. Not checked: the source of a
 `cp.async.bulk.shared::cluster.shared` copy into another CTA (completed through the
-destination's mbarrier, not a bulk group), TMA loads through in-kernel
-descriptors (refused by P0), multicast loads into a store source (refused), the
+destination's mbarrier, not a bulk group), the tensormap a TMA load through an
+in-kernel descriptor reads (a load completes through its mbarrier, not a bulk
+group), multicast loads into a store source (refused), the
 data-ready (RAW) side of an asynchronous write. Write "P1-2 holds for case C, inputs I, at REV".
 
 **Evidence.** The fixtures in `tests/lean/p1_2` model the patterns P1-2 was

@@ -161,9 +161,12 @@ inductive Event where
   elected lane), or with `sync` by every lane of warp `warp` in one warp-synchronizing
   instruction (`.sync.aligned`): `bytes` bytes at each masked-in byte offset of `offsets` in
   symbol `sym`, in the shared memory of CTA `cta` of the cluster (`none`: the issuing CTA);
-  `async`: the landing of an asynchronous copy issued here (it may land later). -/
+  `async`: the landing of an asynchronous copy issued here (it may land later); `slot`: the
+  mbarrier (array, index) of the issuing CTA that the copy completes its bytes on, its load
+  the role's next transaction event on that slot (only global accesses between). -/
   | smem_write (sym : String) (offsets : TExpr) (mask : Option TExpr) (bytes : Nat) (warp : Expr)
-      (lane : Option Expr) (sync : Bool) (async : Bool) (cta : Option Expr) (loc : Loc)
+      (lane : Option Expr) (sync : Bool) (async : Bool) (cta : Option Expr)
+      (slot : Option (String × Expr)) (loc : Loc)
   /-- A write of the 128-byte tensormap at byte offset `addr` of global buffer `base` by
   every lane of warp `warp` in one warp-synchronizing instruction (`tensormap.cp_fenceproxy`,
   P1-2). -/

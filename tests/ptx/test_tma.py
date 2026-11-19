@@ -982,6 +982,74 @@ class InKernel(unittest.TestCase):
         self.assertEqual(kir_errors(f, KT), [])
         self.assertEqual(writes(STAGE + fill(0, 0, 20, 0) + use(20, 21), KP), ["dv"])
 
+    def test_load_through_it(self):
+        # the elected lane loads the box at (col 0, row 32) into smem+8192 on the mbarrier
+        # at smem+0: the clipped footprint gload on the base, and the box's bytes
+        load = (
+            "    @%p1 mbarrier.init.shared::cta.b64 [%r2], 1;\n"
+            "    cvta.global.u64 %rd21, %rd20;\n    mov.b32 %r50, 0;\n    mov.b32 %r51, 32;\n"
+            "    add.s32 %r52, %r2, 8192;\n"
+            "    @%p2 cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes"
+            " [%r52], [%rd21, {%r50, %r51}], [%r2];\n"
+        )
+        f = run(STAGE + fill(0, 0, 20, 0) + load, KP, tensors=KT)
+        self.assertEqual(f.refusals, [])
+        self.assertEqual(f.written, [])
+        got = footprints(f, {"rows": 70})
+        self.assertEqual(
+            got[0],
+            (
+                "gload",
+                "dv",
+                sorted(r * 128 + c for r in range(32, 70) for c in range(32)),
+            ),
+        )
+        self.assertEqual([g[:2] for g in got[1:]], [("tma_load", "box_2B_64x32")])
+        (tl,) = events(f, "tma_load")
+        self.assertEqual([c["v"] for c in tl["coords"]], [0, 0])
+        box = f.descs[tl["desc"]]
+        self.assertEqual(
+            (tl["desc"], box["kind"], box["box"], box["elem_bytes"]),
+            ("box_2B_64x32", "box", [64, 32], 2),
+        )
+        self.assertEqual([x["v"] for x in box["shape"]], [64, 32])  # always inside
+        self.assertEqual(kir_errors(f, KT), [])
+
+    def test_kept_in_loops(self):
+        loop = (
+            "    mov.b32 %r60, 0;\nLOOP:\n"
+            + use(20, 21)
+            + "    add.s32 %r60, %r60, 1;\n    setp.lt.s32 %p6, %r60, 3;\n    @%p6 bra LOOP;\n"
+        )
+        f = run(STAGE + fill(0, 0, 20, 0) + loop, KP, tensors=KT)
+        self.assertEqual(f.refusals, [])  # written before the loop, which writes none
+        self.assertEqual(kir_errors(f, KT), [])
+        # a cp_fenceproxy in the loop (another descriptor): an iteration may rewrite it
+        rewrite = loop.replace("LOOP:\n", "LOOP:\n" + fill(1, 1, 22, 128))
+        f = run(STAGE + fill(0, 0, 20, 0) + rewrite, KP, tensors=KT)
+        self.assertIn("unknown provenance", f.refusals[0]["msg"])
+
+    def test_instruction_no_thread_executes(self):
+        # a store through an address of unknown provenance that no thread of the role
+        # executes (lane 99 of a one-warp role) has no effect: no refusal, no event
+        never = "    setp.eq.u32 %p2, %r1, 99;\n" + use(24, 21).replace(
+            "cvta.global.u64 %rd21, %rd24",
+            "add.s64 %rd24, %rd12, 128;\n    cvta.global.u64 %rd21, %rd24",
+        )
+        f = run(STAGE + fill(0, 0, 20, 0) + never, KP, tensors=KT)
+        self.assertEqual((f.refusals, events(f, "gstore")), ([], []))
+
+    def test_instruction_the_elected_lane_may_execute(self):
+        # under `elect && tid == 5` thread 5 loads iff elect.sync elects it (unspecified):
+        # refused (H1), not dropped as an instruction no thread executes (tid == 99)
+        for tid, refused in ((5, True), (99, False)):
+            body = PRE.format(n=5) + TMAP32
+            body += f"    setp.eq.u32 %p3, %r1, {tid};\n    and.pred %p4, %p2, %p3;\n"
+            body += LOAD.format(nbytes=4096).replace("@%p2 cp.async", "@%p4 cp.async")
+            f = run(body, TTGIR_PARAMS)
+            self.assertEqual("elect.sync" in str(f.refusals), refused, tid)
+            self.assertEqual(events(f, "tma_load"), [], tid)
+
     def test_buffer_reused_for_two_descriptors(self):
         body = (
             STAGE + fill(0, 0, 20, 0) + fill(1, 1, 22, 128) + use(22, 23) + use(20, 21)
@@ -1004,13 +1072,6 @@ class InKernel(unittest.TestCase):
         )
         f = run(STAGE + branchy + use(20, 21), KP, tensors=KT)
         self.assertIn("another branch or loop", f.refusals[0]["msg"])
-        load = "    @%p2 cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes [%r52], [%rd21, {%r50, %r51}], [%r2];\n"
-        f = run(
-            STAGE + fill(0, 0, 20, 0) + use(20, 21).split("    @%p2")[0] + load,
-            KP,
-            tensors=KT,
-        )
-        self.assertIn("in-kernel descriptor (gap", f.refusals[0]["msg"])
         bad = KP[:3] + [("ptr", "__global_scratch", 0x80000)]  # not marked scratch
         self.assertIsNone(writes(STAGE + fill(0, 0, 20, 0) + use(20, 21), bad))
         # a replace under a branch on data is no branch whose arms emit nothing

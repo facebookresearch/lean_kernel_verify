@@ -354,6 +354,17 @@ _ROWS = [
     ),
     (
         "event",
+        "asynchronous store or reduction into another CTA's shared memory (ISA: "
+        "st.async, red.async): a complete_tx of its bytes on the destination CTA's "
+        "mbarrier per executing thread (cluster.py); the data is Data",
+        ["st.async.shared::cluster.mbarrier::complete_tx::bytes"]
+        + [
+            f"red.async.shared::cluster.mbarrier::complete_tx::bytes.{op}"
+            for op in _RED_OPS
+        ],
+    ),
+    (
+        "event",
         "bulk copy (ISA: cp.async.bulk, cp.reduce.async.bulk): g2s/reduce per issuing "
         "thread, s2g deduplicated per warp (tma.py, measured per ptxas version); "
         ".add.noftz (f16/bf16) only keeps subnormals: still an add",

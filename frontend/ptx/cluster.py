@@ -21,6 +21,7 @@ references/kir.md change 11).
                                       cta_mask (multicast) and leader (cta_group::2)
     own_cta(tr, i, k, what)           tma.py: memory operand k is the issuing CTA's
     bulk_s2cluster(tr, i)             tma.py: cp.async.bulk.shared::cluster.shared::cta
+    async_store(tr, i, mnemonic)      mem.py: st.async / red.async into another CTA
     pair_mask(tr) -> expression       the CTAs 3 << (rank & ~1) of the issuing CTA's pair
                                       (a cta_group::2 tmem access in P1)
     barriers(translators) -> [barrier]
@@ -77,6 +78,9 @@ Events (the legacy frontend's, references/frontend_cute.md "Clusters"):
     hardware box: the legacy frontend's slice of a multicast descriptor's tile).
   * cp.async.bulk.shared::cluster.shared::cta [dst], [src], n, [mbar] with dst and mbar
     Remotes of one CTA: a `complete_tx` of n bytes on that CTA's slot, per issuing thread.
+  * st.async / red.async .shared::cluster.mbarrier::complete_tx::bytes [dst], v, [mbar]
+    with dst and mbar Remotes of one CTA: a `complete_tx` of the access's bytes on that
+    CTA's slot per executing thread (a per-thread instruction: no issuing question).
   * cta_group::2 tcgen05 instructions emit nothing in P0 (sync.py); they need a cluster
     of an even number of CTAs.
 A load (TMA or bulk) must write the issuing CTA's shared memory unless it multicasts:
@@ -361,6 +365,30 @@ def bulk_s2cluster(tr: Translator, i) -> None:
     _one_lane(tr, i, "shared::cluster bulk copy")
     sym, off = _symbol_offset(tr, i, bar.addr)
     tr.barrier_event("complete_tx", sym, off, "thread", bytes=n, cta=bar.cta)
+
+
+def async_store(tr: Translator, i, mn: str) -> None:
+    """st.async{.sem.scope}.shared::cluster.mbarrier::complete_tx::bytes{.vec}.type
+    [dst], v, [mbar] and red.async{.sem.scope}.shared::cluster.mbarrier::complete_tx::bytes
+    .op.type [dst], v, [mbar] (ISA st.async, red.async): each executing thread writes
+    (or reduces into) another CTA's shared memory and completes its bytes on mbar, which
+    must be in dst's CTA: a complete_tx of the access's bytes (vector width x element
+    size) per executing thread on that CTA's slot. The data is Data (shared memory)."""
+    from .mem import _elem_bits, _vec  # mem.py imports this module (through sync.py)
+
+    what = mn.split(".")[0]
+    _several(tr, i, what)
+    dst, bar = _address(tr, i.operands[0]), _address(tr, i.operands[2])
+    if not (isinstance(dst, Remote) and isinstance(bar, Remote)):
+        tr.fail(i, f"{what} whose destination and mbarrier are not mapa results")
+    same = tr.uniform(E.cmp("eq", dst.cta, bar.cta))
+    if same is None or not E.is_const(same, 1):
+        tr.fail(i, f"{what} into one CTA completing on another's mbarrier")
+    n = _vec(i.opcode) * _elem_bits(i.opcode) // 8
+    sym, off = _symbol_offset(tr, i, bar.addr)
+    tr.barrier_event(
+        "complete_tx", sym, off, "thread", bytes=E.const(n, 32), cta=bar.cta
+    )
 
 
 # ----------------------------------------------------------- after the roles

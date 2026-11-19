@@ -62,10 +62,23 @@ ordered were it t's own (a `bar.warp.sync`, which the KIR drops, orders the memo
 the lanes taking part), nor when X is a warp-synchronizing write of t's warp after W (U2); F2
 also a tensormap that a store of one cluster reads and another cluster writes (no
 happens-before across clusters). Undecided: U1 a pair ordered only in the lock reading; U2;
-U3 an asynchronous write (a load's landing) issued before the store in the sound reading (its
-landing may follow the store's read, which P1-2 does not order); an F pair in a cluster with
-a named barrier used with two counts or whose ledger does not converge; a stopped role
-trace. Notes: N1 a bulk store no wait of its issuer completes before
+U3 an asynchronous write (a load's landing) issued before the store in the sound reading whose
+landing is not known to precede the store's issue (below); an F pair in a cluster with a named
+barrier used with two counts or whose ledger does not converge; a stopped role trace.
+
+Landings (`landed`). A load's landing X issued before S is ordered before S if the bytes of
+its mbarrier slot show it complete before S is issued: X's load t (the role's next
+transaction event on X's slot, only global accesses between) is among the loads that may
+land before the return of a wait W on that slot that surely returned before S is issued
+(`returnCuts`: positions from which every event surely follows W's return), and those loads
+bring no more bytes than the expect_tx bytes phases 1..k surely hold, k W's phase bound
+(`bytesIn`: each role's expect_tx before the last of its arrivals those phases surely hold,
+`k x count` minus what the other roles can contribute, a role contributing no arrival after
+its own wait for phase k or later). Phases 1..k completed when W returned, each with as
+many bytes landed as expected, so at least that many bytes landed before W returned, all
+of them from those loads: every byte of them landed, X's included (however a copy splits
+its complete_tx). Otherwise the landing may follow the store's read (a load running ahead
+of its phase, bytes the ledger cannot place). Notes: N1 a bulk store no wait of its issuer completes before
 its role ends; N2 waits the P1 ledger finds blocked (happens-before after them is vacuous).
 -/
 import KV.Spec.TmemReuse
@@ -98,6 +111,8 @@ structure Write where
   sync : Bool
   /-- The landing of an asynchronous copy issued at `pos`: it may land later. -/
   async : Bool := false
+  /-- The mbarrier slot the landing's copy completes its bytes on, if known. -/
+  slot : Option Slot := none
   /-- A tensormap write (F2: `sym` is the global buffer), else a shared-memory one (F1). -/
   tmap : Bool
   /-- Rank of the CTA whose shared memory it writes (for a tensormap: the issuing CTA). -/
@@ -132,6 +147,8 @@ structure Ctx where
   exact : Array Bool
   /-- Per role, its waits at their sound phase lower bounds, merged with its bar.syncs. -/
   waits : Array (Array PWait)
+  /-- Per role, its mbarrier waits by ledger slot at their sound phase lower bounds. -/
+  ws : WaitsBySlot
   sizes : Array Nat
   stores : Array Store
   writes : Array Write
@@ -265,8 +282,8 @@ def accessesOf (croles : Array RoleTrace) (nr : Nat) : Array Store × Array Writ
         for (i, c) in pending do
           if (commits : Int) - c ≥ n + 1 then stores := stores.modify i ({ · with done := pos })
         pending := keep
-      | .smemWrite who sync async cta sym ranges =>
-        writes := writes.push { role := r, pos, who, sync, async, tmap := false, cta, sym, ranges,
+      | .smemWrite who sync async cta sym ranges slot =>
+        writes := writes.push { role := r, pos, who, sync, async, slot, tmap := false, cta, sym, ranges,
                                 loc := e.loc }
       | .tmapWrite warp base lo =>
         writes := writes.push { role := r, pos, who := { warp, lane := none }, sync := true, tmap := true,
@@ -300,7 +317,8 @@ def build (cl : ClusterTrace) (L : Array SlotLedger) (nkr : Nat) (ctaThreads : O
   let blocked := L.foldl (init := #[]) fun acc l => l.roles.foldl (init := acc) fun acc rs =>
     rs.waits.foldl (init := acc) fun acc w => if w.blocked.isSome then acc.push (rs.role, w.loc) else acc
   let waits := merged (·.minPhase)
-  { pid := cl.cid, roles := croles, ledger := L, named, exact, waits, sizes, stores, writes, blocked,
+  let ws := WaitsBySlot.of (waitBounds L n (·.minPhase))
+  { pid := cl.cid, roles := croles, ledger := L, named, exact, waits, ws, sizes, stores, writes, blocked,
     sound := closures named exact L waits false wanted,
     lock := Thunk.mk fun _ => closures named exact L (merged (·.lockPhase)) true wanted }
 
@@ -339,6 +357,54 @@ def issuedBefore (C : Ctx) (H : Array (Array Hb)) (s : Store) (x : Write) : Bool
   let sm := same s x
   (before C H s.role s.pos).all[x.role]! > x.pos || ((sm == .sure || sm == .lanes) && x.pos < s.pos)
 
+/-- Arrivals of `rs` that can count toward phases 1..k of its slot: those before its first
+wait on the slot whose sound phase bound is at least k (it returns only after phase k
+completed, and so do the role's events after it), else all. -/
+def contrib (rs : RoleSlot) (k : Int) : Int :=
+  match rs.waits.find? (·.minPhase ≥ k) with
+  | some w => rs.arrivedBefore w.pos
+  | none => rs.total
+
+/-- Expect_tx bytes that phases 1..k of the slot surely hold: each role's expect_tx issued
+before the last of its arrivals those phases surely hold, which are `k x count` minus what
+the other roles can contribute to them (`contrib`), or `SlotLedger.needs` if larger (an
+expect_tx applies to the phase current at its issue, at most its role's next arrival's). -/
+def bytesIn (L : SlotLedger) (k : Int) : Int :=
+  L.roles.zipIdx.foldl (init := 0) fun acc (rs, i) =>
+    let others := L.roles.zipIdx.foldl (init := 0) fun n (o, j) => if j == i then n else n + contrib o k
+    let need := max (k * L.count - others) (L.needs i k false)
+    rs.tx.foldl (init := acc) fun acc x => if !x.load && x.arrivedBefore < need then acc + x.bytes else acc
+
+/-- The landing `x` completed before `s` is issued under the closures `H` (module doc,
+"Landings"): its load, the first transaction event of `x`'s role on `x`'s slot after it with
+only global accesses between, may land before the return of a wait on that slot that surely
+returned before `s` is issued (the last such wait of each role is tried), and the loads that
+may land before that return bring no more bytes than its phase bound surely needs. -/
+def landed (C : Ctx) (H : Array (Array Hb)) (s : Store) (x : Write) : Bool := Id.run do
+  let some sl := x.slot | return false
+  let some si := C.ledger.findIdx? fun l => l.slot.bar == sl.bar && l.slot.idx == sl.idx && l.slot.cta == sl.cta
+    | return false
+  let L := C.ledger[si]!
+  let some rs := L.roles.find? (·.role == x.role) | return false
+  let some t := rs.tx.find? fun t => t.load && t.pos > x.pos | return false
+  let evs := (C.roles[x.role]?.map (·.events)).getD #[]
+  let between := (List.range (t.pos - x.pos - 1)).all fun d =>
+    match evs[x.pos + 1 + d]? with
+    | some e => match e.ev with
+      | Ev.gload _ _ => true
+      | _ => false
+    | none => false
+  if !between then return false
+  let hb := before C H s.role s.pos
+  for r in [0:C.ws.size] do
+    for (s', xs) in C.ws[r]! do
+      if s' != si then continue
+      let some (p, k) := (xs.filter fun (p, _) => p < hb.done[r]!).back? | continue
+      let cuts := returnCuts C.ledger C.ws C.sizes r p
+      if 0 < k && t.pos < cuts[x.role]! && L.landedBefore cuts ≤ bytesIn L k then
+        return true
+  return false
+
 /-- `s` and `x` are ordered under the closures `H` (module doc), counting the issuer's own
 program order as `Same` allows. -/
 def ordered (C : Ctx) (H : Array (Array Hb)) (s : Store) (x : Write) : Bool :=
@@ -346,8 +412,8 @@ def ordered (C : Ctx) (H : Array (Array Hb)) (s : Store) (x : Write) : Bool :=
   -- s completes before x: its completing wait happened in every thread executing x
   let sx := s.done < C.sizes[s.role]! &&
     ((before C H x.role x.pos).all[s.role]! > s.done || (sm == .sure && s.done < x.pos))
-  -- x happens before s is issued (an asynchronous write's landing: never known to)
-  sx || (!x.async && issuedBefore C H s x)
+  -- x happens before s is issued (an asynchronous write: its landing, `landed`)
+  sx || (!x.async && issuedBefore C H s x) || (x.async && landed C H s x)
 
 /-- The issuer's own program order might order the pair, which the KIR cannot pin down (U2):
 the write may be the issuer's (`maybe`), or it is another lane's of the issuer's warp, which a
@@ -368,7 +434,7 @@ inductive PairKind where
   (for another lane's write: with a `bar.warp.sync` of the warp). -/
   | maybeSame
   /-- U3: an asynchronous write issued before the store (sound reading) that may land after
-  the store reads: P1-2 does not order a landing. -/
+  the store reads: its landing is not known to precede the store's issue (`landed`). -/
   | landing
   deriving BEq, Inhabited
 
@@ -456,8 +522,10 @@ def pairIssue (h : Host) (C : Ctx) (i j : Nat) (k : PairKind) (extra : Nat) : Is
     | .maybeSame => if same s x == .otherLane then
         s!"{x.describe h C} and the {s.describe h C}: ordered only if a bar.warp.sync of their warp orders the write with the store's issuing thread (another lane of its warp), which the KIR does not keep (bar.warp.sync orders the memory accesses of the lanes taking part)"
       else s!"{x.describe h C} and the {s.describe h C}: ordered only if the store's issuing thread itself executes the write in program order, which the KIR does not pin down (an elected lane and a fixed lane of one warp, or a warp-collective write after the completing wait)"
-    | .landing => s!"{x.describe h C} and the {s.describe h C}: the asynchronous copy is issued before the store, but may land after the store reads; P1-2 does not order a landing (whether the store waits for it is a data-ready question)"
-  { loc := x.loc, context := s!"{ctxName h C} roles {h.gRoleName C.pid s.role} / {h.gRoleName C.pid x.role}", msg := msg ++ more }
+    | .landing => s!"{x.describe h C} and the {s.describe h C}: the asynchronous copy is issued before the store, but may land after the store reads (its mbarrier's bytes do not show it complete before the store is issued)"
+  -- an undecided pair is no counterexample, also beside certain ones (a FAIL's lines)
+  let tag := if k == .fail then "" else "not decided on this input: "
+  { loc := x.loc, context := s!"{ctxName h C} roles {h.gRoleName C.pid s.role} / {h.gRoleName C.pid x.role}", msg := tag ++ msg ++ more }
 
 /-- Pairs of kind `k`, one line per distinct (write line, store line) with a count. -/
 def pairIssues (h : Host) (C : Ctx) (ps : Array (Nat × Nat × PairKind)) (k : PairKind) : Array Issue := Id.run do

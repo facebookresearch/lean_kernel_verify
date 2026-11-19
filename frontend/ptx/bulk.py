@@ -73,7 +73,8 @@ from . import cluster, expr as E, interp
 
 _COMMIT = "cp.async.bulk.commit_group"
 _WAIT = "cp.async.bulk.wait_group"
-_REMOTE = ("st.async", "red.async", "cp.async.bulk.shared::cluster.shared",
+_REMOTE = ("st.async.shared::cluster", "red.async.shared::cluster",
+           "cp.async.bulk.shared::cluster.shared",
            "cp.reduce.async.bulk.shared::cluster.shared")  # fmt: skip
 _BITS = {"b": None, "u": None, "s": None, "f": None}
 
@@ -92,6 +93,8 @@ class State:
         self._roles: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
         # shared bytes written outside the events: (symbol, (lo, hi) or None, what, loc)
         self.fixed: list = []
+        # id(instruction) -> the holder of its load's mbarrier use, for its latest landing
+        self.holders: dict = {}
 
     def role(self, tr) -> _Role:
         r = self._roles.get(tr)
@@ -289,9 +292,10 @@ def _splat(x: dict) -> dict:
 
 
 def _write(st: State, tr, i, op, nbytes: int, what: str, sync=False, async_=False, maybe=False,
-           addr=None, cta=None) -> None:  # fmt: skip
+           addr=None, cta=None, slot=None) -> None:  # fmt: skip
     """A smem_write per executing thread (module doc); `addr`: the address, else op's;
-    `cta`: the rank of the CTA whose shared memory it writes (another CTA's)."""
+    `cta`: the rank of the CTA whose shared memory it writes (another CTA's); `slot`: a
+    landing's holder of its load's mbarrier use (`landing`)."""
     a = addr if addr is not None else cluster._address(tr, op)
     if isinstance(a, cluster.Remote):
         return _remote_write(st, tr, i, a, nbytes, what)
@@ -322,6 +326,8 @@ def _write(st: State, tr, i, op, nbytes: int, what: str, sync=False, async_=Fals
             e["sync"] = True
         if async_:
             e["async"] = True
+        if slot is not None and cta is None:
+            e["_slot"] = slot
         return e
 
     tr.thread_event(ops, build, tag="p1_2")
@@ -381,8 +387,30 @@ def _stmatrix(st: State, tr, i, mn: str, maybe: bool) -> None:
 
 def landing(st: State, tr, i, dst_op, nbytes: int) -> None:
     """An asynchronous copy into the issuing CTA's shared memory (a TMA or bulk load, a
-    cp.async): a smem_write with `async` per issuing thread."""
-    _write(st, tr, i, dst_op, nbytes, i.opcode.split(".")[0] + " landing", async_=True)
+    cp.async): a smem_write with `async` per issuing thread; a load that then emits its
+    tma_load (tma.py: `landed_on`) gives it that event's mbarrier slot (`finish`)."""
+    st.holders[id(i)] = holder = {}
+    _write(st, tr, i, dst_op, nbytes, i.opcode.split(".")[0] + " landing", async_=True,
+           slot=holder)  # fmt: skip
+
+
+def landed_on(st: State, i, use) -> None:
+    """The tma_load the translation emitted for the copy at i, after its landing: its
+    mbarrier use (interp.BarrierUse), whose slot `finish` gives the landing's events."""
+    holder = st.holders.get(id(i))
+    if holder is not None:
+        holder["use"] = use
+
+
+def _slot_of(e: dict, holder) -> None:
+    """The landing `e`'s `bar` and `idx`: those of its load's tma_load, if that is one event
+    on an mbarrier of the issuing CTA (not wrapped by a select between arrays, no
+    `cta_mask`, `leader` or `cta`)."""
+    use = None if holder is None else holder.get("use")
+    ev = None if use is None else use.event
+    if (ev is not None and ev.get("op") == "event" and ev.get("ev") == "tma_load"
+            and ev.get("bar") is not None and not {"cta", "cta_mask", "leader"} & ev.keys()):  # fmt: skip
+        e["bar"], e["idx"] = ev["bar"], ev["idx"]
 
 
 def tmap(st: State, tr, i, dst) -> None:
@@ -564,6 +592,8 @@ def finish(st: State, translators: list) -> bool:
                                      "store's shared-memory source (not modeled)")  # fmt: skip
 
     def keep(s) -> bool:
+        if "_slot" in s:
+            _slot_of(s, s.pop("_slot"))
         info = s.pop("_p1_2", None)
         if info is None or s["ev"] != "smem_write":
             return True
@@ -576,4 +606,87 @@ def finish(st: State, translators: list) -> bool:
 
     for tr in translators:
         tr.stmts[:] = _prune(tr.stmts, keep)
+        _unbound_slots(tr.stmts, set(tr.k.mem.used_params))
+        while _drop_dead_lets(tr.stmts):  # and then the loops and ifs left empty
+            tr.stmts[:] = _prune(tr.stmts, lambda s: True)
     return bool(stores)
+
+
+def _unbound_slots(stmts: list, bound: set) -> None:
+    """Drop the mbarrier slot (`bar`, `idx`, `leader`) of a landing whose `idx` reads a
+    variable not bound before it (in place; kir.py's scopes: `bound` holds the params and
+    the variables of the enclosing `for`s, a `let` binds to the end of its statement list):
+    its load computes the index after the landing (`_slot_of`). The landing then names no
+    slot, as one whose load names none."""
+    bound = set(bound)
+    for s in stmts:
+        if s["op"] == "let":
+            bound.add(s["var"])
+        elif s["op"] == "event":
+            if s["ev"] == "smem_write" and "idx" in s and not _vars(s["idx"]) <= bound:
+                for k in ("bar", "idx", "leader"):
+                    s.pop(k, None)
+        elif s["op"] == "for":
+            _unbound_slots(s["body"], bound | {s["var"]})
+        else:
+            for k in ("then", "else", "body"):
+                if k in s:
+                    _unbound_slots(s[k], bound)
+
+
+def _drop_dead_lets(stmts: list) -> bool:
+    """Drop the `let`s of variables nothing reads, transitively (in place); whether it
+    dropped one (a loop or if may be left empty: `_prune` drops it). The P1 specs
+    read only events, so a dead `let` matters only where it can fail on its own: a load
+    (P0-1's concern). A part of a role this pass splits off binds the per-lane values of
+    lane-only loads (interp.scalarize), which data uses only, and those loads would make
+    their tensors metadata, whose contents the dump records only where P0 needs them."""
+    reads: dict = {}  # let variable -> the variables its expressions read
+    roots: set = set()
+
+    def walk(ss: list) -> None:
+        for s in ss:
+            if s["op"] == "let":
+                reads.setdefault(s["var"], set()).update(_vars(s["expr"]))
+                continue
+            for k, v in s.items():
+                if k in ("then", "else", "body"):
+                    walk(v)
+                else:
+                    roots.update(_vars(v))
+
+    walk(stmts)
+    live, todo = set(), list(roots)
+    while todo:
+        v = todo.pop()
+        if v not in live:
+            live.add(v)
+            todo.extend(reads.get(v, ()))
+
+    def cut(ss: list) -> list:
+        out = []
+        for s in ss:
+            if s["op"] == "let" and s["var"] not in live:
+                continue
+            for k in ("then", "else", "body"):
+                if k in s:
+                    s[k] = cut(s[k])
+            out.append(s)
+        return out
+
+    stmts[:] = cut(stmts)
+    return bool(reads.keys() - live)
+
+
+def _vars(x) -> set:
+    """The variable names a KIR JSON value reads."""
+    out, stack = set(), [x]
+    while stack:
+        y = stack.pop()
+        if isinstance(y, dict):
+            if y.get("e") == "var":
+                out.add(y["name"])
+            stack.extend(y.values())
+        elif isinstance(y, list):
+            stack.extend(y)
+    return out

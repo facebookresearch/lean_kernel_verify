@@ -149,7 +149,13 @@ class Kernel:
 # offset and the KIR JSON of the rest divided by 8 (None for a constant offset; bound in
 # the role's scope at the event), the interval of the offset (CuTe array splitting), the
 # issuing thread count of an arrive (None when counted inside a thread loop), and for a
-# bar_init its offset, its source line (path, line) and the key its array is split by.
+# bar_init its offset, its source line (path, line) and the key its array is split by;
+# `alt`: (constant, rest JSON) of the same offset counting the entry constants of the
+# induction variables in it (Translator.slot_iv), and `arms`: (condition JSON, (constant,
+# rest JSON) per arm) of an offset whose top-level sum holds a select on a thread-uniform
+# condition, both for an offset whose own constant is no initialized mbarrier
+# (mem._resolve; `else_event`, `cond`: the event of the select's second arm and the
+# condition it is wrapped in, mem.Memory.barriers).
 @dataclass
 class BarrierUse:
     event: dict
@@ -162,6 +168,10 @@ class BarrierUse:
     init: int | None = None
     srcloc: tuple | None = None
     key: tuple = ()
+    alt: tuple | None = None
+    arms: tuple | None = None
+    else_event: dict | None = None
+    cond: dict | None = None
 
 
 def _launch_only(e, params, created) -> bool:
@@ -197,6 +207,9 @@ class Translator:
         self.work_events = 0
         self.novalue: dict = {}  # `per` field defined without a value -> its first anchor
         self.slot_facts: dict = {}  # slot variable -> known trailing zeros
+        # uniform integer slot variable -> the constant part of its entry value, where every
+        # edge of its loop adds a constant to it (an induction variable: _loop_once)
+        self.slot_iv: dict = {}
         self.cur = None  # the instruction being translated
         self._inst: dict = {}
         self._memos: dict = {}  # substitution memos shared between expressions (memo)
@@ -614,13 +627,16 @@ class Translator:
         del self.created[nc:]
 
     # ------------------------------------------------------------ regions
-    def run(self, seq: list, inherit: bool = True, stop=None) -> None:
+    def run(self, seq: list, inherit: bool = True, stop=None, fields=None) -> None:
         """Translate a region sequence of regions.py. Its work fields start as those the
         enclosing region defined so far (a branch arm: LLVM sinks a field's computation
         into the branch that uses it, e.g. TLX's off_h below `if start_m >= seqlen`), or
-        none (inherit False: a loop body, as TTGIR's blocks). `stop()` (_inert's trials)
-        ends it early, checked after each node."""
-        self.work_scopes.append(dict(self.work_scopes[-1]) if inherit else {})
+        `fields` (inherit False: a loop body, as TTGIR's blocks, keeps only the fields
+        _loop_work names). `stop()` (_inert's trials) ends it early, checked after each
+        node."""
+        self.work_scopes.append(
+            dict(self.work_scopes[-1]) if inherit else dict(fields or {})
+        )
         for node in seq:
             if stop is not None and stop():
                 break
@@ -906,11 +922,12 @@ class Translator:
         kinds = [None] * len(carried)
         caps = [None] * len(carried)  # trailing zeros assumed for offset slots
         seeds = [None] * len(carried)  # entry values of registers read after it only
+        ivs = [True] * len(carried)  # induction variable candidates (slot_iv)
         while True:
             snap = self.snapshot()
             try:
                 body, slots, go, exits = self._loop_once(
-                    node, carried, kinds, caps, seeds, counted
+                    node, carried, kinds, caps, seeds, counted, ivs
                 )
                 break
             except _Widen:
@@ -994,14 +1011,14 @@ class Translator:
             return None
         return iv, lb, ub, step, latch, self.fresh("i")
 
-    def _loop_once(self, node, carried, kinds, caps, seeds, counted=None):
+    def _loop_once(self, node, carried, kinds, caps, seeds, counted=None, ivs=None):
         slots, env = [], dict(self.env)
         before = set(self.created)  # the names the loop cannot change (_let)
         if counted is not None:
             env[counted[0]] = E.var(counted[5], 32)
             before.discard(counted[5])
         live = self.tree.live_in.get(node.header, frozenset())
-        for r, kind, cap, seed in zip(carried, kinds, caps, seeds):
+        for k, (r, kind, cap, seed) in enumerate(zip(carried, kinds, caps, seeds)):
             v = self.env.get(r)
             if v is None and r not in live:
                 # Written before it is read in every iteration, read after the loop: its
@@ -1024,6 +1041,20 @@ class Translator:
             tz = E.tz(off, self.slot_facts)
             for n in _slot_vars(s):
                 self.slot_facts[n] = tz if cap is None else min(tz, cap)
+            # A plain uniform integer whose every edge adds a constant (end_iteration checks
+            # it, else the loop is translated again without): the constant part of its entry
+            # value stays known (LLVM strength-reduces `base + 8 * i` into such a register:
+            # an mbarrier array's start, mem._resolve)
+            c0 = self.k.mem.entry_const(off, E.width(off))
+            if (
+                ivs is not None
+                and ivs[k]
+                and s[0] == "u"
+                and s[3] is None
+                and s[4] is None
+                and c0
+            ):
+                self.slot_iv[s[1]] = c0
             slots.append(s)
             env[r] = self.read(s)
         go = None
@@ -1047,16 +1078,30 @@ class Translator:
                 live,
                 seeds,
                 exits,
+                ivs,
             ]  # fmt: skip
         )
         try:
-            self.run(node.body, inherit=False)
+            self.run(node.body, inherit=False, fields=self._loop_work(node))
         finally:
             self.loops.pop()
             self.hoist.pop()
             self.pop_scope(mark)
         body, self.stmts = self.stmts, saved
         return body, slots, go, exits
+
+    def _loop_work(self, node) -> dict:
+        """The work fields a loop body starts with: those the enclosing region defined
+        whose anchors all lie outside the loop, so every iteration sees their value (LLVM
+        hoists a loop-invariant field's computation, e.g. a TLX megakernel's
+        `off_h = cluster_cta_rank % H`, out of the work loop TTGIR defines it in)."""
+        scope = self.work_scopes[-1]
+        if not scope:
+            return {}
+        blocks = self.k.mem.cfg.blocks
+        inside = {s["field"] for b in node.blocks for i in blocks[b].instrs
+                  for s in self.k.work.get(id(i), ())}  # fmt: skip
+        return {f: v for f, v in scope.items() if f not in inside}
 
     def _thread_part(self, v, base):
         """The thread-varying terms of a loop-carried value's offset from its base
@@ -1083,7 +1128,9 @@ class Translator:
                 "a loop exits or continues under a thread-varying condition "
                 "(divergent loop)",
             )
-        carried, slots, go, kinds, caps, _latch, live, seeds, exits = self.loops[-1]
+        carried, slots, go, kinds, caps, _latch, live, seeds, exits, ivs = self.loops[
+            -1
+        ]
         values = [self.env.get(r) for r in carried]
         _exit_values(exits, carried, live, values)  # the P1 pass reads them (run_loop)
         widened = False
@@ -1112,6 +1159,8 @@ class Translator:
             have = E.tz(off, self.slot_facts)
             if have < self.slot_facts.get(_slot_vars(s)[0], 0):
                 caps[k], widened = have, True
+            if s[0] == "u" and s[1] in self.slot_iv and not self.k.mem.steps(off, s[1]):
+                ivs[k], widened = False, True  # not an induction variable
         if widened:
             raise _Widen()
         self.stmts += self._parallel_assign(slots, values)
@@ -1561,8 +1610,47 @@ class Translator:
         self.barriers.append(BarrierUse(
             stmt, sym, c, restj, E.interval(a), issued[2], stmt["loc"], init,
             self.k.srclocs.get(id(self.cur)) if init is not None else None,
-            self.k.mem.init_key(self) if init is not None else ()))  # fmt: skip
+            self.k.mem.init_key(self) if init is not None else (),
+            self._iv_offset(c, rest), self._select_arms(a)))  # fmt: skip
         self._emit_under(issued[0], issued[1])
+
+    def _iv_offset(self, c: int, rest):
+        """(constant, rest / 8 as KIR JSON) of the offset c + rest counting the entry
+        constants of its induction variables (slot_iv) as constant (BarrierUse.alt), or None:
+        none in it, or the rest not provably a multiple of 8. The JSON binds nothing (it is
+        used only if c is no mbarrier): its terms are in scope at the event."""
+        civ = self.k.mem.iv_const(rest, self.slot_iv) if self.slot_iv else 0
+        if not civ:
+            return None
+        w = E.width(rest)
+        q = E.div_exact(E.bin("sub", rest, E.const(civ, w)), 8, self.slot_facts)
+        try:
+            return None if q is None else (
+                (c + civ) % (1 << w), E.to_json(E.resize(q, 32), self.names))  # fmt: skip
+        except E.ExprError:  # not expressible without a binding: no alternative
+            return None
+
+    def _select_arms(self, a):
+        """BarrierUse.arms of the offset a (LLVM if-converts `if c: wait(A[i]) else:
+        wait(B[j])` into one wait on a selected address), or None: no select on a uniform
+        condition in a's top-level sum, or an arm's rest not provably a multiple of 8. The
+        JSON binds nothing (used only if a's own constant is no mbarrier)."""
+        got = self.k.mem.select_arms(a)
+        cond = None if got is None else self.uniform(got[0])
+        if cond is None:
+            return None
+        arms = []
+        try:
+            for x in got[1:]:
+                c, rest = self.k.mem.split_offset(x)
+                q = E.div_exact(rest, 8, self.slot_facts)
+                if q is None:
+                    return None
+                j = None if E.is_const(q, 0) else E.to_json(E.resize(q, 32), self.names)
+                arms.append((c % (1 << E.width(x)), j))
+            return (E.to_json(cond, self.names), *arms)
+        except E.ExprError:  # not expressible without a binding: no alternative
+            return None
 
     def _issue(self, stmt: dict, mode: str, per: list):
         """(uniform condition, statement, issuer count in mode "count") for an event
@@ -2488,6 +2576,16 @@ def _fold(op, xs):
 
 def _has_elect(e) -> bool:
     return any(v.startswith("%elect") for v in E.free_vars(e))
+
+
+def _any_elected(var):
+    """The mask var without its conjuncts on the elected lane: the threads that may run
+    under it, whichever lane elect.sync elects (unspecified)."""
+    rest = E.TRUE
+    for c in _conjuncts(var):
+        if not _has_elect(c):
+            rest = E.and1(rest, c)
+    return rest
 
 
 _CC = "%cc"  # the carry flag CC.CF in Translator.env (no PTX register has this name)

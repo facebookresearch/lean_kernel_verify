@@ -12,13 +12,16 @@ Events: a bulk store by the elected lane of warp 0 (no `lane`), its commit and w
 groups (n, .read), named barriers, st.shared per thread (`warp`, `lane`), a write pruned
 when it cannot meet a store source, a TMA store through an in-kernel descriptor with its
 `tmap` and the cp_fenceproxy's `tmap_write`; the top-level `p1`, none without a bulk store;
-the role split by a thread-0 arrive (parts named <partition>_w<a>_<b>). Refusals: a group
+the role split by a thread-0 arrive (parts named <partition>_w<a>_<b>); a load's landing
+naming its mbarrier (`bar`, `idx`), its tma_load next; the `let`s nothing
+reads dropped (a split part's per-lane loads would make their tensors metadata). Refusals: a group
 the issuer does not execute, a store several lanes of a warp issue, a write under a data
 predicate that may overlap a source, an mbarrier object or tcgen05.alloc's slot inside a
 source, an mbarrier wait by part of a warp, a wait or write under a negated elect.sync or
 under elect.sync and a lane condition, a global store into a buffer holding the tensormaps
-of bulk stores. Pruning keeps a loop whose lets carry values out of it and bounds a
-truncated offset as truncated. The P0 pass unchanged.
+of bulk stores. Pruning keeps a loop whose lets carry values out of it, drops the loops
+left empty and bounds a truncated offset as truncated; a landing whose load binds the
+slot index after it names no slot. The P0 pass unchanged.
 """
 
 import sys
@@ -33,7 +36,7 @@ if __package__ in (None, ""):
     sys.modules["lkv_root"] = _root
     __package__ = "lkv_root.tests.ptx"  # noqa: A001
 
-from ...frontend.ptx import translate as T  # noqa: E402
+from ...frontend.ptx import bulk, translate as T  # noqa: E402
 from .fixtures.kernels import events, kir_errors, run  # noqa: E402
 
 P12 = {"p1": ["P1-2"]}
@@ -397,6 +400,129 @@ class InKernelDescriptor(unittest.TestCase):
         self.assertEqual({s["tmap"]["base"] for s in events(f, "bulk_store")}, {"maps"})
         f = in_kernel("    @%p1 st.global.b32 [%rd12], %r1;\n" + drain, kp)
         self.assertIn("P1-2: a global write into maps", refusal(f))
+
+
+class Landing(unittest.TestCase):
+    # the elected lane of warp 0 loads 2048 bytes into smem [0, 2048) on the mbarrier at
+    # smem+4096, the warp waits for it, then the lane stores smem [0, 2048)
+    BODY = """
+    @%p3 mbarrier.init.shared::cta.b64 [%r10+4096], 1;
+    @%p3 mbarrier.arrive.expect_tx.shared::cta.b64 _, [%r10+4096], 2048;
+    @%p3 cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%r10], [%rd1], 2048, [%r10+4096];
+    mov.b32 %r20, 0;
+{
+    .reg .pred P1;
+WAIT:
+    mbarrier.try_wait.parity.shared::cta.b64 P1, [%r10+4096], %r20;
+    @!P1 bra.uni WAIT;
+}
+    @%p3 cp.async.bulk.global.shared::cta.bulk_group [%rd1], [%r10], 2048;
+    @%p3 cp.async.bulk.commit_group;
+"""
+
+    def test_names_its_load_mbarrier(self):
+        f = p12(self.BODY, threads=32)
+        self.assertEqual(f.refusals, [])
+        (x,) = events(f, "smem_write")
+        (t,) = events(f, "tma_load")
+        self.assertEqual(
+            (x.get("async"), x["bar"], x["idx"]), (True, t["bar"], t["idx"])
+        )
+        names = [
+            e["ev"] for e in events(f) if e["ev"] in ("smem_write", "gload", "tma_load")
+        ]
+        self.assertEqual(
+            names, ["smem_write", "gload", "tma_load"]
+        )  # its load follows it
+
+    def test_slot_index_bound_after(self):
+        # the load's mbarrier slot index (i & 1) is bound only after the landing, where
+        # the copy's address and mbarrier are translated: the landing names no slot
+        # (otherwise the P1 KIR reads that variable before its `let`)
+        body = """
+    @%p3 mbarrier.init.shared::cta.b64 [%r10+8192], 1;
+    @%p3 mbarrier.init.shared::cta.b64 [%r10+8200], 1;
+    ld.param.b32 %r40, [k_param_1];
+    mov.b32 %r41, 0;
+LOOP:
+    and.b32 %r42, %r41, 1;
+    shl.b32 %r43, %r42, 3;
+    add.s32 %r44, %r10, %r43;
+    cp.async.bulk.wait_group.read 0;
+    @%p3 cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%r10], [%rd1], 2048, [%r44+8192];
+    @%p3 mbarrier.arrive.expect_tx.shared::cta.b64 _, [%r44+8192], 2048;
+    shr.u32 %r47, %r41, 1;
+    and.b32 %r48, %r47, 1;
+{
+    .reg .pred P1;
+WAIT:
+    mbarrier.try_wait.parity.shared::cta.b64 P1, [%r44+8192], %r48;
+    @!P1 bra.uni WAIT;
+}
+    @%p3 cp.async.bulk.global.shared::cta.bulk_group [%rd1], [%r10], 2048;
+    @%p3 cp.async.bulk.commit_group;
+    add.s32 %r41, %r41, 1;
+    setp.lt.s32 %p20, %r41, %r40;
+    @%p20 bra LOOP;
+"""
+        f = p12(body, threads=32)
+        self.assertEqual(f.refusals, [])
+        (x,) = events(f, "smem_write")
+        self.assertEqual((x.get("async"), "bar" in x, "idx" in x), (True, False, False))
+        # (the fixture declares every tensor global, the bulk load's descriptor too)
+        self.assertEqual(
+            [e for e in kir_errors(f) if "is not a desc tensor" not in e], []
+        )
+
+
+class DeadLets(unittest.TestCase):
+    def test_lets_nothing_reads_are_dropped(self):
+        def var(n):
+            return {"e": "var", "w": 32, "name": n}
+
+        def load(t):
+            return {
+                "e": "load",
+                "w": 32,
+                "tensor": t,
+                "index": [{"e": "const", "w": 32, "v": 0}],
+            }
+
+        stmts = [
+            {"op": "let", "var": "a", "expr": load("T")},  # read by b only
+            {"op": "let", "var": "b", "expr": {"e": "bin", "w": 32, "o": "add", "a": var("a"), "b": var("a")}},
+            {"op": "let", "var": "c", "expr": load("U")},  # read by the event
+            {"op": "let", "var": "d", "expr": {"e": "const", "w": 32, "v": 1}},  # by the if
+            {"op": "if", "cond": {"e": "cmp", "w": 1, "o": "eq", "a": var("d"), "b": var("d")},
+             "then": [{"op": "let", "var": "e", "expr": load("V")},
+                      {"op": "let", "var": "c", "expr": var("c")}], "else": []},
+            {"op": "event", "ev": "bulk_wait", "n": var("c")},
+        ]  # fmt: skip
+        bulk._drop_dead_lets(stmts)
+        self.assertEqual([s.get("var") for s in stmts], ["c", "d", None, None])
+        self.assertEqual([s["var"] for s in stmts[2]["then"]], ["c"])
+
+    def test_loop_left_empty_dropped(self):
+        # the loop's write (smem+8192+(4i & 15)) is pruned and its address `let` then
+        # reads nothing else: the loop, left empty, goes too
+        body = """
+    mov.u32 %r20, 0;
+LOOP:
+    shl.b32 %r21, %r20, 2;
+    and.b32 %r22, %r21, 15;
+    add.s32 %r23, %r10, %r22;
+    st.shared.u32 [%r23+8192], %r20;
+    add.s32 %r20, %r20, 1;
+    setp.lt.s32 %p20, %r20, 4;
+    @%p20 bra LOOP;
+    @%p3 cp.async.bulk.global.shared::cta.bulk_group [%rd1], [%r10], 2048;
+    cp.async.bulk.commit_group;
+"""
+        f = p12(body)
+        self.assertEqual(f.refusals, [])
+        (r,) = f.roles
+        self.assertEqual([s["op"] for s in r["body"]], ["event"] * 3)
+        self.assertEqual(kir_errors(f), [])
 
 
 if __name__ == "__main__":

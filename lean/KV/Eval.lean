@@ -252,9 +252,10 @@ inductive Ev where
   | bulkWait (n : Int) (read : Bool)
   /-- A shared-memory write (P1-2) by `who` (with `sync`: every lane of `who.warp`, one
   warp-synchronizing instruction) of the byte ranges `[lo, hi)` of symbol `sym` in the
-  CTA of rank `cta` of the cluster; `async`: an asynchronous copy's landing. -/
+  CTA of rank `cta` of the cluster; `async`: an asynchronous copy's landing, `slot` the
+  mbarrier slot the copy completes its bytes on, if known. -/
   | smemWrite (who : Who) (sync : Bool) (async : Bool) (cta : Nat) (sym : String)
-      (ranges : Array (Int × Int))
+      (ranges : Array (Int × Int)) (slot : Option Slot)
   /-- A tensormap write (P1-2) by every lane of warp `warp` (tensormap.cp_fenceproxy): the
   128 bytes from byte offset `lo` of global buffer `base`. -/
   | tmapWrite (warp : Int) (base : String) (lo : Int)
@@ -658,15 +659,17 @@ def execEvent : Event → M Unit
     emit loc (.bulkStore kind who sym lo (lo + bytes) tm)
   | .bulk_commit loc => emit loc .bulkCommit
   | .bulk_wait n read loc => emit loc (.bulkWait n read)
-  | .smem_write sym offsets mask bytes warp lane sync async cta loc => do
+  | .smem_write sym offsets mask bytes warp lane sync async cta slot loc => do
     let who : Who := { warp := ← evalInt loc warp, lane := ← lane.mapM (evalInt loc) }
     let offs ← evalTExpr loc offsets
     let m ← match mask with
       | none => pure none
       | some e => some <$> evalTExpr loc e
     let os ← activeOffsets loc offs m
+    let rank := (← read).rank
+    let sl ← slot.mapM fun (b, i) => slotOf loc b i rank
     emit loc (.smemWrite who sync async (← ctaOf loc "smem_write" cta) sym
-      (os.map fun o => (o, o + bytes)))
+      (os.map fun o => (o, o + bytes)) sl)
   | .tmap_write base addr warp loc => do
     emit loc (.tmapWrite (← evalInt loc warp) base (← evalInt loc addr))
 

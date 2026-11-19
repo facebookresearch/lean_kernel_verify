@@ -43,5 +43,10 @@ same_thread     elect_elect_no_wait        FAIL
 same_thread     never_completed            PASS
 same_thread     landing_before             FAIL
 same_thread     landing_after_wait         PASS
+landing         resolved_1                 PASS
+landing         resolved_2                 PASS
+landing         store_before_wait_2        FAIL
+landing         load_ahead_1               FAIL
+landing         no_slot_1                  FAIL
 cluster_remote  into_source                FAIL
 cluster_remote  elsewhere                  PASS

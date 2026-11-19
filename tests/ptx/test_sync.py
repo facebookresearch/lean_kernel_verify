@@ -23,9 +23,11 @@ relaxed arrive is refused; mbarrier.inval
 ends a private synchronous cycle (init, commit, wait, inval in each loop iteration),
 which is removed, and is refused otherwise; parts of a CuTe role that emit nothing are
 merged. Pipelines: a
-wait in a loop with stage and phase slots, the LSR form of `fulls[blk % 2]`, a barrier
+wait in a loop with stage and phase slots, the LSR form of `fulls[blk % 2]` (also an
+integer slot whose entry holds the array's start: an induction variable), a barrier
 index computed after a loop from registers the loop defines, an smem descriptor (bit
-operations on a shared address) carried in a loop.
+operations on a shared address) carried in a loop; a select between two arrays on a
+uniform condition (an `if` of two events).
 """
 
 import sys
@@ -585,6 +587,74 @@ LOOP:
             arrives = [t[2] for t in evaluate(f, {"n": 4}) if t[0] == "arrive"]
             self.assertEqual(arrives, [0, 1, 0, 1])
             self.assertEqual(kir_errors(f), [])
+
+    def test_lsr_integer_slot_with_its_start_inside(self):
+        # The megakernel's form: an integer slot 64 + 8*blk whose entry also has a
+        # non-constant part (blk starts at n & 7); the address smem + slot - 16*(blk sdiv
+        # 2) has no constant of its own. The slot steps by 8 on every edge (an induction
+        # variable), so the array is the one at its entry constant 64.
+        loop = """
+    @%p12 mbarrier.init.shared::cta.b64 [%r10+64], 1;
+    @%p12 mbarrier.init.shared::cta.b64 [%r10+72], 1;
+    and.b32 %r51, %r2, 7;
+    shl.b32 %r58, %r51, 3;
+    add.s32 %r50, %r58, 64;
+    mov.b32 %r59, 0;
+LOOP:
+    shr.u32 %r52, %r51, 31;
+    add.s32 %r53, %r51, %r52;
+    shr.s32 %r54, %r53, 1;
+    shl.b32 %r55, %r54, 4;
+    sub.s32 %r56, %r50, %r55;
+    add.s32 %r57, %r10, %r56;
+    @%p12 mbarrier.arrive.shared::cta.b64 _, [%r57];
+    {step}
+    add.s32 %r51, %r51, 1;
+    add.s32 %r59, %r59, 1;
+    setp.lt.s32 %p21, %r59, 4;
+    @%p21 bra LOOP;
+"""
+        f = sync(loop.format(step="add.s32 %r50, %r50, 8;"))
+        self.assertEqual(f.refusals, [])
+        self.assertEqual(
+            [(b["name"], b["num"]["v"]) for b in f.barriers], [("mbar_64", 2)]
+        )
+        for n, idx in ((4, [0, 1, 0, 1]), (5, [1, 0, 1, 0])):
+            arrives = [t[2] for t in evaluate(f, {"n": n}) if t[0] == "arrive"]
+            self.assertEqual(arrives, idx)
+        self.assertEqual(kir_errors(f), [])
+        # not stepped by a constant on every edge: no induction variable, refused as before
+        for step in ("xor.b32 %r50, %r50, 8;", "add.s32 %r50, %r50, %r58;"):
+            self.assertIn(
+                "is not an initialized mbarrier", refusal(sync(loop.format(step=step)))
+            )
+
+    def test_select_between_two_arrays(self):
+        # `if c: arrive(A[0]) else: arrive(B[0])` if-converted by LLVM into one arrive on
+        # a selected address (c uniform: CTA 0 or not): an `if` of the two events
+        body = """
+    @%p12 mbarrier.init.shared::cta.b64 [%r10+64], 1;
+    @%p12 mbarrier.init.shared::cta.b64 [%r10+128], 2;
+    mov.u32 %r70, %ctaid.x;
+    setp.eq.s32 %p30, %r70, 0;
+    selp.b32 %r71, 64, 128, %p30;
+    add.s32 %r72, %r10, %r71;
+    @%p12 mbarrier.arrive.shared::cta.b64 _, [%r72];
+"""
+        f = sync(body)
+        self.assertEqual(f.refusals, [])
+        self.assertEqual(sorted(b["name"] for b in f.barriers), ["mbar_128", "mbar_64"])
+        for pid, bar in ((0, "mbar_64"), (1, "mbar_128")):
+            arrives = [
+                t[1:3]
+                for t in evaluate(f, {"n": 1}, pid=(pid, 0, 0))
+                if t[0] == "arrive"
+            ]
+            self.assertEqual(arrives, [(bar, 0)])
+        self.assertEqual(kir_errors(f), [])
+        # an arm that is no mbarrier: refused
+        f = sync(body.replace("selp.b32 %r71, 64, 128", "selp.b32 %r71, 64, 256"))
+        self.assertIn("is not an initialized mbarrier", refusal(f))
 
     def test_index_computed_after_a_loop(self):
         # %r61 is written before it is read in every trip and read after the loop only

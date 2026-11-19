@@ -21,3 +21,4 @@ same_thread note: same_thread.py:4: cta (0,0,0) role w: the bulk reduce at same_
 staging_wide not decided on this input
 same_thread lands in smem [0, 1024) and the bulk store at same_thread.py:17 (role w, the elected lane of warp 0) reading smem[0, 1024): the asynchronous copy is issued before the store, but may land after the store reads
 cluster_remote F1: the write at cluster_remote.py:4 (role w of cta (1,0,0), lane 0 of warp 0) lands in smem [0, 16) while the bulk store at cluster_remote.py:2 (role w of cta (0,0,0), lane 0 of warp 0) reading smem[0, 1024) may still read it
+landing not decided on this input: the write at landing.py:3 (role w, the elected lane of warp 0) lands in smem [0, 1024) and the bulk store at landing.py:6 (role w, the elected lane of warp 0) reading smem[0, 1024): the asynchronous copy is issued before the store, but may land after the store reads (its mbarrier's bytes do not show it complete before the store is issued)

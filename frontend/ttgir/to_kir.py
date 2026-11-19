@@ -1906,9 +1906,16 @@ def _desc_tensors(descs: dict, annotations: dict, written: set) -> list:
     """The host descriptors of Facts.descs as build() completes them: named by the jit
     argument, shape/strides the kernel's own <d>.shape.i/<d>.stride.i params (Facts.params;
     _input reads their values from the snapshot), box the block. An in-kernel descriptor
-    needs no tensor: the core writes its stores as clipped accesses of the base."""
+    needs no tensor: the core writes its stores and loads as clipped accesses of the base;
+    a load's transaction bytes go to a box descriptor (kind "box": extents the box,
+    constants, role input; frontend/ptx/tma.py)."""
     out = []
     for name, d in descs.items():
+        if d["kind"] == "box":  # an in-kernel descriptor load's transaction bytes
+            out.append({"name": name, "kind": "desc", "elem_bytes": d["elem_bytes"],
+                        "shape": d["shape"], "strides": d["strides"], "box": d["box"],
+                        "role": "input", "segments": None, "metadata": False})  # fmt: skip
+            continue
         if d["kind"] != "host":
             raise KirError(f"{d['kind']} descriptor {name}: not in the Triton family")
         ann = annotations.get(name, {})

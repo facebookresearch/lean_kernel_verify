@@ -215,6 +215,41 @@ class Memory:
         return _sum(0, tv, E.width(off)) if tv else None
 
     @staticmethod
+    def entry_const(e, w: int) -> int:
+        """The constant of e's linear form (_linear), modulo 2**w (a loop slot's entry
+        value: interp's induction variables)."""
+        return _linear(e)[0] % (1 << w)
+
+    @staticmethod
+    def steps(e, name: str) -> bool:
+        """e is the slot variable `name` plus a constant (an induction variable's edge)."""
+        _c, terms = _linear(e)
+        return len(terms) == 1 and terms[0][0] == 1 and terms[0][1][:1] == ("var",) \
+            and terms[0][1][2] == name  # fmt: skip
+
+    @staticmethod
+    def iv_const(e, ivs: dict) -> int:
+        """sum k * c0 over the terms k * v of e's linear form whose v is an induction
+        variable with entry constant c0 (ivs: interp.Translator.slot_iv)."""
+        _c, terms = _linear(e)
+        return sum(k * ivs[t[2]] for k, t in terms if t[0] == "var" and t[2] in ivs)
+
+    @staticmethod
+    def select_arms(e):
+        """(condition, e with the select taken, e with it not taken) for the one select of
+        e's top-level sum (_linear), or None."""
+        c, terms = _linear(e)
+        sel = [j for j, (_k, t) in enumerate(terms) if t[0] == "select"]
+        if len(sel) != 1:
+            return None
+        j = sel[0]
+        k, t = terms[j]
+        w = E.width(e)
+        return t[2], *(
+            _sum(c, terms[:j] + [(k, x)] + terms[j + 1 :], w) for x in t[3:5]
+        )
+
+    @staticmethod
     def minus(e, part):
         """e - part with the linear terms they share cancelled (exact in wrapping
         arithmetic, as _linear)."""
@@ -252,6 +287,8 @@ class Memory:
             return self._load(tr, i, mn)
         if mn in _GLOBAL_ST or mn.startswith("st.global"):
             return self._store(tr, i)
+        if mn.startswith(("st.async.shared::cluster", "red.async.shared::cluster")):
+            return cluster.async_store(tr, i, mn)  # into another CTA (cluster.py)
         if mn.startswith(("atom", "red")):
             return self._atomic(tr, i, mn)
         if mn.startswith(("cp.async.ca", "cp.async.cg")):
@@ -759,6 +796,16 @@ class Memory:
                     u.event["n"] = n
                 else:
                     u.event.pop("n", None)
+        for (
+            u
+        ) in uses:  # a select between two arrays: `if c { event A } else { event B }`
+            if u.else_event is not None:
+                if "n" in u.event:
+                    u.else_event["n"] = u.event["n"]
+                then = dict(u.event)
+                u.event.clear()
+                u.event.update({"op": "if", "cond": u.cond, "then": [then],
+                                "else": [u.else_event], "loc": then["loc"]})  # fmt: skip
         return [
             {"name": names[(s, a)], "count": c, "num": {"e": "const", "w": 32, "v": n}}
             for s, a, n, c, _k in arrays
@@ -1037,20 +1084,40 @@ def _split(arrays: list, uses: list, profiles: dict) -> list:
 
 def _resolve(u, arrays: list, names: dict) -> None:
     """Set the event's bar and idx: the array holding the constant part c of its
-    offset, idx = (c - start) / 8 + the rest / 8 (BarrierUse.rest)."""
-    c = u.const
-    arr = next(
-        (x for x in arrays if x[0] == u.sym and x[1] <= c < x[1] + 8 * x[2]), None
-    )
+    offset, idx = (c - start) / 8 + the rest / 8 (BarrierUse.rest); if no array holds c,
+    the one holding the constant counting its induction variables' entry constants
+    (BarrierUse.alt: LLVM's strength-reduced `start + 8 * i`), with its rest."""
+    c, rest = u.const, u.rest
+
+    def holding(c):
+        return next(
+            (x for x in arrays if x[0] == u.sym and x[1] <= c < x[1] + 8 * x[2]), None
+        )
+
+    arr = holding(c)
+    if arr is None and u.alt is not None and holding(u.alt[0]) is not None:
+        (c, rest), arr = u.alt, holding(u.alt[0])
+    if arr is None and u.arms is not None and all(holding(x[0]) for x in u.arms[1:]):
+        # a select between two arrays (BarrierUse.arms): the event for the first arm, a
+        # copy for the second, wrapped in `if` the condition by Memory.barriers
+        (c, rest), (c2, rest2) = u.arms[1:]
+        u.else_event, u.cond = dict(u.event), u.arms[0]
+        _set_slot(u, u.else_event, holding(c2), c2, rest2, names)
+        arr = holding(c)
     if arr is None:
         raise _err(u, f"{u.sym}+{c} is not an initialized mbarrier")
+    _set_slot(u, u.event, arr, c, rest, names)
+
+
+def _set_slot(u, event: dict, arr, c: int, rest, names: dict) -> None:
+    """event's bar and idx: array arr, idx = (c - start) / 8 + rest (JSON, or None)."""
     if (c - arr[1]) % 8:
         raise _err(u, "mbarrier offset not a multiple of 8 bytes from its array")
     k = {"e": "const", "w": 32, "v": (c - arr[1]) // 8}
-    idx = k if u.rest is None else (
-        u.rest if k["v"] == 0 else {"e": "bin", "w": 32, "o": "add", "a": k, "b": u.rest})  # fmt: skip
-    u.event["bar"] = names[(arr[0], arr[1])]
-    u.event["idx"] = idx
+    idx = k if rest is None else (
+        rest if k["v"] == 0 else {"e": "bin", "w": 32, "o": "add", "a": k, "b": rest})  # fmt: skip
+    event["bar"] = names[(arr[0], arr[1])]
+    event["idx"] = idx
 
 
 def _count(u) -> int:

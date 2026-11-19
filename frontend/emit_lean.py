@@ -241,9 +241,12 @@ def event(s):
         return ctor(ev, str(s["n"]), lbool(s["read"]), loc)
     if ev == "smem_write":
         mask = "none" if s["mask"] is None else f"(some {texpr(s['mask'])})"
+        slot = (
+            "none" if "bar" not in s else f"(some ({lstr(s['bar'])}, {expr(s['idx'])}))"
+        )
         return ctor(ev, lstr(s["sym"]), texpr(s["offsets"]), mask, str(s["bytes"]),
                     expr(s["warp"]), opt_expr(s.get("lane")), lbool(s.get("sync", False)),
-                    lbool(s.get("async", False)), opt_expr(s.get("cta")), loc)  # fmt: skip
+                    lbool(s.get("async", False)), opt_expr(s.get("cta")), slot, loc)  # fmt: skip
     if ev == "tmap_write":
         return ctor(ev, lstr(s["base"]), expr(s["addr"]), expr(s["warp"]), loc)
     raise AssertionError(ev)

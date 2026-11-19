@@ -572,6 +572,58 @@ class BulkS2Cluster(unittest.TestCase):
         self.assertIn("several lanes of a warp", refusal(f))
 
 
+# every thread stores 4 bytes (st.async .b32, or 16 with .v4) into the peer CTA's smem+1024,
+# completing on the peer's mbarrier at smem+8 (count 64)
+ASYNC = """
+    add.s32 %r6, %r2, 1024;
+    mapa.shared::cluster.u32 %r11, %r6, %r5;
+    add.s32 %r13, %r2, 8;
+    mapa.shared::cluster.u32 %r12, %r13, {bar_rank};
+    {op} [%r11], {val}, [{bar}];
+"""
+ST = "st.async.shared::cluster.mbarrier::complete_tx::bytes.b32"
+
+
+def async_store(op=ST, val="%r1", bar_rank="%r5", bar="%r12"):
+    return PRE + ASYNC.format(op=op, val=val, bar_rank=bar_rank, bar=bar)
+
+
+class AsyncStore(unittest.TestCase):
+    def test_complete_tx_per_thread(self):
+        for op, val, n in [
+            (ST, "%r1", 4),
+            ("st.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes.v4.b32",
+             "{%r1, %r1, %r1, %r1}", 16),
+            ("red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes.add.u32",
+             "%r1", 4),
+            ("st.async.shared::cluster.mbarrier::complete_tx::bytes.b64", "%rd1", 8),
+        ]:  # fmt: skip
+            f = run(
+                async_store(op, val).replace(
+                    "    add.s32 %r6,", "    cvt.u64.u32 %rd1, %r1;\n    add.s32 %r6,"
+                )
+            )
+            self.assertEqual(f.refusals, [], op)
+            (c,) = events(f, "complete_tx")
+            self.assertEqual(
+                (c["bar"], c["bytes"], resolved(f, c["cta"])),
+                ("mbar_8", const(n), PEER),
+            )
+            # once per executing thread, every lane of both warps: st.async is each
+            # thread's own store (ISA), unlike a bulk copy issued per warp
+            (loop,) = [s for s in statements(f.roles[0]["body"]) if s["op"] == "for"]
+            self.assertEqual(loop["ub"]["v"], 64)
+            self.assertEqual(kir_errors(f), [])
+
+    def test_refusals(self):
+        for kw, why, cl in [
+            ({"bar_rank": "%r4"}, "completing on another's mbarrier", PAIR),
+            ({"bar": "%r13"}, "not mapa results", PAIR),
+            ({}, "outside a cluster of several CTAs", (1, 1, 1)),
+        ]:
+            self.assertIn(why, refusal(run(async_store(**kw), cluster=cl)))
+
+
 class InertBranches(unittest.TestCase):
     def test_on_data(self):
         body = (

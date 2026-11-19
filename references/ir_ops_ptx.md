@@ -170,7 +170,7 @@ load's cycle, whose transaction bytes P0-4 checks).
 
 | Instruction | KIR (TLX / CuTe) |
 |---|---|
-| `cp.async.bulk.tensor.{1-5}d.shared{::cluster}.global.mbarrier::complete_tx::bytes{.multicast::cluster}{.cta_group::2} [dst], [tmap, {c}], [mbar]` (the two modifiers in either order: TLX writes `.cta_group::2.multicast::cluster`) | `tma_load(desc, coords, bar)` / plus the footprint `gload` on the base tensor |
+| `cp.async.bulk.tensor.{1-5}d.shared{::cluster}.global.mbarrier::complete_tx::bytes{.multicast::cluster}{.cta_group::2} [dst], [tmap, {c}], [mbar]` (the two modifiers in either order: TLX writes `.cta_group::2.multicast::cluster`) | `tma_load(desc, coords, bar)` / plus the footprint `gload` on the base tensor; through a TLX in-kernel descriptor: the footprint `gload` on its base plus `tma_load` of the box descriptor `box_<eb>B_<dims>` at coordinates 0 (`frontend_ptx.md`, "TMA descriptors") |
 | `cp.async.bulk.tensor.{1-5}d.global.shared.bulk_group [tmap, {c}], [src]` | `tma_store` / footprint `gstore` |
 | `cp.reduce.async.bulk.tensor.{1-5}d.global.shared.<op>.bulk_group` | `tma_reduce` / footprint `gatomic` |
 | `cp.async.bulk.shared{::cluster}.global.mbarrier::complete_tx::bytes [dst], [g], n, [mbar]` | `gload` of the n bytes + `tma_load` of the 1-D descriptor `bulk_<T>_<n>` on mbar |
@@ -275,8 +275,14 @@ Clusters (both families):
   every CTA of the mask); a multicast `tcgen05.commit`'s is the `commit_arrive`'s.
 * `cp.async.bulk.shared::cluster.shared...complete_tx::bytes [dst], [src], n, [mbar]`
   with dst and mbar mapa'd into one CTA: `complete_tx(bar, n, cta)` per issuing thread
-  (the data is not modeled). `mbarrier.complete_tx` and any other access to another CTA:
-  refused.
+  (the data is not modeled).
+* `st.async` and `red.async` `.shared::cluster.mbarrier::complete_tx::bytes [dst], v,
+  [mbar]` (ISA st.async, red.async: each executing thread's store or reduction into
+  another CTA's shared memory, signalling complete-tx on the mbarrier of the destination
+  CTA) with dst and mbar mapa'd into one CTA: `complete_tx(bar, bytes, cta)` per
+  executing thread, bytes the access's (vector width x element size; the data is not
+  modeled). Outside a cluster of several CTAs, or through addresses that are not mapa
+  results: refused. `mbarrier.complete_tx` and any other access to another CTA: refused.
 * `barrier.cluster`: an arrive of every thread on `cluster_barrier`, a frontend-made
   barrier of one slot in the CTA of rank 0 counting one arrival per thread of the cluster;
   the role's j-th wait waits for phase j (`cluster_barrier_parity`, flipped after each

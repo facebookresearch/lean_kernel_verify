@@ -386,15 +386,19 @@ class OpsTest(unittest.TestCase):
             for o in spellings:
                 with self.subTest(opcode=o):
                     self.assertEqual(ops.mnemonic(o), key)
-        # .mmio has an effect, red.async on shared::cluster completes on an mbarrier
-        # (no rows); a mbarrier's ordering is not dropped here
+        # .mmio has an effect (no row); red.async on shared::cluster completes on an
+        # mbarrier (its own row, cluster.py); a mbarrier's ordering is not dropped here
         self.assertEqual(
             ops.mnemonic("ld.mmio.relaxed.sys.global.b32"), "ld.global.mmio"
         )
         cluster = (
             "red.async.relaxed.cluster.shared::cluster.mbarrier::complete_tx::bytes"
         )
-        self.assertNotIn(ops.mnemonic(cluster + ".add.u32"), ops.TABLE)
+        self.assertEqual(
+            ops.mnemonic(cluster + ".add.u32"),
+            "red.async.shared::cluster.mbarrier::complete_tx::bytes.add",
+        )
+        self.assertIn(ops.mnemonic(cluster + ".add.u32"), ops.TABLE)
         self.assertEqual(
             ops.mnemonic("mbarrier.arrive.relaxed.cluster.shared::cta.b64"),
             "mbarrier.arrive.relaxed.cluster.shared",

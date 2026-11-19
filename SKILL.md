@@ -272,7 +272,9 @@ A verdict depends on exactly these items (`design.md`, "Trust base"):
    disjoint from every store source, `frontend_ptx.md` "P1-2 pass"); and the
    participants of a named barrier being its roles' threads, all of the CTA's for a
    barrier whose count is the CTA's (idle warps included). A load's landing issued
-   before the store is never taken as ordered (U3).
+   before the store is ordered only through its mbarrier's bytes (a phase completes
+   only with its expected bytes landed, an `expect_tx` applies to the phase current at
+   its issue: `StoreReuse.landed`), else undecided (U3).
 
 The case file decides what is checked: its inputs, and annotations that name
 segments, work items, intended regions and elision flags. Review them like code.

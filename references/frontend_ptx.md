@@ -290,8 +290,21 @@ stages of one pipeline stay one array, as P0-2's static-waiter rule expects). A 
 array is the one holding the constant part of its offset (a loop-carried address keeps
 that constant outside the carried slot), its index `(offset - start) / 8`, exact by
 structure or known trailing zeros; if either is unknown the use is refused (an if-chain
-over candidate arrays would make unreachable waits static waiters). Counts must be host
-values. A private synchronous cycle that `mbarrier.inval` ends (TLX's `tlx.async_dot`
+over candidate arrays would make unreachable waits static waiters). Two forms LLVM makes
+of a static choice are resolved when the offset's own constant is no mbarrier:
+* an induction variable: a uniform integer loop slot to which every edge of its loop
+  adds a constant (strength reduction of `start + 8 * i` into a counter that starts at
+  `start + 8 * i0` and steps by 8; checked at every edge, else the loop is translated
+  again without it) keeps the constant part of its entry value as the array's start: the
+  array is the one holding the offset's constant plus those entry constants, the index
+  the rest minus them over 8, exact as above. A step that is not a constant, or a slot
+  that is not a plain integer, is refused as before;
+* a select on a thread-uniform condition in the offset's top-level sum whose two arms
+  each hold an mbarrier (`if c: wait(A[i]) else: wait(B[j])` if-converted into one wait
+  on a selected address): the event becomes `if c { event on A } else { event on B }`,
+  the TTGIR's own branch; any other select is refused.
+
+Counts must be host values. A private synchronous cycle that `mbarrier.inval` ends (TLX's `tlx.async_dot`
 without mBarriers) is removed from the KIR; any other inval is refused (`ir_ops_ptx.md`,
 "mbarriers").
 
@@ -326,10 +339,18 @@ without mBarriers) is removed from the KIR; any other inval is refused (`ir_ops_
   replaces and the copy must be in one statement list; a `tensormap.replace` of a
   descriptor in global memory is refused. A TMA instruction uses the descriptor a
   cp_fenceproxy of its role wrote at the same address earlier in the same loop
-  iteration, on an enclosing path; anything else is refused. Stores and reduces through
-  it are `gstore` / `gatomic` of its base pointer with exactly the TMA footprint
+  iteration, on an enclosing path, or in that iteration before loops it entered since
+  when none of those loops holds a `tensormap.cp_fenceproxy` (a work item writes its
+  descriptors, its tile loop uses them); anything else is refused. Stores and reduces
+  through it are `gstore` / `gatomic` of its base pointer with exactly the TMA footprint
   (extents read unsigned: the tensormap's `global_dim` is a b32), so `intended_writes`
-  names the base pointer; a load through one is refused.
+  names the base pointer. A load through it is the `gload` of that footprint on the base
+  plus, for its transaction bytes, a `tma_load` on its mbarrier of the box descriptor
+  `box_<eb>B_<d0>x<d1>...` at coordinates 0: a KIR desc whose extents are the box
+  (constants, role input), so its bytes are the box times the element bytes, as the
+  hardware's (out-of-bounds fill included). Assumed, not checked: no other role
+  rewrites the descriptor's slot, and its role does not rewrite it while a load through
+  it is in flight (P1-2 checks that for stores).
 * **Bulk copies** (non-tensor `cp.async.bulk` global -> shared): the 1-D descriptor
   `bulk_<T>_<n>` over T's storage (box n elements), for the transaction bytes, plus the
   footprint `gload`.
@@ -342,7 +363,8 @@ Coordinates, footprints, transaction bytes, issuing threads, sub-byte formats:
 * **Clusters (CuTe and TLX).** The cluster dims come from the LaunchRecords and are the
   KIR `cluster` (`kir.md` change 11); remote arrives (`cta`), multicast TMA loads and
   commits (`cta_mask`), cta_group::2 loads completing on the pair leader's mbarrier
-  (`leader`: CuTe's peer-bit mask, TLX's `mapa` of `rank & 254`), shared::cluster bulk
+  (`leader`: CuTe's peer-bit mask, TLX's `mapa` of `rank & 254`), `st.async` /
+  `red.async` into another CTA (`complete_tx` per executing thread), shared::cluster bulk
   copies (`complete_tx`) and the cluster barrier follow `ir_ops_ptx.md`, "Thread barriers
   and clusters". P0-2 and P0-4 decide one barrier ledger per cluster. Which CTA's data a
   copy carries is not checked. TLX 2-CTA kernels: the cluster barrier is reached by every
@@ -402,7 +424,11 @@ A case's `work` names, per work field, where its value comes from
 
 Gating: TLX emits a `work` event in each region that defines every field, after the last
 definition; a role that never defines some field gets none, and no region defining all of
-them is a case error. CuTe emits one at every anchor; fields are role variables, -1 until
+them is a case error. A loop body starts with the fields the enclosing region defined
+that have no anchor inside the loop (LLVM hoists a loop-invariant field, e.g. a TLX
+megakernel's `off_h = cluster_cta_rank % H`, out of the work loop TTGIR defines it in;
+every iteration sees that value); a field with an anchor in the loop starts undefined
+there, as TTGIR's blocks. CuTe emits one at every anchor; fields are role variables, -1 until
 set, and under a lane condition that depends on runtime values only the part of the
 condition that is uniform per warp sets them (the work item is the role's).
 
@@ -445,7 +471,11 @@ logged as `P1 refused|error: <why>` and leaves its P1-2 "not checked"; the P0 KI
 its verdicts never change (`LKV_P1=0` skips the pass). The roles are split as the CuTe
 pass splits them (a role whose warps issue an mbarrier wait, arrive or commit only in
 part; a TTGIR partition's parts are named `<partition>_w<first>_<last>`), since the P1
-ledger takes a role's mbarrier event as every warp's.
+ledger takes a role's mbarrier event as every warp's. The `let`s nothing reads are
+dropped from the P1 KIR: a part of one warp binds per-lane values of its lane-only loads
+(the thread model's tables) that only data reads, and those loads would make their
+tensors metadata, whose contents the dump records only where P0 needs them; the P1
+specs read only events, so a dead `let` matters only where it fails on its own (P0-1).
 
 Events. A bulk store (TMA or non-tensor, store or reduce) is a `bulk_store` per
 issuing thread: its warp, its lane (absent for the elected lane of a full-warp
@@ -460,7 +490,13 @@ executing thread (in a thread loop): st.shared and generic st to a shared addres
 warp-synchronizing instruction), and with `async` the landings of TMA loads (the
 hardware box), bulk g2s copies (their size) and cp.async (its copy size), and of
 writes into another CTA (st.async, red.async, shared::cluster bulk copies and reduces
-through a mapa address: `async` with `cta`, the destination's rank).
+through a mapa address: `async` with `cta`, the destination's rank). The landing of a
+TMA or bulk load names its load's mbarrier (`bar`, `idx`: the slot of the one
+`tma_load` the translation emits for it, right after it in the role's trace with only
+its footprint `gload` between), which lets P1-2 order the landing before a later store
+through that mbarrier's bytes (`specs.md` P1-2); a later message of a Triton block (no
+`tma_load` of its own), a load completing on another CTA's mbarrier or one whose
+mbarrier is a select between arrays names none.
 `tensormap.cp_fenceproxy` is a `tmap_write` of each executing warp. Shared symbols:
 every `.extern .shared` variable starts at the dynamic shared memory, so all of them are
 the first one.
@@ -627,11 +663,23 @@ assembly rerolls LLVM's unrolled blocks into `for` loops (the same trace).
 * Refused by design: CuTe CLC, P1-1 on TLX, TMEM addresses relative
   to the allocation, multicast bulk copies, multicast or cta_group::2 TMA loads and
   shared::cluster bulk copies that several lanes of a warp may execute (issuing not
-  measured, `ir_ops_ptx.md`), im2col TMA, packed sub-byte TLX descriptors, loads through
-  in-kernel descriptors and descriptors edited in global memory, `mbarrier.inval` outside
+  measured, `ir_ops_ptx.md`), im2col TMA, packed sub-byte TLX descriptors, descriptors
+  edited in global memory, `mbarrier.inval` outside
   a private synchronous cycle, carry-flag instructions under a predicate, generic writes
   of shared memory and shared atomics in TLX warp-specialized kernels, the control-flow
   shapes above, and anything whose value would have to come from Data.
+* A value one role stores to shared memory and another role reads after an mbarrier
+  handoff (a mailbox) is Data, so a branch, loop exit or address on it is refused. A TLX
+  layer-norm backward with an affine epilogue hands its reducer warps a 32-word header
+  per tile (`red_hdr`: the work item's sequence index on the item's last Q tile, -1
+  otherwise, -2 at shutdown) and they branch on its maximum (exit at -2) and address
+  global stores with it. A sound rule needs a cross-role value: a put event in the writer,
+  a get in the reader that returns the k-th put of that location, an evaluation that runs
+  the writer before the reader (none in KIR: roles are evaluated independently), and a
+  check, as the barrier ledger does for phases, that the k-th put happens before the k-th
+  get, the k-th get before the (k+1)-th put, and that only those puts write the location
+  (every word: the reader reduces over 32 lanes). A value the same role stores and reads
+  back after a barrier of its own threads would need the last two only.
 * Memory ordering is not modeled: `.volatile`, `.relaxed`/`.acquire` and scopes change
   no event. A weak integer global load reads the input's recorded contents; a strong one
   (`.volatile`, `.relaxed`, `.acquire`) or a `.cv` one is Data, as another thread may

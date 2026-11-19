@@ -83,7 +83,9 @@ Rules of kir.md beyond its field tables, which lean/KV relies on:
   `bulk_commit`, `bulk_wait` (`n` a non-negative int, `read` a boolean), `smem_write` (`sym`,
   `offsets` TExpr and `mask` TExpr or null as gstore's, `bytes` a positive int, w=32 `warp`,
   optional w=32 `lane`, optional boolean `sync` (no `lane` with it), optional boolean
-  `async` (the landing of an asynchronous copy), optional `cta`) and
+  `async` (the landing of an asynchronous copy), optional `cta`, optional `bar` and w=32
+  `idx`, both or neither, only with `async` and without `cta`: the mbarrier of the issuing
+  CTA the copy completes its bytes on) and
   `tmap_write` (`base` a string, `addr` an Expr, w=32 `warp`). A P1-2 KIR may give
   "cta_threads", the CTA's thread count (a positive multiple of 32, at least the roles'
   threads).
@@ -166,7 +168,7 @@ EVENT_FIELDS = {
     "bulk_wait": ({"n", "read"}, set()),
     "smem_write": (
         {"sym", "offsets", "mask", "bytes", "warp"},
-        {"lane", "sync", "async", "cta"},
+        {"lane", "sync", "async", "cta", "bar", "idx"},
     ),
     "tmap_write": ({"base", "addr", "warp"}, set()),
 }
@@ -783,6 +785,20 @@ class _Checker:
         self._check_cluster_fields(path, ev, s, scope)
         if "async" in s:
             self.bool_field(f"{path}.async", s["async"])
+        if (
+            "bar" in s or "idx" in s
+        ):  # the mbarrier slot of a landing in the issuing CTA
+            if (
+                not ("bar" in s and "idx" in s)
+                or s.get("async") is not True
+                or "cta" in s
+            ):
+                self.err(
+                    path,
+                    "bar and idx name the mbarrier of an async landing in the issuing CTA (both, async, no cta)",
+                )
+            elif self.expr(f"{path}.idx", s["idx"], scope) not in (32, None):
+                self.err(f"{path}.idx", "must have w=32")
         if "sync" in s:
             self.bool_field(f"{path}.sync", s["sync"])
             if s["sync"] is True and "lane" in s:

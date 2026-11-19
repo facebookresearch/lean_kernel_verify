@@ -334,6 +334,54 @@ class Contract(unittest.TestCase):
         )
         self.assertEqual(kir_errors(f), [])
 
+    def test_work_field_hoisted_out_of_the_loop(self):
+        # head = ctaid.y >> 1 is computed before the work loop (LLVM hoists the
+        # loop-invariant value out of the loop TTGIR defines it in), batch in it: the loop
+        # body starts with head, so each trip's work event has both. A field with a site
+        # inside the loop (head again, a novalue site) is not carried in.
+        body = """
+    mov.u32 %r1, %tid.x;
+    ld.param.u64 %rd1, [k_param_0];
+    mov.u32 %r2, %ctaid.y;
+    shr.u32 %r3, %r2, 1;
+    mov.b32 %r20, 0;
+LOOP:
+    add.s32 %r21, %r20, 7;
+    mul.wide.s32 %rd2, %r21, 4;
+    add.s64 %rd3, %rd1, %rd2;
+    setp.eq.s32 %p1, %r1, 0;
+    @%p1 st.global.b32 [%rd3], %r3;
+    add.s32 %r20, %r20, 1;
+    setp.lt.s32 %p2, %r20, 3;
+    @%p2 bra LOOP;
+    ret;
+"""
+        instrs = (
+            parse.parse(kernel(body, ptrs=("x",), scalars=()))
+            .function("k")
+            .instructions()
+        )
+
+        def site(field, kind, prefix, reg=None):
+            j = next(j for j, i in enumerate(instrs) if i.text.startswith(prefix))
+            return {"field": field, "kind": kind, "instr": ("k", j, instrs[j].line),
+                    "detail": {"reg": reg} if reg else {}}  # fmt: skip
+
+        sites = [
+            site("head", "assign", "shr", "%r3"),
+            site("batch", "assign", "add.s32 %r21", "%r21"),
+        ]
+        work = {"fields": ["batch", "head"], "mode": "gate", "sites": sites}
+        f = run(body, ptrs=("x",), scalars=(), work=work)
+        self.assertEqual(f.refusals, [])
+        got = [t[1] for t in evaluate(f, {}, pid=(0, 5, 0)) if t[0] == "work"]
+        self.assertEqual(got, [{"batch": b, "head": 2} for b in (7, 8, 9)])
+        self.assertEqual(kir_errors(f), [])
+        work["sites"] = sites + [site("head", "novalue", "add.s32 %r21")]
+        f = run(body, ptrs=("x",), scalars=(), work=work)
+        got = [t[1] for t in evaluate(f, {}, pid=(0, 5, 0)) if t[0] == "work"]
+        self.assertEqual(got, [{"batch": b, "head": -1} for b in (7, 8, 9)])
+
     def test_work_anchor_counts_only_where_its_load_runs(self):
         # Two anchored loads under complementary uniform predicates (pid < n): each sets
         # the field inside its `if`. Under lane-dependent runtime predicates both set it
