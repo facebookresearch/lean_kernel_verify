@@ -16,8 +16,9 @@ with a TMA store (`staging`, single and double buffered, with and without the `.
 and the named barrier); a partition that rebuilds an in-kernel tensor descriptor in global
 scratch at the top of every work item while the previous item's stores through it may still
 read it (`tmap_rebuild`); a cross-role handoff through mbarriers or a named barrier
-(`handoff`); the issuing thread's own program order (`same_thread`); and a TMA load landing
-in a store source, completed through its mbarrier before the store or not (`landing`).
+(`handoff`); the issuing thread's own program order (`same_thread`); a TMA load landing in a
+store source, completed through its mbarrier before the store or not (`landing`), also in a
+2-CTA pair whose loads complete on the pair leader's mbarrier (`pair_chain`).
 """
 
 import json
@@ -115,7 +116,9 @@ def splat(x):
     return {"t": "splat", "shape": [1], "w": 32, "a": x}
 
 
-def write1(off, nbytes, loc, warp, lane=None, sync=False, async_=False, bar=None):
+def write1(
+    off, nbytes, loc, warp, lane=None, sync=False, async_=False, bar=None, leader=False
+):
     e = ev(
         "smem_write",
         loc,
@@ -133,6 +136,8 @@ def write1(off, nbytes, loc, warp, lane=None, sync=False, async_=False, bar=None
         e["async"] = True
     if bar is not None:  # a landing's mbarrier slot (index 0)
         e["bar"], e["idx"] = bar, c(0)
+        if leader:  # in the pair leader's CTA
+            e["leader"] = True
     return e
 
 
@@ -454,6 +459,116 @@ def landing():
                   tensors=[src])  # fmt: skip
 
 
+# ------------------------------------------------------------- a pair's landings
+
+
+def pair_chain():
+    """A 2-CTA cluster, a cta_group::2 chain: per tile i of T a producer of each CTA waits
+    `empty` and loads 1024 bytes into its CTA's buffer [0, 1024) on the pair leader's `full`
+    (a cta_group::2 TMA load, `leader`; only rank 0 expects the bytes of both CTAs and
+    arrives); rank 0's MMA role waits `full` and commits on `done` of both CTAs; each CTA's
+    bias role waits `done` and arrives on `empty`, and after its loop bulk-stores the buffer.
+    MODE: 0 as described (each landing names the leader's slot: complete before the store by
+    `full`'s bytes, PASS); 1 the landings name no slot (issued before the store only in the
+    lock reading, by the bytes of `full`: undecided, not FAIL); 2 the bias role stores before
+    its last `done` wait (the last load may still land: FAIL F1); 3 no pair leader: each CTA's
+    loads complete on its own `full`, which its own MMA role waits (PASS)."""
+    f = "pair_chain.py"
+    i = var("i")
+    t = var("T")
+    rank = b("urem", {"e": "pid", "axis": 0, "w": 32}, c(2))
+    r0 = cmp("eq", rank, c(0))
+    w0 = c(0)
+
+    def load(leader):
+        e = ev("tma_load", f"{f}:6", desc="src", coords=[c(0)], bar="full", idx=c(0))
+        if leader:
+            e["leader"] = True
+        return e
+
+    landing = [
+        if_(mode_is(3), [write1(c(0), 1024, f"{f}:6", w0, async_=True, bar="full"), load(False)],
+            [if_(mode_is(1), [write1(c(0), 1024, f"{f}:6", w0, async_=True)],
+                 [write1(c(0), 1024, f"{f}:6", w0, async_=True, bar="full", leader=True)], f"{f}:6"),
+             load(True)], f"{f}:6"),
+    ]  # fmt: skip
+    expect = if_(mode_is(3), [ev("expect_tx", f"{f}:4", bar="full", idx=c(0), bytes=c(1024)),
+                              arrive("full", f"{f}:4")],
+                 [when(r0, [ev("expect_tx", f"{f}:4", bar="full", idx=c(0), bytes=c(2048)),
+                            arrive("full", f"{f}:4")], f"{f}:4")], f"{f}:4")  # fmt: skip
+    prod = [
+        for_("i", c(0), t, [wait("empty", b("xor", b("urem", i, c(2)), c(1)), f"{f}:3"), expect]
+             + landing, f"{f}:2"),
+    ]  # fmt: skip
+    commit_done = ev("commit_arrive", f"{f}:12", bar="done", idx=c(0))
+    commit_both = dict(commit_done, cta_mask=c(3))
+    mma = [
+        if_(mode_is(3), [for_("i", c(0), t, [wait("full", b("urem", i, c(2)), f"{f}:11"), commit_done], f"{f}:10")],
+            [when(r0, [for_("i", c(0), t, [wait("full", b("urem", i, c(2)), f"{f}:11"), commit_both],
+                            f"{f}:10")], f"{f}:10")], f"{f}:10"),
+    ]  # fmt: skip
+    step = [wait("done", b("urem", i, c(2)), f"{f}:21"), arrive("empty", f"{f}:22")]
+    out = [store(c(0), 1024, f"{f}:24", kind="bulk"), commit(f"{f}:24")]
+    last = [
+        wait("done", b("urem", b("sub", t, c(1)), c(2)), f"{f}:26"),
+        arrive("empty", f"{f}:26"),
+    ]
+    bias = [
+        if_(mode_is(2), [for_("i", c(0), b("sub", t, c(1)), step, f"{f}:20")] + out + last,
+            [for_("i", c(0), t, step, f"{f}:20")] + out, f"{f}:20"),
+        bwait(0, True, f"{f}:28"),
+    ]  # fmt: skip
+    src = {"name": "src", "kind": "desc", "elem_bytes": 4, "shape": [c(256)],
+           "strides": [c(1)], "box": [256], "segments": None, "role": "input",
+           "metadata": False}  # fmt: skip
+    roles = [role("prod", 1, prod), role("mma", 1, mma), role("bias", 1, bias)]
+    inputs = [
+        inp("leader_slot_2", MODE=0, T=2),
+        inp("leader_slot_3", MODE=0, T=3),
+        inp("no_slot_3", MODE=1, T=3),
+        inp("store_early_3", MODE=2, T=3),
+        inp("own_cta_3", MODE=3, T=3),
+    ]
+    k = kernel("pair_chain", roles, inputs, ("MODE", "T"), grid=2,
+               barriers=(("full", 1), ("done", 1), ("empty", 1)), tensors=[src])  # fmt: skip
+    k["cluster"] = [2, 1, 1]
+    return k
+
+
+def blocked():
+    """Role a writes 16 bytes of shared memory [0, 16) that role b's bulk store reads, with
+    no happens-before between them. MODE 0: a writes after a wait on `never`, which nothing
+    arrives on (the ledger finds it blocked: in the lockstep model the write never runs, so
+    the pair is undecided, U4, not FAIL); 1: no such wait (FAIL F1)."""
+    f = "blocked.py"
+    a_body = [when(mode_is(0), [wait("never", c(0), f"{f}:2")], f"{f}:2"),
+              write1(c(0), 16, f"{f}:3", c(0))]  # fmt: skip
+    b_body = [store(c(0), 1024, f"{f}:10", warp=1, kind="bulk"), commit(f"{f}:10"),
+              bwait(0, True, f"{f}:11")]  # fmt: skip
+    inputs = [inp("after_blocked_wait", MODE=0), inp("no_wait", MODE=1)]
+    return kernel("blocked", [role("a", 1, a_body), role("b", 1, b_body)], inputs, ("MODE",),
+                  barriers=(("never", 1),))  # fmt: skip
+
+
+def blocked_cross():
+    """Two CTAs without clusters, one 1-warp role: CTA 0's lane 0 stores through the
+    tensormap at scratch+0 and waits for it, CTA 1 writes that tensormap (no happens-before
+    across clusters). MODE 0: CTA 1 writes after a wait on `never`, which nothing arrives on
+    (the ledger finds it blocked: in the lockstep model the write never runs, so the pair is
+    undecided, U4, not FAIL); 1: no such wait (FAIL F2)."""
+    f = "blocked_cross.py"
+    body = [
+        if_(cmp("eq", {"e": "pid", "axis": 0, "w": 32}, c(0)),
+            [store(c(0), 1024, f"{f}:2", lane=0, tmap=c(0, 64)), commit(f"{f}:2"),
+             bwait(0, True, f"{f}:3")],
+            [when(mode_is(0), [wait("never", c(0), f"{f}:5")], f"{f}:5"),
+             tmapw(c(0, 64), 0, f"{f}:6")], f"{f}:1"),
+    ]  # fmt: skip
+    inputs = [inp("after_blocked_wait", MODE=0), inp("no_wait", MODE=1)]
+    return kernel("blocked_cross", [role("w", 1, body)], inputs, ("MODE",), grid=2,
+                  barriers=(("never", 1),))  # fmt: skip
+
+
 # ------------------------------------------------------------ another CTA's write
 
 
@@ -482,7 +597,7 @@ def cluster_remote():
 
 def main():
     for k in (staging(), staging_wide(), tmap_rebuild(), handoff(), same_thread(), landing(),
-              cluster_remote()):  # fmt: skip
+              pair_chain(), blocked(), blocked_cross(), cluster_remote()):  # fmt: skip
         (HERE / f"{k['kernel']}.kir.json").write_text(json.dumps(k, indent=1) + "\n")
 
 

@@ -8,6 +8,8 @@ tmap_rebuild NOTES unfixed_1 P1-2 1
 tmap_rebuild NOTES fixed_3 P1-2 1
 tmap_rebuild P1: P1-2: 2 bulk store(s), 258 write(s), 1 unordered conflicting pair(s) (1 undecided)
 handoff 2 named-barrier slot(s), 0 blocked wait(s)
+blocked_cross UNDECIDED after_blocked_wait P1-2
+blocked_cross !UNDECIDED no_wait
 same_thread NOTES never_completed P1-2 1
 same_thread !F1: the write at same_thread.py:8
 same_thread !F1: the write at same_thread.py:23

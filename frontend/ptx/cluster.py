@@ -76,8 +76,10 @@ Events (the legacy frontend's, references/frontend_cute.md "Clusters"):
   * TMA load .multicast::cluster [dst], [tmap, {...}], [mbar], m: `cta_mask` m; with
     .cta_group::2 and a Peer mbarrier also `leader`. The box is the descriptor's (the
     hardware box: the legacy frontend's slice of a multicast descriptor's tile).
-  * cp.async.bulk.shared::cluster.shared::cta [dst], [src], n, [mbar] with dst and mbar
-    Remotes of one CTA: a `complete_tx` of n bytes on that CTA's slot, per issuing thread.
+  * cp{.reduce}.async.bulk.shared::cluster.shared::cta [dst], [src], n, [mbar] with dst
+    and mbar Remotes of one CTA: a `complete_tx` of n bytes on that CTA's slot, per
+    issuing thread (a reduce combines the source into the destination: ISA
+    cp.reduce.async.bulk, complete-tx of the size).
   * st.async / red.async .shared::cluster.mbarrier::complete_tx::bytes [dst], v, [mbar]
     with dst and mbar Remotes of one CTA: a `complete_tx` of the access's bytes on that
     CTA's slot per executing thread (a per-thread instruction: no issuing question).
@@ -350,7 +352,9 @@ def load_slot(tr: Translator, i) -> tuple:
 
 def bulk_s2cluster(tr: Translator, i) -> None:
     """cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes [dst], [src],
-    n, [mbar]: complete_tx(n) on the slot of mbar's CTA, which must be dst's."""
+    n, [mbar] and the reduce cp.reduce.async.bulk.shared::cluster.shared::cta.mbarrier::
+    complete_tx::bytes.op.type (same operands): complete_tx(n) on the slot of mbar's CTA,
+    which must be dst's."""
     _several(tr, i, "a shared::cluster bulk copy")
     dst, bar = _address(tr, i.operands[0]), _address(tr, i.operands[3])
     if not (isinstance(dst, Remote) and isinstance(bar, Remote)):

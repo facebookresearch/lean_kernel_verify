@@ -336,6 +336,35 @@ class TtgirProbe(unittest.TestCase):
         self.assertEqual(list(self.tmp.glob("*.nb.json")), [])
 
 
+class TtgirP1Geometry(unittest.TestCase):
+    """translate_p1: with a preferred cluster geometry also the all-preferred P1 KIR,
+    `<spec>@cluster<dims>.p1.json` (as translate's P0 KIRs)."""
+
+    def test_p1_kir_per_geometry(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        rec = {"cluster": [2, 1, 1], "grid": [8, 1, 1],
+               "attrs": {"preferred_cluster": [4, 1, 1]}}  # fmt: skip
+        dump = {"specs": {"s": {}},
+                "inputs": [{"name": "i", "launches": [{"spec": "s", "launch": rec}]}]}  # fmt: skip
+        (tmp / "dump.json").write_text(json.dumps(dump))
+        calls = []
+
+        def build(where, d, key, case, geometry=None, p1=False):
+            calls.append((key, geometry, p1))
+            return {"p1": ["P1-2"], "geometry": geometry}
+
+        with (
+            mock.patch.object(ttgir_to_kir, "build_ptx", build),
+            mock.patch.object(ttgir_to_kir.kir_contract, "validate", lambda k: []),
+        ):
+            results = ttgir_to_kir.translate_p1(tmp / "dump.json", {})
+        self.assertEqual(calls, [("s", None, True), ("s", (4, 1, 1), True)])
+        self.assertEqual(sorted(results), ["s", "s@cluster4x1x1"])
+        written = json.loads((tmp / "s@cluster4x1x1.p1.json").read_text())
+        self.assertEqual(written["geometry"], [4, 1, 1])
+
+
 class CuteProbe(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

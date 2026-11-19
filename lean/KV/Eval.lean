@@ -667,7 +667,7 @@ def execEvent : Event → M Unit
       | some e => some <$> evalTExpr loc e
     let os ← activeOffsets loc offs m
     let rank := (← read).rank
-    let sl ← slot.mapM fun (b, i) => slotOf loc b i rank
+    let sl ← slot.mapM fun (b, i, leader) => slotOf loc b i (if leader then rank - rank % 2 else rank)
     emit loc (.smemWrite who sync async (← ctaOf loc "smem_write" cta) sym
       (os.map fun o => (o, o + bytes)) sl)
   | .tmap_write base addr warp loc => do

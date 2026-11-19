@@ -297,8 +297,9 @@ class Tma:
             return self._replace(tr, i, mn)
         if mn.startswith("tensormap.cp_fenceproxy"):
             return self._cp_fenceproxy(tr, i, mn)
-        if mn.startswith("cp.async.bulk.shared::cluster.shared"):  # into another CTA
-            return cluster.bulk_s2cluster(tr, i)
+        if mn.startswith(("cp.async.bulk.shared::cluster.shared",
+                          "cp.reduce.async.bulk.shared::cluster.shared")):  # fmt: skip
+            return cluster.bulk_s2cluster(tr, i)  # into another CTA
         if "multicast" in mn and not mn.startswith("cp.async.bulk.tensor"):
             tr.fail(i, f"{mn} (gap: a multicast bulk copy, as in the CuTe frontend)")
         if ".global.mbarrier" in mn:  # a load: into the issuing CTA (cluster.py)

@@ -2361,29 +2361,44 @@ def translate(dump_path: Path, case: dict) -> dict:
     return results
 
 
+def _preferred_or_none(dump: dict, key: str) -> tuple | None:
+    """preferred_geometry, None where it fails (the P0 KIR's translation reports why)."""
+    try:
+        return preferred_geometry(dump, key)
+    except KirError:
+        return None
+
+
 def translate_p1(dump_path: Path, case: dict) -> dict:
-    """The P1 pass (module doc): {spec: P1 KIR, None (no bulk store) or the exception that
-    refused it}; writes <spec>.p1.json for each P1 KIR."""
+    """The P1 pass (module doc): {name: P1 KIR, None (no bulk store) or the exception that
+    refused it} per specialization and, with a preferred cluster geometry, also for the
+    all-preferred geometry (`<spec>@cluster<dims>`, as translate); writes <name>.p1.json
+    for each P1 KIR."""
     dump = json.loads(dump_path.read_text())
     results: dict[str, dict | Exception | None] = {}
     for key in dump["specs"]:
-        try:
-            kir = build_ptx(dump_path.parent, dump, key, case, p1=True)
-            violations = [] if kir is None else kir_contract.validate(kir)
-            if violations:
-                raise KirError(f"P1 KIR contract (frontend/kir.py): {'; '.join(violations[:5])}",
-                               kind="error")  # fmt: skip
-        except (KirError, SliceError, OpError, ParseError) as e:
-            results[key] = e
-            continue
-        except Exception as e:  # noqa: BLE001 - the P1 pass never stops the P0 KIR
-            results[key] = KirError(
-                f"P1 pass internal error: {type(e).__name__}: {e}", kind="error"
-            )
-            continue
-        if kir is not None:
-            (dump_path.parent / f"{key}.p1.json").write_text(json.dumps(kir))
-        results[key] = kir
+        pref = _preferred_or_none(dump, key)
+        todo = [(key, None)] + (
+            [] if pref is None else [(key + geometry_suffix(pref), pref)]
+        )
+        for name, geometry in todo:
+            try:
+                kir = build_ptx(dump_path.parent, dump, key, case, geometry, p1=True)
+                violations = [] if kir is None else kir_contract.validate(kir)
+                if violations:
+                    raise KirError(f"P1 KIR contract (frontend/kir.py): {'; '.join(violations[:5])}",
+                                   kind="error")  # fmt: skip
+            except (KirError, SliceError, OpError, ParseError) as e:
+                results[name] = e
+                continue
+            except Exception as e:  # noqa: BLE001 - the P1 pass never stops the P0 KIR
+                results[name] = KirError(
+                    f"P1 pass internal error: {type(e).__name__}: {e}", kind="error"
+                )
+                continue
+            if kir is not None:
+                (dump_path.parent / f"{name}.p1.json").write_text(json.dumps(kir))
+            results[name] = kir
     return results
 
 

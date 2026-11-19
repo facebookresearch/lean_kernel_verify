@@ -456,6 +456,30 @@ class TmaLoad(unittest.TestCase):
             f = run(PRE + TMA + pre + load("%r9", mods), tmap=True, **kw)
             self.assertIn(why, refusal(f), pre)
 
+    def test_landing_names_the_leader_slot(self):
+        # P1-2: the landing of a cta_group::2 load into a store's source names the pair
+        # leader's mbarrier (its bytes complete there: `leader`), as its tma_load does
+        store = (
+            "    @%p4 cp.async.bulk.tensor.2d.global.shared::cta.bulk_group"
+            " [%rd2, {%r7, %r7}], [%r6];\n    @%p4 cp.async.bulk.commit_group;\n"
+        )
+        body = (
+            PRE
+            + TMA
+            + "    and.b32 %r12, %r4, 254;\n    mapa.shared::cluster.u32 %r9, %r2, %r12;\n"
+        )
+        f = run(body + load("%r9", ".cta_group::2") + store, tmap=True, p1=["P1-2"])
+        self.assertEqual(f.refusals, [])
+        (x,) = [e for e in events(f, "smem_write") if e.get("async")]
+        (ld,) = events(f, "tma_load")
+        self.assertEqual(
+            (x["bar"], x["idx"], x.get("leader")), (ld["bar"], ld["idx"], True)
+        )
+        # a load on the own mbarrier names it without `leader`
+        f = run(PRE + TMA + load() + store, tmap=True, p1=["P1-2"])
+        (x,) = [e for e in events(f, "smem_write") if e.get("async")]
+        self.assertEqual((x["bar"], "leader" in x), ("mbar_0", False))
+
     def test_cta_group_2_on_the_own_mbarrier(self):
         f = run(PRE + TMA + load("%r2", ".cta_group::2"), tmap=True)
         self.assertEqual(f.refusals, [])
@@ -552,6 +576,24 @@ class BulkS2Cluster(unittest.TestCase):
             (c["bar"], c["bytes"], resolved(f, c["cta"])), ("mbar_0", const(512), PEER)
         )
         self.assertEqual(kir_errors(f), [])
+
+    def test_reduce(self):
+        # cp.reduce.async.bulk .shared::cluster: complete-tx of the size, as the copy
+        red = S2C.replace(
+            "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes",
+            "cp.reduce.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes"
+            ".add.u32",
+        )
+        f = run(PRE + red.format(bar_rank="%r5", bar="%r12"))
+        self.assertEqual(f.refusals, [])
+        (c,) = events(f, "complete_tx")
+        self.assertEqual(
+            (c["bar"], c["bytes"], resolved(f, c["cta"])), ("mbar_0", const(512), PEER)
+        )
+        self.assertIn(
+            "completing on another's mbarrier",
+            refusal(run(PRE + red.format(bar_rank="%r4", bar="%r12"))),
+        )
 
     def test_refusals(self):
         for kw, why, cl in [

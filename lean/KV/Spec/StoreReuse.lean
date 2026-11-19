@@ -51,8 +51,13 @@ elected lane of the warp), and X before S if X is t's own or a warp-synchronizin
 Lock reading (FAIL vs undecided): waits at `lockPhase` and needs of at least the largest
 fitting lockstep share (`SlotLedger.lockNeeds`), as P1-1, a named barrier that is not exact
 needing of each role what the other roles' arrivals leave of its count (`NamedSlot.needs`),
-and every credited arrival taken as every thread's of its role (`all`). A pair it cannot order is unordered under every fitting
-share assignment and whatever threads issue the arrives.
+bytes carry order (a wait that returned for phase k saw the bytes of phases 1..k land, so the
+loads that brought them were issued before it returned: each role's loads on the slot up to
+its lockstep share of those bytes, its load bytes spread evenly over the slot's completed
+phases, `loadsCoverLock`), and every credited arrival or load taken as every thread's of its
+role (`all`). A pair it cannot order is unordered under every fitting share assignment,
+whatever threads issue the arrives, with each role's loads bringing its share of each
+phase's bytes.
 
 Decision. P1-2 holds iff every conflicting pair is ordered in the sound reading. FAIL (F1, F2):
 a pair unordered even in the lock reading that no same-thread order the KIR cannot pin down
@@ -62,12 +67,18 @@ ordered were it t's own (a `bar.warp.sync`, which the KIR drops, orders the memo
 the lanes taking part), nor when X is a warp-synchronizing write of t's warp after W (U2); F2
 also a tensormap that a store of one cluster reads and another cluster writes (no
 happens-before across clusters). Undecided: U1 a pair ordered only in the lock reading; U2;
-U3 an asynchronous write (a load's landing) issued before the store in the sound reading whose
-landing is not known to precede the store's issue (below); an F pair in a cluster with a named
-barrier used with two counts or whose ledger does not converge; a stopped role trace.
+U3 an asynchronous write (a load's landing) issued before the store in the sound reading, or
+in the lock reading (its landing may then complete before the store reads), whose landing is
+not known to precede the store's issue (below); U4 a pair unordered even in the lock reading
+(also a tensormap pair of two clusters) whose store or write follows a wait the P1 ledger
+finds blocked in its role (`firstBlocked`: in the lockstep model that event never runs, so the
+pair may never run); an F pair in a
+cluster with a named barrier used with two counts or whose ledger does not converge; a
+stopped role trace.
 
 Landings (`landed`). A load's landing X issued before S is ordered before S if the bytes of
-its mbarrier slot show it complete before S is issued: X's load t (the role's next
+its mbarrier slot (in X's CTA, or for a cta_group::2 load in its pair leader's) show it
+complete before S is issued: X's load t (the role's next
 transaction event on X's slot, only global accesses between) is among the loads that may
 land before the return of a wait W on that slot that surely returned before S is issued
 (`returnCuts`: positions from which every event surely follows W's return), and those loads
@@ -154,12 +165,52 @@ structure Ctx where
   writes : Array Write
   /-- Waits the ledger finds blocked: (role, loc). -/
   blocked : Array (Nat × Loc)
+  /-- Per role, the trace position of its first wait the ledger finds blocked (its trace
+  size if none): the role's later events do not run in the lockstep model. -/
+  firstBlocked : Array Nat
   /-- Per role, the closure before its point after k of its waits, k = 0, 1, ...
   (sound reading; computed only for roles with stores or writes). -/
   sound : Array (Array Hb)
   /-- The same in the lock reading (computed only if some pair is unordered soundly). -/
   lock : Thunk (Array (Array Hb))
   deriving Inhabited
+
+/-- Arrivals of `rs` that can count toward phases 1..k of its slot: those before its first
+wait on the slot whose sound phase bound is at least k (it returns only after phase k
+completed, and so do the role's events after it), else all. -/
+def contrib (rs : RoleSlot) (k : Int) : Int :=
+  match rs.waits.find? (·.minPhase ≥ k) with
+  | some w => rs.arrivedBefore w.pos
+  | none => rs.total
+
+/-- Expect_tx bytes that phases 1..k of the slot surely hold: each role's expect_tx issued
+before the last of its arrivals those phases surely hold, which are `k x count` minus what
+the other roles can contribute to them (`contrib`), or `SlotLedger.needs` if larger (an
+expect_tx applies to the phase current at its issue, at most its role's next arrival's). -/
+def bytesIn (L : SlotLedger) (k : Int) : Int :=
+  L.roles.zipIdx.foldl (init := 0) fun acc (rs, i) =>
+    let others := L.roles.zipIdx.foldl (init := 0) fun n (o, j) => if j == i then n else n + contrib o k
+    let need := max (k * L.count - others) (L.needs i k false)
+    rs.tx.foldl (init := acc) fun acc x => if !x.load && x.arrivedBefore < need then acc + x.bytes else acc
+
+/-- Lock reading, bytes carry order (module doc): the trace position after the load of `rs`
+on slot `L` that completes its lockstep share of the bytes of phases 1..k, its load bytes
+spread evenly over the slot's completed phases (after its last load if the share needs them
+all; 0 if it has no load or no phase completes). -/
+def loadsCoverLock (L : SlotLedger) (rs : RoleSlot) (k : Int) : Nat := Id.run do
+  let K := L.completions
+  if K ≤ 0 || k ≤ 0 then return 0
+  let total : Int := rs.tx.foldl (fun n x => if x.load then n + x.bytes else n) 0
+  if total ≤ 0 then return 0
+  let kk := min k K
+  let mut acc : Int := 0
+  let mut last := 0
+  for x in rs.tx do
+    if x.load then
+      acc := acc + x.bytes
+      last := x.pos + 1
+      if acc * K ≥ kk * total then return last
+  return last
 
 /-- Grow `h` to a fixpoint over the waits inside its `done` prefixes (module doc). -/
 def saturate (named : Array NamedSlot) (exact : Array Bool) (ledger : Array SlotLedger)
@@ -202,6 +253,14 @@ def saturate (named : Array NamedSlot) (exact : Array Bool) (ledger : Array Slot
             let (one, _) := creditArrivals rs.arrivals 1 (fun _ => 1) m
             done := done.modify rs.role (max · one)
             if lockstep then all := all.modify rs.role (max · one)
+          if lockstep then
+            -- bytes carry order (module doc, "Lock reading"): the loads that brought the
+            -- bytes of phases 1..k were issued before the wait returned
+            for rs in l.roles do
+              let q := loadsCoverLock l rs k
+              if q > 0 then
+                done := done.modify rs.role (max · q)
+                all := all.modify rs.role (max · q)
     if !changed then break
   return ({ done, all }, applied)
 
@@ -298,11 +357,7 @@ def build (cl : ClusterTrace) (L : Array SlotLedger) (nkr : Nat) (ctaThreads : O
   let croles := cl.roles nr
   let n := croles.size
   let (named, nwaits) := namedOf croles nr
-  -- every participating thread syncs once per phase: the roles' threads make the count, or
-  -- the count is the CTA's (every thread of it takes part, idle warps included)
-  let exact := named.map fun ns =>
-    ns.consistent && ns.roles.all (·.syncOnly) &&
-      (ns.roles.foldl (· + ·.threads) 0 == ns.count || ctaThreads.map Int.ofNat == some ns.count)
+  let exact := named.map (·.exact ctaThreads)
   let sizes := croles.map (·.events.size)
   let merged (bound : WaitRec → Int) : Array (Array PWait) :=
     let mbar := waitBounds L n bound
@@ -316,9 +371,11 @@ def build (cl : ClusterTrace) (L : Array SlotLedger) (nkr : Nat) (ctaThreads : O
   let wanted := (Array.range n).map fun r => stores.any (·.role == r) || writes.any (·.role == r)
   let blocked := L.foldl (init := #[]) fun acc l => l.roles.foldl (init := acc) fun acc rs =>
     rs.waits.foldl (init := acc) fun acc w => if w.blocked.isSome then acc.push (rs.role, w.loc) else acc
+  let firstBlocked := L.foldl (init := sizes) fun acc l => l.roles.foldl (init := acc) fun acc rs =>
+    rs.waits.foldl (init := acc) fun acc w => if w.blocked.isSome then acc.modify rs.role (min · w.pos) else acc
   let waits := merged (·.minPhase)
   let ws := WaitsBySlot.of (waitBounds L n (·.minPhase))
-  { pid := cl.cid, roles := croles, ledger := L, named, exact, waits, ws, sizes, stores, writes, blocked,
+  { pid := cl.cid, roles := croles, ledger := L, named, exact, waits, ws, sizes, stores, writes, blocked, firstBlocked,
     sound := closures named exact L waits false wanted,
     lock := Thunk.mk fun _ => closures named exact L (merged (·.lockPhase)) true wanted }
 
@@ -351,42 +408,31 @@ def conflicts (s : Store) (x : Write) : Bool :=
     | none => false
   else x.cta == s.cta && x.sym == s.sym && overlaps s.lo s.hi x.ranges
 
+/-- `s` completes before `x`: its completing wait happened in every thread executing `x`
+(`bx`: the closure before `x`; `sm`: `same s x`). -/
+def completesBefore (C : Ctx) (bx : Hb) (sm : Same) (s : Store) (x : Write) : Bool :=
+  s.done < C.sizes[s.role]! && (bx.all[s.role]! > s.done || (sm == .sure && s.done < x.pos))
+
+/-- `x` is issued before `s` (`bs`: the closure before `s`; `sm`: `same s x`), counting the
+issuer's own program order as `Same` allows. -/
+def issuedBeforeWith (bs : Hb) (sm : Same) (s : Store) (x : Write) : Bool :=
+  bs.all[x.role]! > x.pos || ((sm == .sure || sm == .lanes) && x.pos < s.pos)
+
 /-- `x` is issued before `s` under the closures `H`, counting the issuer's own program order
 as `Same` allows. -/
 def issuedBefore (C : Ctx) (H : Array (Array Hb)) (s : Store) (x : Write) : Bool :=
-  let sm := same s x
-  (before C H s.role s.pos).all[x.role]! > x.pos || ((sm == .sure || sm == .lanes) && x.pos < s.pos)
+  issuedBeforeWith (before C H s.role s.pos) (same s x) s x
 
-/-- Arrivals of `rs` that can count toward phases 1..k of its slot: those before its first
-wait on the slot whose sound phase bound is at least k (it returns only after phase k
-completed, and so do the role's events after it), else all. -/
-def contrib (rs : RoleSlot) (k : Int) : Int :=
-  match rs.waits.find? (·.minPhase ≥ k) with
-  | some w => rs.arrivedBefore w.pos
-  | none => rs.total
-
-/-- Expect_tx bytes that phases 1..k of the slot surely hold: each role's expect_tx issued
-before the last of its arrivals those phases surely hold, which are `k x count` minus what
-the other roles can contribute to them (`contrib`), or `SlotLedger.needs` if larger (an
-expect_tx applies to the phase current at its issue, at most its role's next arrival's). -/
-def bytesIn (L : SlotLedger) (k : Int) : Int :=
-  L.roles.zipIdx.foldl (init := 0) fun acc (rs, i) =>
-    let others := L.roles.zipIdx.foldl (init := 0) fun n (o, j) => if j == i then n else n + contrib o k
-    let need := max (k * L.count - others) (L.needs i k false)
-    rs.tx.foldl (init := acc) fun acc x => if !x.load && x.arrivedBefore < need then acc + x.bytes else acc
-
-/-- The landing `x` completed before `s` is issued under the closures `H` (module doc,
-"Landings"): its load, the first transaction event of `x`'s role on `x`'s slot after it with
-only global accesses between, may land before the return of a wait on that slot that surely
-returned before `s` is issued (the last such wait of each role is tried), and the loads that
-may land before that return bring no more bytes than its phase bound surely needs. -/
-def landed (C : Ctx) (H : Array (Array Hb)) (s : Store) (x : Write) : Bool := Id.run do
-  let some sl := x.slot | return false
+/-- The ledger slot of the landing `x` and the position of its load: the first transaction
+event of `x`'s role on `x`'s slot after it, with only global accesses between (module doc,
+"Landings"); none if `x` names no slot or no such load. -/
+def landingLoad (C : Ctx) (x : Write) : Option (Nat × Nat) := Id.run do
+  let some sl := x.slot | return none
   let some si := C.ledger.findIdx? fun l => l.slot.bar == sl.bar && l.slot.idx == sl.idx && l.slot.cta == sl.cta
-    | return false
+    | return none
   let L := C.ledger[si]!
-  let some rs := L.roles.find? (·.role == x.role) | return false
-  let some t := rs.tx.find? fun t => t.load && t.pos > x.pos | return false
+  let some rs := L.roles.find? (·.role == x.role) | return none
+  let some t := rs.tx.find? fun t => t.load && t.pos > x.pos | return none
   let evs := (C.roles[x.role]?.map (·.events)).getD #[]
   let between := (List.range (t.pos - x.pos - 1)).all fun d =>
     match evs[x.pos + 1 + d]? with
@@ -394,26 +440,49 @@ def landed (C : Ctx) (H : Array (Array Hb)) (s : Store) (x : Write) : Bool := Id
       | Ev.gload _ _ => true
       | _ => false
     | none => false
-  if !between then return false
-  let hb := before C H s.role s.pos
+  return if between then some (si, t.pos) else none
+
+/-- The wait at position `p` of role `r` on ledger slot `si`, with phase bound `k`, shows the
+loads that may land before its return complete (module doc, "Landings"): `returnCuts` of its
+return, and whether the loads before those cuts bring no more bytes than phases 1..k surely
+hold. -/
+def landingWait (C : Ctx) (si r p : Nat) (k : Int) : Array Nat × Bool :=
+  let L := C.ledger[si]!
+  let cuts := returnCuts C.ledger C.ws C.sizes r p
+  (cuts, 0 < k && L.landedBefore cuts ≤ bytesIn L k)
+
+/-- The waits on ledger slot `si` that the landing test of a store tries (`hb`: the closure
+before the store): per role, its last wait on the slot that surely returned before the store
+is issued, as (role, position, phase bound). -/
+def landingWaits (C : Ctx) (si : Nat) (hb : Hb) : Array (Nat × Nat × Int) := Id.run do
+  let mut out := #[]
   for r in [0:C.ws.size] do
     for (s', xs) in C.ws[r]! do
       if s' != si then continue
-      let some (p, k) := (xs.filter fun (p, _) => p < hb.done[r]!).back? | continue
-      let cuts := returnCuts C.ledger C.ws C.sizes r p
-      if 0 < k && t.pos < cuts[x.role]! && L.landedBefore cuts ≤ bytesIn L k then
-        return true
+      if let some (p, k) := (xs.filter fun (p, _) => p < hb.done[r]!).back? then
+        out := out.push (r, p, k)
+  return out
+
+/-- The landing `x` completed before `s` is issued under the closures `H` (module doc,
+"Landings"): its load (`landingLoad`) may land before the return of a wait on that slot that
+surely returned before `s` is issued (the last such wait of each role is tried), and the
+loads that may land before that return bring no more bytes than its phase bound surely
+needs (`landingWait`). -/
+def landed (C : Ctx) (H : Array (Array Hb)) (s : Store) (x : Write) : Bool := Id.run do
+  let some (si, t) := landingLoad C x | return false
+  for (r, p, k) in landingWaits C si (before C H s.role s.pos) do
+    let (cuts, bytes) := landingWait C si r p k
+    if t < cuts[x.role]! && bytes then
+      return true
   return false
 
 /-- `s` and `x` are ordered under the closures `H` (module doc), counting the issuer's own
 program order as `Same` allows. -/
 def ordered (C : Ctx) (H : Array (Array Hb)) (s : Store) (x : Write) : Bool :=
-  let sm := same s x
-  -- s completes before x: its completing wait happened in every thread executing x
-  let sx := s.done < C.sizes[s.role]! &&
-    ((before C H x.role x.pos).all[s.role]! > s.done || (sm == .sure && s.done < x.pos))
-  -- x happens before s is issued (an asynchronous write: its landing, `landed`)
-  sx || (!x.async && issuedBefore C H s x) || (x.async && landed C H s x)
+  -- s completes before x, or x happens before s is issued (an asynchronous write: its
+  -- landing, `landed`)
+  completesBefore C (before C H x.role x.pos) (same s x) s x ||
+    (!x.async && issuedBefore C H s x) || (x.async && landed C H s x)
 
 /-- The issuer's own program order might order the pair, which the KIR cannot pin down (U2):
 the write may be the issuer's (`maybe`), or it is another lane's of the issuer's warp, which a
@@ -436,31 +505,129 @@ inductive PairKind where
   /-- U3: an asynchronous write issued before the store (sound reading) that may land after
   the store reads: its landing is not known to precede the store's issue (`landed`). -/
   | landing
+  /-- U4: unordered in the lock reading, but the store or the write follows a wait the
+  ledger finds blocked in its role (`Ctx.firstBlocked`): in the lockstep model it never runs. -/
+  | blocked
   deriving BEq, Inhabited
 
-/-- The conflicting pairs not ordered in the sound reading: (store, write, kind). -/
+/-- The kind of an unordered conflicting pair (`PairKind`). -/
+def pairKind (C : Ctx) (s : Store) (x : Write) : PairKind :=
+  if x.async && issuedBefore C C.sound s x then .landing
+  else if ordered C C.lock.get s x then .lockOnly
+  else if x.async && issuedBefore C C.lock.get s x then .landing
+  else if maybeOrdered C s x then .maybeSame
+  else if s.pos > C.firstBlocked[s.role]! || x.pos > C.firstBlocked[x.role]! then .blocked
+  else .fail
+
+/-- Per symbol, the union `[lo, hi)` of the byte ranges `xs` (symbol, lo, hi). -/
+def unionBySym (xs : Array (String × Int × Int)) : Array (String × Int × Int) :=
+  xs.foldl (init := #[]) fun acc (sym, lo, hi) =>
+    match acc.findIdx? (·.1 == sym) with
+    | some j => acc.modify j fun (s', a, b) => (s', min a lo, max b hi)
+    | none => acc.push (sym, lo, hi)
+
+def Same.index : Same → Nat
+  | .sure => 0 | .maybe => 1 | .no => 2 | .lanes => 3 | .otherLane => 4
+
+/-- The conflicting pairs not ordered in the sound reading, (store, write, kind), by store
+then write: the pairs with `conflicts s x && !ordered C C.sound s x`, found without trying
+every pair. The stores of one role and issuing thread form a group, in program order, on
+which `same s x` is constant for a write `x`. On a group, the stores that complete before `x`
+(`completesBefore`) are a prefix: `Store.done` does not decrease in program order (a wait
+that completes a store's group completes every earlier group of its thread). For a
+non-asynchronous `x`, those `x` is issued before (`issuedBeforeWith`) are a suffix: the
+closure before a point grows with the point (`closures`). So only the stores between the two
+bounds are tried. The writes come role by role in program order, and both bounds only grow
+with the write's position (a later write has a larger closure before it, and fewer stores are
+issued after it), so they are cursors per group and `same` value, reset at each role; a
+group none of whose stores can conflict with `x` (its CTA, symbols and byte ranges, or its
+tensormaps) is skipped. A landing tries every store after the prefix, its `landed` test
+sharing the cuts of each wait it tries (`landingWait`) over all pairs. -/
 def pairs (C : Ctx) : Array (Nat × Nat × PairKind) := Id.run do
-  let mut out := #[]
+  let H := C.sound
+  let mut keys : Array (Nat × Who) := #[]
+  let mut groups : Array (Array Nat) := #[]
   for (s, i) in C.stores.zipIdx do
-    for (x, j) in C.writes.zipIdx do
-      if conflicts s x && !ordered C C.sound s x then
-        let k := if x.async && issuedBefore C C.sound s x then .landing
-          else if ordered C C.lock.get s x then .lockOnly
-          else if maybeOrdered C s x then .maybeSame else .fail
-        out := out.push (i, j, k)
-  return out
+    match keys.findIdx? (· == (s.role, s.who)) with
+    | some g => groups := groups.modify g (·.push i)
+    | none =>
+      keys := keys.push (s.role, s.who)
+      groups := groups.push #[i]
+  let bs : Array Hb := C.stores.map fun s => before C H s.role s.pos
+  -- per group: its CTA, the union of its sources per symbol, of its tensormaps per buffer
+  let gcta : Array Nat := groups.map fun g => C.stores[g[0]!]!.cta
+  let gsrc : Array (Array (String × Int × Int)) :=
+    groups.map fun g => unionBySym (g.map fun i => let s := C.stores[i]!; (s.sym, s.lo, s.hi))
+  let gtm : Array (Array (String × Int × Int)) :=
+    groups.map fun g => unionBySym (g.filterMap fun i => (C.stores[i]!.tmap).map fun (b, a) => (b, a, a + 128))
+  let may (gi : Nat) (x : Write) : Bool :=
+    if x.tmap then gtm[gi]!.any fun (b, lo, hi) => b == x.sym && overlaps lo hi x.ranges
+    else gcta[gi]! == x.cta && gsrc[gi]!.any fun (sym, lo, hi) => sym == x.sym && overlaps lo hi x.ranges
+  let fresh : Array (Nat × Nat) := Array.replicate (5 * groups.size) (0, 0)
+  let mut cur := fresh
+  let mut role := C.roles.size
+  let mut wk := 0
+  let mut memo : Std.HashMap (Nat × Nat) (Array Nat × Bool) := {}
+  let mut out : Array (Nat × Nat × PairKind) := #[]
+  for (x, j) in C.writes.zipIdx do
+    if x.role != role then
+      role := x.role
+      cur := fresh
+      wk := 0
+    -- the closure before x (`before`): after the role's waits before it
+    let ws := C.waits[x.role]!
+    while wk < ws.size && ws[wk]!.1 < x.pos do
+      wk := wk + 1
+    let bx := H[x.role]![wk]!
+    let load := if x.async then landingLoad C x else none
+    for gi in [0:groups.size] do
+      if !may gi x then continue
+      let g := groups[gi]!
+      let sm := same C.stores[g[0]!]! x
+      let ci := 5 * gi + sm.index
+      let (lo0, hi0) := cur[ci]!
+      let mut lo := lo0
+      while lo < g.size && completesBefore C bx sm C.stores[g[lo]!]! x do
+        lo := lo + 1
+      let mut hi := hi0
+      while hi < g.size && !issuedBeforeWith bs[g[hi]!]! sm C.stores[g[hi]!]! x do
+        hi := hi + 1
+      cur := cur.set! ci (lo, hi)
+      let last := if x.async then g.size else hi
+      for k in [lo:last] do
+        let i := g[k]!
+        let s := C.stores[i]!
+        if !conflicts s x then continue
+        -- `ordered C H s x`: the prefix and suffix are out of [lo, last); a landing's test
+        let mut ord := false
+        if let some (si, t) := load then
+          for (r, p, kb) in landingWaits C si bs[i]! do
+            let w ← match memo.get? (r, p) with
+              | some w => pure w
+              | none =>
+                let w := landingWait C si r p kb
+                memo := memo.insert (r, p) w
+                pure w
+            if t < w.1[x.role]! && w.2 then
+              ord := true
+              break
+        if !ord then
+          out := out.push (i, j, pairKind C s x)
+  return out.qsort fun a b => a.1 < b.1 || (a.1 == b.1 && a.2.1 < b.2.1)
 
 /-- The tensormap pairs of two clusters (no happens-before across clusters): per cluster of
 `Cs` its stores' tensormaps and its tensormap writes. -/
 def crossPairs (Cs : Array Ctx) : Array (Nat × Nat × Nat × Nat) := Id.run do
+  -- per cluster, the indices of its tensormap writes (few), in order
+  let tw : Array (Array Nat) := Cs.map fun D => (D.writes.zipIdx.filter (·.1.tmap)).map (·.2)
   let mut out := #[]
   for (C, a) in Cs.zipIdx do
     for (s, i) in C.stores.zipIdx do
       if s.tmap.isSome then
         for (D, b) in Cs.zipIdx do
           if a != b then
-            for (x, j) in D.writes.zipIdx do
-              if x.tmap && conflicts s x then out := out.push (a, i, b, j)
+            for j in tw[b]! do
+              if conflicts s D.writes[j]! then out := out.push (a, i, b, j)
   return out
 
 /-! ## Decision -/
@@ -523,6 +690,7 @@ def pairIssue (h : Host) (C : Ctx) (i j : Nat) (k : PairKind) (extra : Nat) : Is
         s!"{x.describe h C} and the {s.describe h C}: ordered only if a bar.warp.sync of their warp orders the write with the store's issuing thread (another lane of its warp), which the KIR does not keep (bar.warp.sync orders the memory accesses of the lanes taking part)"
       else s!"{x.describe h C} and the {s.describe h C}: ordered only if the store's issuing thread itself executes the write in program order, which the KIR does not pin down (an elected lane and a fixed lane of one warp, or a warp-collective write after the completing wait)"
     | .landing => s!"{x.describe h C} and the {s.describe h C}: the asynchronous copy is issued before the store, but may land after the store reads (its mbarrier's bytes do not show it complete before the store is issued)"
+    | .blocked => s!"{x.describe h C} and the {s.describe h C}: unordered even under the lockstep reading, but {if s.pos > C.firstBlocked[s.role]! then "the store" else "the write"} follows a wait the P1 ledger finds blocked (it never returns in the lockstep model: P0-2), so the pair may never run"
   -- an undecided pair is no counterexample, also beside certain ones (a FAIL's lines)
   let tag := if k == .fail then "" else "not decided on this input: "
   { loc := x.loc, context := s!"{ctxName h C} roles {h.gRoleName C.pid s.role} / {h.gRoleName C.pid x.role}", msg := tag ++ msg ++ more }
@@ -589,7 +757,8 @@ def analyze (r : Run) (Ls : Ledgers) : P2Out := Id.run do
     ok := ok && ps.isEmpty
     certain := certain || (why.isNone && !fails.isEmpty)
     issues := issues ++ und ++ fails
-    let u := pairIssues h C ps .lockOnly ++ pairIssues h C ps .maybeSame ++ pairIssues h C ps .landing
+    let u := pairIssues h C ps .lockOnly ++ pairIssues h C ps .maybeSame ++ pairIssues h C ps .landing ++
+      pairIssues h C ps .blocked
     undec := undec ++ u
     nund := nund + (ps.filter (·.2.2 != .fail)).size
     -- N1: stores never completed; N2: blocked waits
@@ -608,17 +777,24 @@ def analyze (r : Run) (Ls : Ledgers) : P2Out := Id.run do
     nnamed := nnamed + C.named.size
     incons := incons ++ bad.map (·.id)
     nblocked := nblocked + C.blocked.size
-  -- tensormaps shared by two clusters: no happens-before at all (certain)
+  -- tensormaps shared by two clusters: no happens-before at all (certain, but U4 after a
+  -- blocked wait)
   for (a, i, b, j) in crossPairs Cs do
     let C := Cs[a]!
     let D := Cs[b]!
     let s := C.stores[i]!
     let x := D.writes[j]!
     ok := false
-    certain := true
     npairs := npairs + 1
-    issues := issues.push { loc := x.loc, context := s!"{ctxName h C} / {ctxName h D}",
-                            msg := s!"F2: {x.describe h D} (in {ctxName h D}) while the {s.describe h C} (in {ctxName h C}) may still read it: no happens-before across clusters" }
+    let context := s!"{ctxName h C} / {ctxName h D}"
+    let pair := s!"{x.describe h D} (in {ctxName h D}) while the {s.describe h C} (in {ctxName h C}) may still read it: no happens-before across clusters"
+    if s.pos > C.firstBlocked[s.role]! || x.pos > D.firstBlocked[x.role]! then
+      nund := nund + 1
+      undec := undec.push { loc := x.loc, context,
+                            msg := s!"not decided on this input: {pair}, but {if s.pos > C.firstBlocked[s.role]! then "the store" else "the write"} follows a wait the P1 ledger finds blocked (it never returns in the lockstep model: P0-2), so the pair may never run" }
+    else
+      certain := true
+      issues := issues.push { loc := x.loc, context, msg := s!"F2: {pair}" }
   if !undec.isEmpty then
     let first := undec[0]?
     let head : Array Issue := if certain then #[] else

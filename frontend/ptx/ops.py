@@ -367,7 +367,9 @@ _ROWS = [
         "event",
         "bulk copy (ISA: cp.async.bulk, cp.reduce.async.bulk): g2s/reduce per issuing "
         "thread, s2g deduplicated per warp (tma.py, measured per ptxas version); "
-        ".add.noftz (f16/bf16) only keeps subnormals: still an add",
+        ".add.noftz (f16/bf16) only keeps subnormals: still an add; a shared::cluster "
+        "reduce into another CTA completes its n bytes on that CTA's mbarrier like the "
+        "shared::cluster copy (cluster.py)",
         [
             "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes",
             "cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes"
@@ -377,7 +379,11 @@ _ROWS = [
             "cp.async.bulk.global.shared.bulk_group",
             "cp.reduce.async.bulk.global.shared.bulk_group.add.noftz",
         ]
-        + [f"cp.reduce.async.bulk.global.shared.bulk_group.{op}" for op in _RED_OPS],
+        + [f"cp.reduce.async.bulk.global.shared.bulk_group.{op}" for op in _RED_OPS]
+        + [
+            f"cp.reduce.async.bulk.shared::cluster.shared.mbarrier::complete_tx::bytes.{op}"
+            for op in _RED_OPS
+        ],
     ),
     (
         "drop",

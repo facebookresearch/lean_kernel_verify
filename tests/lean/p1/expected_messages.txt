@@ -34,3 +34,5 @@ cluster_pair cluster_pair.py:21: cluster (0,0,0) roles mma of cta (0,0,0) / drai
 cluster_pair and the latest drain of cta (1,0,0) event surely before tcgen05.mma is none
 ledger_cycle ?: cta (0,0,0): not decided on this input: the barrier ledger of this CTA does not converge
 ledger_cycle lc.py:40: cta (0,0,0) roles a / e: tcgen05.st at lc.py:40 (role a, warp 0) writes lanes [0,32) x cols [0,4); tcgen05.ld at lc.py:52 (role e, warp 4) reads lanes [0,32) x cols [0,4): unordered, even under the lockstep reading
+named_idle named_idle.py:22: cta (0,0,0) roles a / b: tcgen05.st at named_idle.py:22 (role b, warp 4) writes lanes [0,32) x cols [0,32); tcgen05.ld at named_idle.py:10 (role a, warp 0) reads lanes [0,32) x cols [0,32): unordered, even under the lockstep reading
+named_idle named_idle.py:22: cta (0,0,0) roles a / b: not decided on this input: 1 conflicting pair(s) of TMEM accesses are ordered only under the ledger's lockstep contents

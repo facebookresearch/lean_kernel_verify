@@ -553,6 +553,49 @@ def named_bars():
     )
 
 
+def named_idle():
+    """named_bars' roles in a CTA of 128 threads (KIR `cta_threads`, P1-1 with P1-2): the
+    other 64 threads are idle warps the KIR has no role for, which take part in a CTA-wide
+    barrier. Role a loads cols [0, 32) of quarter 0, role b stores there. MODE 0: both
+    bar.sync id 1 with count 128 twice, a loading and b storing between (exact: phase 1 is
+    each role's first bar.sync, unordered: FAIL; counting the count, a's both bar.syncs
+    would be credited); 1: as 0, a loading before its first bar.sync (PASS); 2: a bar.arrive,
+    b bar.sync, count 64 (not exact, so with idle warps ordered only in the lock reading:
+    undecided); 3: both bar.sync with count 64, the roles' threads (exact, PASS)."""
+    f = "named_idle.py"
+    ld = [tmem("ld", c(0), [rect("data", False, c(0), 32, c(0), 32)], f"{f}:10"),
+          twait(True, f"{f}:11")]  # fmt: skip
+    st = [tmem("st", c(4), [rect("data", True, c(0), 32, c(0), 32)], f"{f}:22"),
+          twait(False, f"{f}:23")]  # fmt: skip
+    wide = [nbar(1, 128, True, f"{f}:12")]
+    a_body = [
+        if_(mode_is(0), wide + ld + wide, [], f"{f}:12"),
+        if_(mode_is(1), ld + wide + wide, [], f"{f}:12"),
+        if_(mode_is(2), ld + [nbar(1, 64, False, f"{f}:13")], [], f"{f}:13"),
+        if_(mode_is(3), ld + [nbar(1, 64, True, f"{f}:14")], [], f"{f}:14"),
+    ]
+    b_body = [
+        if_(cmp("sle", var("MODE"), c(1)), [nbar(1, 128, True, f"{f}:20")] + st
+            + [nbar(1, 128, True, f"{f}:24")], [], f"{f}:20"),
+        if_(cmp("sge", var("MODE"), c(2)), [nbar(1, 64, True, f"{f}:21")] + st, [], f"{f}:21"),
+    ]  # fmt: skip
+    roles = [role("a", 1, a_body), role("b", 1, b_body)]
+    k = kernel(
+        "named_idle",
+        roles,
+        [],
+        [
+            inp("cta_wide_between", M=0, MODE=0),
+            inp("cta_wide_before", M=0, MODE=1),
+            inp("arrive_sync_idle", M=0, MODE=2),
+            inp("roles_count", M=0, MODE=3),
+        ],
+    )
+    k["p1"] = ["P1-1", "P1-2"]
+    k["cta_threads"] = 128
+    return k
+
+
 def same_role():
     """Same-role hazards of the MMA warp. MODE 0: cp [80, 84) then an MMA reading SF at 80
     and an MMA A read [0, 8) then an MMA D write there (pipelined, no note); 1: cp then cp
@@ -1166,6 +1209,7 @@ FIXTURES = {
     "split_drain": split_drain,
     "lockstep_only": lockstep_only,
     "named_bars": named_bars,
+    "named_idle": named_idle,
     "same_role": same_role,
     "cross_warp": cross_warp,
     "partial_issue": partial_issue,

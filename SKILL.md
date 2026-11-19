@@ -192,10 +192,11 @@ a role is issued by all its warps.
 
 | P1  | Spec | FAIL / undecided | NOTE |
 | --- | ---- | ---------------- | ---- |
-| 2   | Async store sources reuse ordered: every write of shared memory overlapping the source of a bulk async store (`cp.async.bulk.tensor` / `cp.reduce.async.bulk.tensor` / `cp{.reduce}.async.bulk` global <- shared::cta, bulk_group), and every write of the tensormap of an in-kernel descriptor it reads (`tensormap.cp_fenceproxy`), is ordered: issued after a `cp.async.bulk.wait_group{.read}` of the store's issuing thread completed its group (`.read` covers the tensormap read: PTX ISA, `wait_group`) and that wait happens before it (mbarrier and exact named-barrier happens-before, the issuer's program order), or happens before the store is issued | F1 a shared-memory write, F2 a tensormap write (also one by another cluster), unordered even in the lockstep reading; undecided: U1 ordered only in the lockstep reading, U2 by an issuer program order the KIR does not pin down, U3 a load's landing issued before the store | N1 a store its issuer never waits for; N2 a blocked wait |
+| 2   | Async store sources reuse ordered: every write of shared memory overlapping the source of a bulk async store (`cp.async.bulk.tensor` / `cp.reduce.async.bulk.tensor` / `cp{.reduce}.async.bulk` global <- shared::cta, bulk_group), and every write of the tensormap of an in-kernel descriptor it reads (`tensormap.cp_fenceproxy`), is ordered: issued after a `cp.async.bulk.wait_group{.read}` of the store's issuing thread completed its group (`.read` covers the tensormap read: PTX ISA, `wait_group`) and that wait happens before it (mbarrier and exact named-barrier happens-before, the issuer's program order), or happens before the store is issued | F1 a shared-memory write, F2 a tensormap write (also one by another cluster), unordered even in the lockstep reading; undecided: U1 ordered only in the lockstep reading, U2 by an issuer program order the KIR does not pin down, U3 a load's landing issued before the store, U4 a store or write after a wait the ledger finds blocked | N1 a store its issuer never waits for; N2 a blocked wait |
 
 Decided on the P1 KIR `<spec>.p1.json` the TTGIR frontend writes under
-LKV_FRONTEND=ptx for a specialization with a bulk store (`frontend_ptx.md`, "P1-2
+LKV_FRONTEND=ptx for a specialization with a bulk store, one per cluster
+geometry (`<spec>@cluster<dims>.p1.json`: all clusters preferred) (`frontend_ptx.md`, "P1-2
 pass"; top-level `p1: ["P1-2"]`), reported with P1-1 in the P1 section (FAIL and
 UNDECIDED count only with `--p1-strict`). A refused P1-2 translation is "not checked"
 with its reason; the legacy TTGIR translation and the CuTe frontend do not check it.

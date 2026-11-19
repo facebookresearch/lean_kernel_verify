@@ -210,6 +210,22 @@ class RemoteWrite(unittest.TestCase):
         self.assertEqual((x["bytes"], x.get("async"), "cta" in x), (512, True, True))
         self.assertEqual(kir_errors(f), [])
 
+    def test_reduce_into_the_peer(self):
+        # a bulk reduce into the peer (ISA cp.reduce.async.bulk .shared::cluster) writes
+        # its destination bytes as the copy does
+        body = self.BODY.replace(
+            "cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes",
+            "cp.reduce.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes"
+            ".max.s32",
+        )
+        f = run(body, family="cute", threads=32, cluster=(2, 1, 1), **P12)
+        self.assertEqual((f.refusals, f.p1), ([], ["P1-2"]))
+        (c,) = events(f, "complete_tx")
+        self.assertEqual(c["bytes"]["v"], 512)
+        (x,) = events(f, "smem_write")
+        self.assertEqual((x["bytes"], x.get("async"), "cta" in x), (512, True, True))
+        self.assertEqual(kir_errors(f), [])
+
 
 class Refusals(unittest.TestCase):
     def test_group_not_executed_by_the_issuer(self):

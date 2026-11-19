@@ -21,10 +21,13 @@
 #      `!`-prefixed ones (texts that must be absent, and lines other than counterexamples
 #      and notes, e.g. summaries and NOTES counts).
 # 3. The same for every tests/lean/p1/*.kir.json fixture (P1 KIR, P1-1 TMEM reuse ordered;
-#    written by p1/make_fixtures.py) against p1/expected.txt (one P1-1 column),
+#    written by p1/make_fixtures.py; its P1-1 lines, the KIR may name P1-2 too) against
+#    p1/expected.txt (one P1-1 column),
 #    p1/expected_messages.txt and p1/report_checks.txt, and for every
 #    tests/lean/p1_2/*.kir.json fixture (P1-2 async store sources reuse ordered; written by
-#    p1_2/make_fixtures.py) against p1_2/expected.txt (one P1-2 column) and its message files.
+#    p1_2/make_fixtures.py) against p1_2/expected.txt (one P1-2 column) and its message files;
+#    and p1_2/pairs_eq.py: on every input of those fixtures, StoreReuse.pairs (the cursor
+#    search) finds exactly the pairs of its definition.
 # 4. The same for every tests/lean/nb/*.kir.json fixture (P0-6 KIR, named barriers
 #    convergent; written by nb/make_fixtures.py) against nb/expected.txt (one P0-6 column),
 #    nb/expected_messages.txt and nb/report_checks.txt.
@@ -102,7 +105,7 @@ for f in "$P1"/*.kir.json; do
   "$S/scripts/run_lean_check.sh" "$OUT/p1_$n.lean" >"$OUT/p1_$n.out" 2>&1
   status=$?
   want="$(awk -v f="$n" '$1 == f { printf "VERDICT %s P1-1 %s\n", $2, $3 }' "$P1/expected.txt" | sort)"
-  got="$(grep '^VERDICT ' "$OUT/p1_$n.out" | sort)"
+  got="$(grep '^VERDICT [^ ]* P1-1 ' "$OUT/p1_$n.out" | sort)"
   if [[ -z "$want" ]]; then
     bad "p1/$n: no rows in p1/expected.txt"
     continue
@@ -177,6 +180,8 @@ for f in "$P12"/*.kir.json; do
     fi
   done < <(grep -v '^#' "$P12/report_checks.txt")
 done
+python3 -I "$P12/pairs_eq.py" "$OUT/p1_2_pairs" "$P12"/*.kir.json ||
+  bad "p1_2: StoreReuse.pairs differs from its definition (pairs_eq.py)"
 
 # P0-6 fixtures: one P0-6 verdict per input (KV.runNb, theorem KV.Holds .namedBarriers).
 NB="$T/nb"

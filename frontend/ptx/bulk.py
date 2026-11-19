@@ -403,14 +403,16 @@ def landed_on(st: State, i, use) -> None:
 
 
 def _slot_of(e: dict, holder) -> None:
-    """The landing `e`'s `bar` and `idx`: those of its load's tma_load, if that is one event
-    on an mbarrier of the issuing CTA (not wrapped by a select between arrays, no
-    `cta_mask`, `leader` or `cta`)."""
+    """The landing `e`'s `bar`, `idx` and `leader`: those of its load's tma_load, if that is
+    one event on an mbarrier of the issuing CTA or (`leader`, a cta_group::2 load) of its
+    pair leader (not wrapped by a select between arrays, no `cta_mask` or `cta`)."""
     use = None if holder is None else holder.get("use")
     ev = None if use is None else use.event
     if (ev is not None and ev.get("op") == "event" and ev.get("ev") == "tma_load"
-            and ev.get("bar") is not None and not {"cta", "cta_mask", "leader"} & ev.keys()):  # fmt: skip
+            and ev.get("bar") is not None and not {"cta", "cta_mask"} & ev.keys()):  # fmt: skip
         e["bar"], e["idx"] = ev["bar"], ev["idx"]
+        if ev.get("leader"):
+            e["leader"] = True
 
 
 def tmap(st: State, tr, i, dst) -> None:

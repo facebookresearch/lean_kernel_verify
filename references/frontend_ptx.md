@@ -365,7 +365,7 @@ Coordinates, footprints, transaction bytes, issuing threads, sub-byte formats:
   commits (`cta_mask`), cta_group::2 loads completing on the pair leader's mbarrier
   (`leader`: CuTe's peer-bit mask, TLX's `mapa` of `rank & 254`), `st.async` /
   `red.async` into another CTA (`complete_tx` per executing thread), shared::cluster bulk
-  copies (`complete_tx`) and the cluster barrier follow `ir_ops_ptx.md`, "Thread barriers
+  copies and reduces (`complete_tx`) and the cluster barrier follow `ir_ops_ptx.md`, "Thread barriers
   and clusters". P0-2 and P0-4 decide one barrier ledger per cluster. Which CTA's data a
   copy carries is not checked. TLX 2-CTA kernels: the cluster barrier is reached by every
   role, the worker regions arrive on it at their end (the padding warps too, which
@@ -390,6 +390,10 @@ Coordinates, footprints, transaction bytes, issuing threads, sub-byte formats:
   mix if they hold in both;
   P0-3 counts writes over the whole grid and holds for a mix only if every aligned group
   of CTAs writes the same elements in both geometries, which is not checked (Limits).
+  P1-2 has a KIR per geometry too (`<spec>@cluster<dims>.p1.json`); it decides each
+  cluster on its own except a tensormap that one cluster's stores read and another
+  cluster writes (F2 across clusters), so it holds for every mix if it holds in both,
+  except that cross-cluster check, which pairs only clusters of one geometry (Limits).
   CLC with a preferred geometry is refused. If the launches disagree on the preferred
   dims, the all-preferred geometry is the refused variant `<spec>@cluster` (a gap for
   every input of the specialization) and the regular KIR is still checked.
@@ -465,7 +469,9 @@ TLX/Triton kernels have no P1-1 pass: report.json lists their variants' P1-1 as
 Under LKV_FRONTEND=ptx the TTGIR frontend translates every specialization's PTX a second
 time with policy `p1` `["P1-2"]` (`frontend/ptx/bulk.py`, `ir_ops_ptx.md`, "P1-2") into
 the P1 KIR `<spec>.p1.json`: the P0 events plus the P1-2 events and `named_bar`
-(`kir.md` change 15: top-level `p1: ["P1-2"]` and `cta_threads`, the block's threads).
+(`kir.md` change 15: top-level `p1: ["P1-2"]` and `cta_threads`, the block's threads); with a preferred cluster
+geometry also `<spec>@cluster<dims>.p1.json`, all clusters preferred ("Clusters, tcgen05,
+CLC").
 A specialization without a bulk store is `not_applicable`; a refusal or failure is
 logged as `P1 refused|error: <why>` and leaves its P1-2 "not checked"; the P0 KIR and
 its verdicts never change (`LKV_P1=0` skips the pass). The roles are split as the CuTe
@@ -494,8 +500,9 @@ through a mapa address: `async` with `cta`, the destination's rank). The landing
 TMA or bulk load names its load's mbarrier (`bar`, `idx`: the slot of the one
 `tma_load` the translation emits for it, right after it in the role's trace with only
 its footprint `gload` between), which lets P1-2 order the landing before a later store
-through that mbarrier's bytes (`specs.md` P1-2); a later message of a Triton block (no
-`tma_load` of its own), a load completing on another CTA's mbarrier or one whose
+through that mbarrier's bytes (`specs.md` P1-2); a cta_group::2 load completing on its
+pair leader's mbarrier names that slot with `leader`, as its `tma_load` does; a later
+message of a Triton block (no `tma_load` of its own), a multicast load or one whose
 mbarrier is a select between arrays names none.
 `tensormap.cp_fenceproxy` is a `tmap_write` of each executing warp. Shared symbols:
 every `.extern .shared` variable starts at the dynamic shared memory, so all of them are
@@ -659,10 +666,11 @@ assembly rerolls LLVM's unrolled blocks into `for` loops (the same trace).
   lifetime are not checked.
 * Preferred cluster geometries are checked all-preferred and all-regular (P0-6 too); P0-3 of a launch
   that mixes them is covered only where both geometries write the same elements per
-  preferred-size group of CTAs, which is not checked ("Clusters, tcgen05, CLC").
+  preferred-size group of CTAs, which is not checked, and P1-2's tensormap check across
+  clusters only between clusters of one geometry ("Clusters, tcgen05, CLC").
 * Refused by design: CuTe CLC, P1-1 on TLX, TMEM addresses relative
   to the allocation, multicast bulk copies, multicast or cta_group::2 TMA loads and
-  shared::cluster bulk copies that several lanes of a warp may execute (issuing not
+  shared::cluster bulk copies and reduces that several lanes of a warp may execute (issuing not
   measured, `ir_ops_ptx.md`), im2col TMA, packed sub-byte TLX descriptors, descriptors
   edited in global memory, `mbarrier.inval` outside
   a private synchronous cycle, carry-flag instructions under a predicate, generic writes

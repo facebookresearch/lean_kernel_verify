@@ -189,6 +189,11 @@ def p1_2(name):
         return json.load(f)
 
 
+def drop(e, *fields):  # the event without `fields`
+    for f in fields:
+        e.pop(f)
+
+
 def first(
     k, ev, field=None
 ):  # the first event `ev` (with `field`) of the KIR (depth first)
@@ -703,6 +708,18 @@ P1_2_MUTATIONS = [
         "a landing's mbarrier without its index",
         lambda k: first(k, "smem_write", "bar").pop("idx"),
         "bar and idx name the mbarrier of an async landing",
+    ),
+    (
+        "pair_chain",
+        "a landing's leader without its mbarrier slot",
+        lambda k: drop(first(k, "smem_write", "leader"), "bar", "idx"),
+        "bar and idx name the mbarrier of an async landing",
+    ),
+    (
+        "pair_chain",
+        "a landing's leader that is no boolean",
+        lambda k: first(k, "smem_write", "leader").update(leader=1),
+        "leader",
     ),
     (
         "staging",

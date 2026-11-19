@@ -36,8 +36,9 @@ export write fbsource PATHs at REV under OUT_DIR with read-only `sl files`/`sl c
 P1 specs: P1-1 (TMEM reuse ordered, CuTe only) and P1-2 (async store sources reuse
 ordered, the PTX translation of TLX/Triton kernels). The CuTe frontend also writes a P1
 KIR per variant (`<kernel>__<digest>.p1.json`, P1-1), the TTGIR frontend under
-LKV_FRONTEND=ptx one per specialization with a bulk store (`<spec>.p1.json`, P1-2; its
-top-level "p1" names the specs it decides); run checks it like a P0 KIR (unless --no-p1)
+LKV_FRONTEND=ptx one per specialization with a bulk store (`<spec>.p1.json`, P1-2, and
+for a preferred cluster geometry `<spec>@cluster<dims>.p1.json`, as P0; its top-level "p1"
+names the specs it decides); run checks it like a P0 KIR (unless --no-p1)
 and reports its verdicts in a section of their own and in report.json "variants_p1" /
 "totals_p1" / "p1_not_checked" (refused, failed or not applicable P1 translations, each
 with the P1 specs it concerns; P1-1 of TTGIR variants is "not checked", and so is P1-2
@@ -464,8 +465,9 @@ def run_ttgir(case_path, root, fe, logs, sel, target, jobs=1):
 
 
 def ttgir_p1(dump, fe, logs):
-    """The P1-2 KIRs the TTGIR frontend wrote (`<spec>.p1.json`, LKV_FRONTEND=ptx); the
-    specializations without one go to P1_NOT_CHECKED with to_kir's `P1 ...` log line."""
+    """The P1-2 KIRs the TTGIR frontend wrote (`<spec>.p1.json`, LKV_FRONTEND=ptx; with a
+    preferred cluster geometry also `<spec>@cluster<dims>.p1.json`); the specializations
+    (geometries) without one go to P1_NOT_CHECKED with to_kir's `P1 ...` log line."""
     lines = (logs / "to_kir.log").read_text().splitlines()
     status = {}
     for line in lines:
@@ -474,7 +476,15 @@ def ttgir_p1(dump, fe, logs):
             status[m.group(1)] = (m.group(2), m.group(3))
     ptx = any("LKV_FRONTEND=ptx" in x for x in lines)
     kirs = []
-    for k in dump["specs"]:
+    specs = list(dump["specs"])
+    # a specialization's all-preferred cluster geometry too (`<spec>@cluster<dims>`, as P0)
+    geo = {n for n in status if "@" in n and n.split("@")[0] in dump["specs"]}
+    geo |= {
+        p.name.removesuffix(".p1.json")
+        for k in specs
+        for p in fe.glob(f"{k}@*.p1.json")
+    }
+    for k in specs + sorted(geo):
         if (fe / f"{k}.p1.json").exists():
             kirs.append(fe / f"{k}.p1.json")
             continue
@@ -491,7 +501,7 @@ def ttgir_p1(dump, fe, logs):
                 "variant": k,
                 "kernel": dump["kernel"],
                 "inputs": [i["name"] for i in dump["inputs"]
-                           if any(la["spec"] == k for la in i.get("launches", []))],
+                           if any(la["spec"] == k.split("@")[0] for la in i.get("launches", []))],
                 "status": st,
                 "error": why,
                 "specs": ["P1-2"],

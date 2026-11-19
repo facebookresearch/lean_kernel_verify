@@ -242,7 +242,9 @@ def event(s):
     if ev == "smem_write":
         mask = "none" if s["mask"] is None else f"(some {texpr(s['mask'])})"
         slot = (
-            "none" if "bar" not in s else f"(some ({lstr(s['bar'])}, {expr(s['idx'])}))"
+            "none"
+            if "bar" not in s
+            else f"(some ({lstr(s['bar'])}, {expr(s['idx'])}, {lbool(s.get('leader', False))}))"
         )
         return ctor(ev, lstr(s["sym"]), texpr(s["offsets"]), mask, str(s["bytes"]),
                     expr(s["warp"]), opt_expr(s.get("lane")), lbool(s.get("sync", False)),

@@ -36,6 +36,10 @@ named_bars             bar_sync                    PASS
 named_bars             bar_arrive_sync             PASS
 named_bars             no_barrier                  FAIL
 named_bars             inconsistent                FAIL
+named_idle             cta_wide_between            FAIL
+named_idle             cta_wide_before             PASS
+named_idle             arrive_sync_idle            FAIL
+named_idle             roles_count                 PASS
 same_role              pipelined                   PASS
 same_role              cp_cp                       PASS
 same_role              mma_d_cp                    PASS

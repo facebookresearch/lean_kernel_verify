@@ -569,9 +569,14 @@ Named barriers: the j-th `bar.sync` of a role on id b waits for phase j of b,
 and phase k needs `k x count - sum over the other roles o of cap_o(k)` arrivals
 of a role, with `cap_o(k) = min(total_o, k x threads_o)` if o only uses bar.sync
 on b (a thread blocked in bar.sync arrives at most once per phase) and `total_o`
-if o uses bar.arrive. With every participant using bar.sync and their threads
-summing to the count this is exact; a named barrier id used with two counts
-orders nothing.
+if o uses bar.arrive. That count assumes every arriving thread is a role's. A
+P1 KIR with `cta_threads` above its roles' threads (a TLX/Triton kernel's idle
+padding warps, which join a CTA-wide barrier) uses P1-2's rule: a named barrier
+whose participants all use bar.sync with one count, their threads summing to it
+or the count `cta_threads`, completes phase k with exactly the k-th bar.sync of
+every participant (`NamedSlot.exact`: for a CuTe KIR, which has no
+`cta_threads`, the same credit as the count above); another one orders only
+under `lock`. A named barrier id used with two counts orders nothing.
 
 **Decision.** Two accesses of different roles conflict when some pair of their
 rectangles overlaps in lanes and columns and one of them writes. A conflicting
@@ -624,7 +629,8 @@ PASS), and the persistent-handoff and split-role variants around them
 
 Decided on a P1 KIR whose top-level `p1` names P1-2 (`kir.md` change 15; the
 TTGIR frontend writes `<spec>.p1.json` under LKV_FRONTEND=ptx for every
-specialization with a bulk store, `frontend_ptx.md` "P1-2 pass") per input, over
+specialization with a bulk store, and `<spec>@cluster<dims>.p1.json` for a preferred
+cluster geometry, `frontend_ptx.md` "P1-2 pass") per input, over
 the clusters (a CTA without clusters) whose role traces are all complete.
 `#eval KV.runP1 kernel input` prints the report; the theorem is
 `KV.Holds .storeReuse kernel input`. Like P1-1 it never changes a P0 verdict, is
@@ -667,7 +673,7 @@ before X in every thread executing X) or X happens before S is issued. An
 asynchronous write X (a load's landing) happens before S is issued only if the
 bytes of its mbarrier show it complete (`StoreReuse.landed`): X's load t (the
 role's next transaction event on the slot X names, `smem_write`'s `bar`/`idx`,
-only gload footprints between) may land before the return of a wait W on that
+in X's CTA or with `leader` in its pair leader's, only gload footprints between) may land before the return of a wait W on that
 slot that surely returned before S is issued (`returnCuts`: positions from
 which every event surely follows that return), and the loads that may land
 before that return bring no more bytes than the `expect_tx` bytes phases 1..k
@@ -706,7 +712,13 @@ lane executed it).
 The lock reading separates FAIL from undecided as P1-1's: waits at `lockPhase`,
 needs of at least the largest fitting lockstep share, named barriers that are
 not exact needing what the other roles' arrivals leave of the count, and every
-credited arrival taken as every thread's of its role.
+credited arrival taken as every thread's of its role; also bytes carry order: a
+wait that returned for phase k saw the bytes of phases 1..k land, so the loads
+that brought them were issued before it returned, each role's loads on the slot
+up to its lockstep share of those bytes (its load bytes spread evenly over the
+slot's completed phases, `StoreReuse.loadsCoverLock`), taken as every thread's.
+A landing issued before the store in the lock reading is undecided (U3), not a
+FAIL: it may complete before the store reads.
 
 **Decision.** P1-2 holds (the theorem) iff every conflicting pair is ordered in
 the sound reading and no tensormap a store of one cluster reads is written by
@@ -716,7 +728,7 @@ another cluster.
 | --------- | --------- |
 | FAIL F1   | a shared-memory write overlapping a store's source, unordered even in the lock reading, that no same-thread order the KIR cannot pin down might order |
 | FAIL F2   | the same for a write of the tensormap a store reads; also a tensormap that a store of one cluster reads and another cluster writes (no happens-before across clusters) |
-| undecided | U1 a pair ordered only in the lock reading; U2 a pair the issuing thread's own program order might order, which the KIR cannot pin down (a fixed lane of the issuer's warp and the elected issuer, or a warp-synchronizing write of its warp after the completing wait); U3 a load's landing issued before the store that its mbarrier's bytes do not show complete before the store is issued; F pairs while a named barrier id is used with two counts or in a cluster whose ledger does not converge; a stopped role trace. First line `not decided on this input` |
+| undecided | U1 a pair ordered only in the lock reading; U2 a pair the issuing thread's own program order might order, which the KIR cannot pin down (a fixed lane of the issuer's warp and the elected issuer, or a warp-synchronizing write of its warp after the completing wait); U3 a load's landing issued before the store (in the sound or the lock reading) that its mbarrier's bytes do not show complete before the store is issued; U4 a pair unordered even in the lock reading whose store or write follows a wait the P1 ledger finds blocked in its role (in the lockstep model it never runs: the pair may never run; P0-2 reports the hang); F pairs while a named barrier id is used with two counts or in a cluster whose ledger does not converge; a stopped role trace. First line `not decided on this input` |
 | NOTE N1   | a bulk store no wait of its issuing thread completes before its role ends |
 | NOTE N2   | the P1 ledger finds a blocked wait: happens-before after it is vacuous |
 
@@ -737,8 +749,8 @@ PASS wrongly); `elect.sync` electing the same lane for the same membermask (ISA
 instruction that writes shared memory is an event, refused, or provably disjoint
 from every store source); the named-barrier participants being the KIR roles'
 threads, idle warps only in a CTA-wide barrier. Not checked: the source of a
-`cp.async.bulk.shared::cluster.shared` copy into another CTA (completed through the
-destination's mbarrier, not a bulk group), the tensormap a TMA load through an
+`cp{.reduce}.async.bulk.shared::cluster.shared` copy or reduce into another CTA
+(completed through the destination's mbarrier, not a bulk group), the tensormap a TMA load through an
 in-kernel descriptor reads (a load completes through its mbarrier, not a bulk
 group), multicast loads into a store source (refused), the
 data-ready (RAW) side of an asynchronous write. Write "P1-2 holds for case C, inputs I, at REV".

@@ -1,0 +1,194 @@
+{
+ "kir_version": 1,
+ "kernel": "blocked_cross",
+ "source": "tests/lean/p1_2/blocked_cross.kir.json",
+ "ir": "ptx",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [
+  {
+   "name": "never",
+   "count": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "w",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "pid",
+       "axis": 0,
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "bulk_store",
+       "loc": "blocked_cross.py:2",
+       "kind": "tensor",
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "sym": "smem",
+       "src": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "bytes": 1024,
+       "lane": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "tmap": {
+        "base": "scratch",
+        "addr": {
+         "e": "const",
+         "v": 0,
+         "w": 64
+        }
+       }
+      },
+      {
+       "op": "event",
+       "ev": "bulk_commit",
+       "loc": "blocked_cross.py:2"
+      },
+      {
+       "op": "event",
+       "ev": "bulk_wait",
+       "loc": "blocked_cross.py:3",
+       "n": 0,
+       "read": true
+      }
+     ],
+     "else": [
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "eq",
+        "a": {
+         "e": "var",
+         "name": "MODE",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "event",
+         "ev": "wait",
+         "loc": "blocked_cross.py:5",
+         "bar": "never",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "parity": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         }
+        }
+       ],
+       "else": [],
+       "loc": "blocked_cross.py:5"
+      },
+      {
+       "op": "event",
+       "ev": "tmap_write",
+       "loc": "blocked_cross.py:6",
+       "base": "scratch",
+       "addr": {
+        "e": "const",
+        "v": 0,
+        "w": 64
+       },
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       }
+      }
+     ],
+     "loc": "blocked_cross.py:1"
+    }
+   ]
+  }
+ ],
+ "p1": [
+  "P1-2"
+ ],
+ "case": {
+  "name": "blocked_cross",
+  "inputs": [
+   {
+    "name": "after_blocked_wait",
+    "params": {
+     "MODE": 0
+    }
+   },
+   {
+    "name": "no_wait",
+    "params": {
+     "MODE": 1
+    }
+   }
+  ]
+ }
+}

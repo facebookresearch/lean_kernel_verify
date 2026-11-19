@@ -51,8 +51,14 @@ computed before every access:
 Named barriers: the j-th bar.sync of a role on id b waits for phase j of b, and phase k
 needs `k x count - sum over the other roles o of cap_o(k)` arrivals of a role, with
 `cap_o(k) = min(total_o, k x threads_o)` if o only uses bar.sync on b (a thread blocked in
-bar.sync arrives at most once per phase) and `total_o` otherwise. A named barrier used with
-two counts orders nothing.
+bar.sync arrives at most once per phase) and `total_o` otherwise. That count assumes every
+arriving thread is a role's; a KIR with `cta_threads` above its roles' threads has idle
+warps (a Triton kernel's padding warps), which may arrive on a CTA-wide barrier. So, as
+P1-2's: a named barrier whose participants all use bar.sync with one count, their threads
+summing to it or its count `cta_threads` (`NamedSlot.exact`), completes its k-th phase with
+exactly the k-th bar.sync of every participant (the same credit as the count above when no
+idle warp takes part); another one, with idle warps, orders only in `lock`. A named barrier
+used with two counts orders nothing.
 
 Decision. A conflicting cross-role pair (a, b) is ordered under a closure when a completes
 before b is issued or b before a. P1-1 holds iff every such pair is ordered under `sound`
@@ -150,6 +156,14 @@ structure NamedSlot where
 def NamedSlot.needs (s : NamedSlot) (j : Nat) (k : Int) : Int :=
   k * s.count - s.roles.zipIdx.foldl (fun acc (o, i) => if i == j then acc else acc + o.cap k) 0
 
+/-- Every participating thread syncs once per phase: bar.sync only, one count, the
+participating roles' threads making the count, or the count the CTA's (`ctaThreads`, KIR
+`cta_threads`: every thread of it takes part, idle warps the KIR has no role for included),
+so phase k completes with exactly the k-th bar.sync of every participant. -/
+def NamedSlot.exact (ns : NamedSlot) (ctaThreads : Option Nat) : Bool :=
+  ns.consistent && ns.roles.all (·.syncOnly) &&
+    (ns.roles.foldl (· + ·.threads) 0 == ns.count || ctaThreads.map Int.ofNat == some ns.count)
+
 /-- A wait in its role's program order: (trace position, named barrier?, slot index in the
 ledger or in the named slots, phase lower bound, per entry of the ledger slot's `roles` the
 arrivals that may precede its return (`mayBeforeReturn`; empty: none known)). -/
@@ -172,6 +186,10 @@ structure P1Cta where
   roles : Array RoleTrace
   ledger : Array SlotLedger
   named : Array NamedSlot
+  /-- Per named slot, `NamedSlot.exact`. -/
+  exact : Array Bool
+  /-- The CTA has threads outside the KIR's roles (KIR `cta_threads`): idle warps. -/
+  idle : Bool
   /-- Per ledger slot and entry of its `roles`: every arrival of that role is a commit. -/
   commitOnly : Array (Array Bool)
   /-- Per role, its waits at their sound phase lower bounds (`sound`). -/
@@ -214,7 +232,16 @@ def saturateP1 (C : P1Cta) (waits : Array (Array PWait)) (lockstep : Bool) (h : 
         changed := true
         if named then
           let ns := C.named[s]!
-          if ns.consistent then
+          if C.exact[s]! then
+            -- phase k is the k-th bar.sync of every participating thread
+            for nr in ns.roles do
+              match nr.arrivals[(k - 1).toNat]? with
+              | some (q, _) =>
+                done := done.modify nr.role (max · (q + 1))
+                every := every.modify nr.role (max · (q + 1))
+              | none => pure ()
+          else if ns.consistent && (!C.idle || lockstep) then
+            -- with idle warps, threads outside the roles may arrive: the lock reading only
             for (nr, j) in ns.roles.zipIdx do
               -- every thread of the role arrives: 32 per warp
               let w := C.warps[nr.role]!
@@ -257,8 +284,9 @@ def completes (a : Access) (h : Hb) : Bool :=
   if a.async then a.pos < h.landed[a.role]! else a.done < h.every[a.role]!
 
 /-- The P1 view of cluster `cl` with its barrier ledger `L` (Ledger.lean); `roleWarps` per
-kernel role. -/
-def build (cl : ClusterTrace) (L : Array SlotLedger) (roleWarps : Array Nat) : P1Cta := Id.run do
+kernel role; `ctaThreads` the KIR's `cta_threads`. -/
+def build (cl : ClusterTrace) (L : Array SlotLedger) (roleWarps : Array Nat) (ctaThreads : Option Nat := none) :
+    P1Cta := Id.run do
   let nr := max 1 roleWarps.size
   let croles := cl.roles nr
   let n := croles.size
@@ -325,7 +353,10 @@ def build (cl : ClusterTrace) (L : Array SlotLedger) (roleWarps : Array Nat) : P
   let blocked := L.foldl (init := #[]) fun acc l => l.roles.foldl (init := acc) fun acc rs =>
     rs.waits.foldl (init := acc) fun acc w => if w.blocked.isSome then acc.push (rs.role, w.loc) else acc
   let warps := (Array.range n).map fun g => roleWarps.getD (g % nr) 1
-  let C : P1Cta := { pid := cl.cid, roles := croles, ledger := L, named, commitOnly, waits := merged (·.minPhase),
+  let exact := named.map (·.exact ctaThreads)
+  let idle := ctaThreads.any (· > 32 * roleWarps.foldl (· + ·) 0)
+  let C : P1Cta := { pid := cl.cid, roles := croles, ledger := L, named, exact, idle, commitOnly,
+                     waits := merged (·.minPhase),
                      warps, sizes, syncs, accesses, sound := #[], lock := Thunk.pure #[],
                      blocked }
   let C := { C with sound := closures C C.waits false }
@@ -433,7 +464,7 @@ def ctaOk (cols : Nat) (C : P1Cta) : Bool := ctaOkWith cols C (pairs C cols)
 
 def p1Ctas (r : Run) (Ls : Ledgers) : Array P1Cta :=
   let warps := r.host.kernel.roles.toArray.map (·.warps)
-  (r.clusters.zip Ls).map fun (c, (_, L)) => build c L warps
+  (r.clusters.zip Ls).map fun (c, (_, L)) => build c L warps r.host.kernel.cta_threads
 
 def cols (r : Run) : Nat := allocCols r.host.kernel.tmem
 

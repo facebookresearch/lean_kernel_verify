@@ -572,6 +572,32 @@ class Unit(unittest.TestCase):
         self.assertIn("## Result: PASS (exit status 0)", md)
         self.assertIn("## Inputs the host code rejected", md)
 
+    def test_ttgir_p1_per_cluster_geometry(self):
+        # the P1-2 KIR of a preferred cluster geometry (<spec>@cluster<dims>.p1.json) is
+        # checked as its own variant, and a refused one is not checked, with its inputs
+        self.addCleanup(lkv_py.P1_NOT_CHECKED.clear)
+        dump = {"kernel": "k", "specs": {"s": {}, "t": {}},
+                "inputs": [{"name": "i", "launches": [{"spec": "s"}]},
+                           {"name": "j", "launches": [{"spec": "t"}]}]}  # fmt: skip
+        with tempfile.TemporaryDirectory() as d:
+            fe, logs = Path(d) / "fe", Path(d) / "logs"
+            fe.mkdir()
+            logs.mkdir()
+            for name in ("s", "s@cluster4x1x1", "t"):
+                (fe / f"{name}.p1.json").write_text("{}")
+            (logs / "to_kir.log").write_text(
+                "[to_kir] LKV_FRONTEND=ptx: translating the PTX\n"
+                "[to_kir] t@cluster4x1x1: P1 refused: a gap\n"
+            )
+            kirs = lkv_py.ttgir_p1(dump, fe, logs)
+        self.assertEqual(
+            [k.name for k in kirs], ["s.p1.json", "t.p1.json", "s@cluster4x1x1.p1.json"]
+        )
+        self.assertEqual(
+            [(x["variant"], x["status"], x["inputs"]) for x in lkv_py.P1_NOT_CHECKED],
+            [("t@cluster4x1x1", "refused", ["j"])],
+        )
+
     def test_variants_without_verdicts_by_kind(self):
         refused = {
             "variant": "k__3",

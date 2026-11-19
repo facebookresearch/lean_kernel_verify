@@ -176,7 +176,7 @@ load's cycle, whose transaction bytes P0-4 checks).
 | `cp.async.bulk.shared{::cluster}.global.mbarrier::complete_tx::bytes [dst], [g], n, [mbar]` | `gload` of the n bytes + `tma_load` of the 1-D descriptor `bulk_<T>_<n>` on mbar |
 | `cp.async.bulk.global.shared.bulk_group [g], [src], n` | `gstore` of the n bytes |
 | `cp.reduce.async.bulk.global.shared.bulk_group.<op> [g], [src], n` | `gatomic` of the n bytes (`.add.noftz` on f16/bf16 too: still an add) |
-| `cp.async.bulk.shared::cluster.shared.mbarrier::complete_tx::bytes` | `complete_tx` in another CTA ("Thread barriers and clusters") |
+| `cp{.reduce}.async.bulk.shared::cluster.shared.mbarrier::complete_tx::bytes{.<op>}` | `complete_tx` in another CTA ("Thread barriers and clusters") |
 | multicast bulk g2s, im2col / gather4 / scatter4 modes | refused |
 | `tensormap.replace.*.shared`, `tensormap.cp_fenceproxy` | an in-kernel descriptor (`frontend_ptx.md`, "TMA descriptors") |
 | `tensormap.replace.*.global` | refused (a descriptor edited in global memory: its other fields are not known) |
@@ -274,8 +274,10 @@ Clusters (both families):
 * A multicast TMA load's mask operand is the `tma_load`'s `cta_mask` (its box lands in
   every CTA of the mask); a multicast `tcgen05.commit`'s is the `commit_arrive`'s.
 * `cp.async.bulk.shared::cluster.shared...complete_tx::bytes [dst], [src], n, [mbar]`
-  with dst and mbar mapa'd into one CTA: `complete_tx(bar, n, cta)` per issuing thread
-  (the data is not modeled).
+  and the reduce `cp.reduce.async.bulk.shared::cluster.shared...complete_tx::bytes.<op>`
+  (ISA cp.reduce.async.bulk: the source combined into the destination, complete-tx of
+  the size; `<op>` and, or, xor, add, inc, dec, min, max) with dst and mbar mapa'd into
+  one CTA: `complete_tx(bar, n, cta)` per issuing thread (the data is not modeled).
 * `st.async` and `red.async` `.shared::cluster.mbarrier::complete_tx::bytes [dst], v,
   [mbar]` (ISA st.async, red.async: each executing thread's store or reduction into
   another CTA's shared memory, signalling complete-tx on the mbarrier of the destination

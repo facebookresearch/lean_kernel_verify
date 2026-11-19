@@ -48,5 +48,14 @@ landing         resolved_2                 PASS
 landing         store_before_wait_2        FAIL
 landing         load_ahead_1               FAIL
 landing         no_slot_1                  FAIL
+pair_chain      leader_slot_2              PASS
+pair_chain      leader_slot_3              PASS
+pair_chain      no_slot_3                  FAIL
+pair_chain      store_early_3              FAIL
+pair_chain      own_cta_3                  PASS
+blocked         after_blocked_wait         FAIL
+blocked         no_wait                    FAIL
+blocked_cross   after_blocked_wait         FAIL
+blocked_cross   no_wait                    FAIL
 cluster_remote  into_source                FAIL
 cluster_remote  elsewhere                  PASS
