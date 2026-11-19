@@ -239,7 +239,7 @@ cluster_dsmem_relay       uneven_copies    PASS PASS PASS FAIL PASS
 # negative_bytes: a negative complete_tx count (it cancels an excess copy) is an evaluation
 # error (unexpected), never a balanced phase.
 cluster_dsmem_relay       negative_bytes   FAIL FAIL FAIL FAIL FAIL
-# A cta_group::2 pair whose first phase also carries a prologue load (lp_fa4's backward): the
+# A cta_group::2 pair whose first phase also carries a prologue load (a CuTe DSL backward): the
 # peer's bytes per phase are 192, 64, 64, ..., matched per iteration by its waits on its empty
 # slot, which the leader's MMA releases after each phase (before, no uniform share fit 3 or more
 # phases: a certain FAIL). The peer loads half a box in iteration 1 (short_peer: phase 2 lacks
