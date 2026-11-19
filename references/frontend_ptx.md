@@ -164,9 +164,23 @@ variant must have the same block and cluster.
   are checked against `st.shared` only. Each worker runs the switch loop twice, into its
   state and into exit, so state k's role `partition<k>` is the code before the dispatch,
   one pass of the loop header and the region from target k back to the header, then
-  `ret`; `default` is warps 0..D-1. A state whose region only synchronizes (padding) has
-  no role. A failing item refuses the kernel and names the item. A branch on the warp
-  inside a role is a mask.
+  `ret`; `default` is warps 0..D-1. A state whose region only synchronizes (padding)
+  has a role only if its translation emits an event (a cluster kernel's padding warps
+  arrive on the cluster barrier, "Clusters, tcgen05, CLC"). A failing item refuses the
+  kernel and names the item. A branch on the warp inside a role is a mask.
+  The direct dispatch of Triton's single-warp-specialize lowering
+  (`tlx.async_tasks(exclusive=True)`: one warp_specialize in the module, no state bytes,
+  no switch loop) is matched too: the entry as above; the worker side's first block with
+  a fork barrier (`barrier.sync 1`, optional `setmaxnreg`, pure instructions) ends a
+  chain of branches whose conditions compare wid with an immediate (any comparison and
+  type; each later link pure, with the previous one as its only predecessor); each
+  worker warp follows the comparisons, evaluated at its warp id, to its partition's
+  first block. Every partition region has one fork barrier on every path to `ret`, the
+  default two, and the regions share no block with the default, the dispatch or the code
+  before it but the `ret` block. Roles: `default`, then `partition<k>` numbered by first
+  warp, the partitions that do more than synchronize first, padding last (Triton gives
+  larger partitions the lower warps, so k is the TTGIR partition index where the warp
+  counts do not grow in TTGIR order).
 * **CuTe DSL.** Partition refinement: a role starts as every warp of the block; a branch
   condition, mbarrier address, remote CTA rank, named-barrier id or count, or a select
   between two tensors that is uniform within each warp but differs between warps of the

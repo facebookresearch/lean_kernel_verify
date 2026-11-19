@@ -62,8 +62,38 @@ with their branches resolved to target k, the region from target k to its back e
 into the header, then `ret`. The header pass stays because the pure instructions LLVM
 puts in the header, the brx.idx block and the links (anything else there is refused)
 define registers the regions read; their second pass, into E, only precedes `ret`. A used state whose region only syncs (fork and cluster
-barriers, setmaxnreg, unconditional bra) is padding and has no role. Roles: "default" (warps
+barriers, setmaxnreg, unconditional bra) is padding (Role.padding): its warps run the
+shared code and that region, and translate.py keeps its role only if that emits an event
+(a cluster kernel's padding warps arrive on the cluster barrier). Roles: "default" (warps
 0..D-1) and "partition<k>" (the warps in state k), as the TTGIR frontend names them.
+
+Direct dispatch (Triton's single-warp-specialize lowering, `tlx.async_tasks(exclusive=
+True)`: a module with one warp_specialize, `ttg.single-warp-specialize`): no state bytes
+and no switch loop. The worker warps branch on their warp id to their partition
+directly, and every partition, padding included, ends in `ret`. Items:
+
+  entry    as above
+  header   the block the worker side reaches first that holds a fork barrier and ends in
+           a branch on a comparison of wid with an immediate (optional setmaxnreg, one
+           fork barrier, pure instructions); outside every loop
+  chain    from the header, links: a block ending in `@p bra` with p the only result of
+           `setp.cmp p, wid, imm` (any comparison and type; wid the entry's shuffle by
+           reaching definitions), holding only pure instructions besides, with the
+           previous link as its only predecessor (the header is the first link). Each
+           worker warp w (D <= w < nwarps) follows the links' comparisons evaluated at
+           w to the first block that is no link: its partition's target. Two warps that
+           reach one target through different links: refused (unless it is padding)
+  forks    none before the header, 1 in it, 1 on every path of each partition from its
+           target to ret (the barrier after the captures' loads), 2 on every path of the
+           default to ret; the regions share no block with the default, the pre-dispatch
+           code, the worker side or the links but the ret block (two regions may share a
+           tail)
+So partition k's role is the pre-dispatch code, the worker side, the links up to its
+target (branches resolved) and its region to ret. Roles: "default", then "partition<k>"
+numbered by their first warp, the partitions that do more than sync first and padding
+after (Triton allocates warps to partitions by size, larger first, so k is the TTGIR
+partition index where the warp counts do not grow in TTGIR order; the names are labels
+only).
 
 Ceiling: the table/exit check sees st.shared whose address folds to smem + constant
 through mov/add; a computed-address st.shared into the state bytes would go unseen (the
@@ -124,16 +154,20 @@ class Role:
     # redirected to the ret block. A block with one successor here is unconditional,
     # whatever its last instruction says.
     succs: dict
+    # A padding state's role (its region only syncs): translate.py keeps it only if its
+    # translation emits an event.
+    padding: bool = False
 
 
 @dataclass
 class Dispatch:
     default_warps: int  # D: warps 0..D-1 run the default
-    warps: dict  # worker warp -> state
-    exit_state: int
+    warps: dict  # worker warp -> state (direct dispatch: its partition's number)
+    exit_state: int | None  # None in a direct dispatch
     padding: tuple  # used states whose region only syncs
     dispatch: str  # the block ending in the wid < D branch
     header: str  # the switch loop header: one pass of it in each worker role
+    direct: bool = False  # the direct dispatch (no state bytes, module doc)
 
 
 # ---------------------------------------------------------------------------- CFG
@@ -333,6 +367,9 @@ def roles(cfg, family="ttgir"):
     if chains:
         h, ld = chains[0]
         return _warp_specialized(cfg, h, ld, _compare_chain(cfg, h, ld), nwarps)
+    direct = _direct(cfg, nwarps) if family == "ttgir" else None
+    if direct is not None:
+        return direct
     warps = tuple(range(nwarps)) if nwarps else None
     succs = {b: blk.succs for b, blk in cfg.blocks.items()}
     return [Role("default", warps, cfg.entry, succs)], None
@@ -372,17 +409,206 @@ def _warp_specialized(cfg, h, ld, arms, nwarps):
     for k in sorted(set(warps.values())):
         path, t = arms[k]
         region = _region(cfg, k, t, h)
-        if all(_syncs_only(i) for u in region for i in blocks[u].instrs):
+        pad = all(_syncs_only(i) for u in region for i in blocks[u].instrs)
+        if pad:
             padding.append(k)
-            continue
         rest = {u: blocks[u].succs for u in side}
         rest.update(zip(path, [(u,) for u in path[1:] + (t,)]))
         rest[ret] = ()
         rest.update({u: _to(blocks[u].succs, h, ret) for u in region})
         mine = tuple(w for w, s in warps.items() if s == k)
         succs = _flow(cfg, pre, db, worker, rest)
-        out.append(Role(f"partition{k}", mine, cfg.entry, succs))
+        out.append(Role(f"partition{k}", mine, cfg.entry, succs, pad))
     return out, Dispatch(D, warps, E, tuple(padding), db, h)
+
+
+# ---------------------------------------------------------------- direct dispatch
+
+
+def _direct(cfg, nwarps):
+    """([Role], Dispatch) of a direct dispatch (module doc), None if the kernel has no
+    candidate header; CfgError for a candidate that breaks an item."""
+    looped = set().union(*cfg.loops.values()) if cfg.loops else set()
+    heads = [b for b, blk in cfg.blocks.items() if b not in looped
+             and any(i.guard is None and _is_fork(i) for i in blk.instrs)
+             and _wid_test(cfg, b, None) is not None]  # fmt: skip
+    if not heads:
+        return None
+    # A region's own branch on the warp after its fork barrier is no header: the header
+    # dominates every block of the regions. One in the default fails item entry.
+    top = [h for h in heads if not any(o != h and cfg.dominates(o, h) for o in heads)]
+    found, errors = [], []
+    for h in top:
+        try:
+            found.append((h, _entry(cfg, h, nwarps)))
+        except CfgError as e:
+            errors.append(e)
+    if not found:
+        raise errors[0]
+    if len(found) > 1:
+        where = ", ".join(cfg.where(h) for h, _e in found)
+        raise _no(cfg, "header", f"several blocks start a warp-id dispatch ({where})")
+    ((h, (db, D, wid, default, worker)),) = found
+    _direct_header(cfg, h)
+    arms = _wid_chain(cfg, h, wid, D, nwarps)
+    return _direct_roles(cfg, h, db, D, default, worker, arms)
+
+
+def _direct_header(cfg, h):
+    """The header holds an optional setmaxnreg, one fork barrier and pure instructions
+    besides its branch."""
+    forks = 0
+    for i in cfg.blocks[h].instrs[:-1]:
+        if i.guard is None and _is_fork(i):
+            forks += 1
+        elif not (i.guard is None and i.opcode.startswith("setmaxnreg")) and not _pure(
+            i
+        ):
+            raise _no(cfg, "header", f"unexpected `{i.text}` at line {i.line}")
+    if forks != 1:
+        raise _no(cfg, "forks", f"{forks} fork barriers in the header {cfg.where(h)}")
+
+
+_SETP_CMP = {
+    "eq": lambda a, b: a == b, "ne": lambda a, b: a != b,
+    "lt": lambda a, b: a < b, "lo": lambda a, b: a < b,
+    "le": lambda a, b: a <= b, "ls": lambda a, b: a <= b,
+    "gt": lambda a, b: a > b, "hi": lambda a, b: a > b,
+    "ge": lambda a, b: a >= b, "hs": lambda a, b: a >= b,
+}  # fmt: skip
+
+
+def _wid_test(cfg, b, wid):
+    """(taken(w), taken successor, other successor) if block b ends in `@p bra` (either
+    polarity) with p the only result of `setp.cmp p, x, imm` and x defined by the warp-id
+    shuffle at position wid (wid None: any `shfl.sync.idx` of %tid.x >> 5); taken(w)
+    tells whether warp w takes the branch. None otherwise."""
+    blk = cfg.blocks[b]
+    br = blk.instrs[-1] if blk.instrs else None
+    if br is None or br.base != "bra" or br.guard is None or len(blk.succs) != 2:
+        return None
+    pp, p = _setp(cfg, b)
+    if not p or p.operands[1][0] != "reg" or p.operands[2][0] != "imm":
+        return None
+    d = _def(cfg, *pp, p.operands[1][1])
+    if d is None or (d != wid if wid is not None else not _is_wid(cfg, d)):
+        return None
+    parts = p.opcode.split(".")
+    ty = parts[-1]
+    if len(parts) != 3 or parts[1] not in _SETP_CMP or ty[:1] not in "bsu":
+        return None
+    bits = int(ty[1:]) if ty[1:].isdigit() else 0
+    if bits not in (16, 32, 64):
+        return None
+    k = p.operands[2][1] & ((1 << bits) - 1)
+    if ty[0] == "s" and k >> (bits - 1):
+        k -= 1 << bits
+    op, neg = _SETP_CMP[parts[1]], br.guard[1]
+    taken, fall = blk.succs
+    return (lambda w: op(w, k) != neg), taken, fall
+
+
+def _is_wid(cfg, pos):
+    """The instruction at pos is the warp-id shuffle shfl.sync.idx(%tid.x >> 5, 0, 31,
+    -1)."""
+    shfl = _instr(cfg, pos)
+    return bool(
+        shfl
+        and ops.mnemonic(shfl.opcode) == "shfl.sync.idx"
+        and shfl.operands[2:] == (("imm", 0), ("imm", 31), ("imm", -1))
+        and _is_warp_id(cfg, pos, shfl.operands[1])
+    )
+
+
+def _wid_chain(cfg, h, wid, D, nwarps):
+    """{target: (links from h to it, its warps)}: each worker warp follows the links'
+    comparisons to its partition's target (module doc, item chain)."""
+    arms: dict = {}
+    for w in range(D, nwarps):
+        path, b = (), h
+        while True:
+            t = _wid_test(cfg, b, wid)
+            if t is None or b in path or (b != h and not _direct_link(cfg, b, path)):
+                break
+            path += (b,)
+            b = t[1] if t[0](w) else t[2]
+        if b == h or b in path:
+            raise _no(cfg, "header", f"warp {w} does not leave the dispatch chain")
+        got = arms.setdefault(b, (path, []))
+        if got[0] != path:
+            got = arms[b] = (
+                None,
+                got[1],
+            )  # several paths: padding only (_direct_roles)
+        got[1].append(w)
+    return arms
+
+
+def _direct_link(cfg, b, path):
+    """b, reached from the last link of `path`, is the next link of the chain."""
+    blk = cfg.blocks[b]
+    return blk.preds == [path[-1]] and all(_pure(i) for i in blk.instrs[:-1])
+
+
+def _direct_roles(cfg, h, db, D, default, worker, arms):
+    """The roles of a direct dispatch and its Dispatch (module doc, items forks)."""
+    blocks = cfg.blocks
+    ret = next(b for b, blk in blocks.items()
+               if blk.instrs and blk.instrs[-1].base in ("ret", "exit"))  # fmt: skip
+    pre = _forks(cfg, cfg.entry, {default, worker}, "before the dispatch")
+    side = _forks(cfg, worker, {h}, "on the worker side") if worker != h else {}
+    dflt = _forks(cfg, default, set(), "in the default")
+    if db not in pre or not (cfg.dominates(db, default) and cfg.dominates(db, worker)):
+        raise _no(cfg, "entry", f"{cfg.where(db)} does not dominate both sides")
+    if any(_nforks(cfg, b) for b in [*pre, *side]):
+        raise _no(cfg, "forks", "a fork barrier before the dispatch header")
+    if dflt.get(ret) != 2:
+        n = dflt.get(ret, "no")
+        raise _no(
+            cfg, "forks", f"the default reaches ret after {n} fork barriers, not 2"
+        )
+    links = {u for path, _ws in arms.values() for u in path or ()} | {h}
+    fixed = {"pre-dispatch": set(pre), "worker-side": set(side),
+             "default": set(dflt) - {ret}, "dispatch chain": links}  # fmt: skip
+    regions = {}
+    for t in arms:
+        reg = regions[t] = _forks(cfg, t, set(), f"in the partition at {cfg.where(t)}")
+        if reg.get(ret) != 1:
+            n = reg.get(ret, "no")
+            raise _no(cfg, "forks", f"the partition at {cfg.where(t)} reaches ret after "
+                                    f"{n} fork barriers, not 1")  # fmt: skip
+        fixed[f"partition at {cfg.where(t)}"] = set(reg) - {ret}
+    names = list(fixed)
+    for a, c in combinations(names, 2):
+        if a.startswith("partition") and c.startswith("partition"):
+            continue  # regions may share a tail
+        if fixed[a] & fixed[c]:
+            shared = cfg.where(min(fixed[a] & fixed[c]))
+            raise _no(cfg, "forks", f"the {a} and {c} code share {shared}")
+    pad = {t for t, reg in regions.items()
+           if all(_syncs_only(i) for u in reg if u != ret for i in blocks[u].instrs)}  # fmt: skip
+    for t, (path, ws) in arms.items():
+        if path is None and t not in pad:
+            raise _no(cfg, "chain", f"warps {ws} reach the partition at {cfg.where(t)} "
+                                    "through different links")  # fmt: skip
+    order = sorted(arms, key=lambda t: (t in pad, min(arms[t][1])))
+    first = {b: blocks[b].succs for b in dflt}
+    out = [
+        Role("default", tuple(range(D)), cfg.entry, _flow(cfg, pre, db, default, first))
+    ]
+    warps = {}
+    for k, t in enumerate(order):
+        path, ws = arms[t]
+        warps.update(dict.fromkeys(ws, k))
+        rest = {u: blocks[u].succs for u in side}
+        if path is not None:
+            rest.update(zip(path, [(u,) for u in path[1:] + (t,)]))
+        rest.update({u: blocks[u].succs for u in regions[t]})
+        rest[ret] = ()
+        succs = _flow(cfg, pre, db, worker, rest)
+        out.append(Role(f"partition{k}", tuple(sorted(ws)), cfg.entry, succs, t in pad))
+    padding = tuple(k for k, t in enumerate(order) if t in pad)
+    return out, Dispatch(D, dict(sorted(warps.items())), None, padding, db, h, True)
 
 
 def _parts(cfg, h, db, default, worker, ret):

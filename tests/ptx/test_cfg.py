@@ -19,9 +19,12 @@ instructions in between, a worker preamble, setmaxnreg and a partition loop), ch
 the warp -> state map, padding, exit state and each role's control flow (one pass of
 the switch loop header, whose definitions the regions read); the state table written as
 a vector of immediates; the dispatch as a compare chain without brx.idx (each role
-passing the links up to its own; looked for in Triton kernels only); and one refusal
-per protocol item (entry, header, table, exit, forks), each naming its item, among them
-branches on the complement result q of a `setp p|q` (not read as the comparison).
+passing the links up to its own; looked for in Triton kernels only); padding states'
+roles (marked, translate.py keeps them only if they emit); the direct dispatch of the
+single-warp-specialize lowering (warp-id links, regions ending in ret, numbering, its
+refusals); and one refusal per protocol item (entry, header, table, exit, forks), each
+naming its item, among them branches on the complement result q of a `setp p|q` (not
+read as the comparison).
 """
 
 import sys
@@ -272,6 +275,54 @@ $S0:
 )
 
 
+# Direct dispatch (Triton's single-warp-specialize lowering): no state bytes, no switch
+# loop; the workers branch on their warp id (largest start first, LLVM turning `wid >= 6`
+# into `wid == 6` below 7) and every region ends in ret. 8 warps, 4 default: warp 7 -> a
+# region, warp 6 -> a region with a loop that loads a capture first, warps 4, 5 -> padding.
+WS_DIRECT = kernel(
+    """
+    mov.u32 %r1, %tid.x;
+    shr.u32 %r2, %r1, 5;
+    shfl.sync.idx.b32 %r3, %r2, 0, 31, -1;
+    ld.param.u64 %rd1, [k_param_0];
+    setp.lt.u32 %p1, %r3, 4;
+    @!%p1 bra $HDR;
+    st.shared.b32 [global_smem+8], %r1;
+    barrier.sync 1;
+    barrier.sync 1;
+    st.global.b32 [%rd1], %r1;
+    bra.uni $RET;
+$HDR:
+    barrier.sync 1;
+    setp.gt.u32 %p2, %r3, 6;
+    @!%p2 bra $L2;
+    setmaxnreg.dec.sync.aligned.u32 24;
+    barrier.sync 1;
+    st.global.b32 [%rd1+4], %r3;
+    bra.uni $RET;
+$L2:
+    setp.eq.b32 %p3, %r3, 6;
+    @!%p3 bra $PAD;
+    setmaxnreg.dec.sync.aligned.u32 24;
+    ld.shared.b32 %r4, [global_smem+8];
+    barrier.sync 1;
+    mov.b32 %r10, 0;
+$P0L:
+    add.s32 %r10, %r10, 1;
+    st.global.b32 [%rd1+8], %r10;
+    setp.lt.s32 %p4, %r10, 4;
+    @%p4 bra $P0L;
+    bra.uni $RET;
+$PAD:
+    setmaxnreg.dec.sync.aligned.u32 24;
+    barrier.sync 1;
+$RET:
+    ret;
+""",
+    threads=256,
+)
+
+
 class Shape(unittest.TestCase):
     def test_blocks_dominators_loops(self):
         g = build(
@@ -448,10 +499,12 @@ class WarpSpecialize(unittest.TestCase):
         self.assertEqual(d.default_warps, 4)
         self.assertEqual(d.warps, {4: 1, 5: 1, 6: 0, 7: 2})
         self.assertEqual((d.exit_state, d.padding, d.header), (3, (1, 2), "$LOOP"))
+        # padding states have roles too, which translate.py keeps only if they emit
         self.assertEqual(
-            [(r.name, r.warps) for r in rs],
-            [("default", (0, 1, 2, 3)), ("partition0", (6,))],
-        )
+            [(r.name, r.warps, r.padding) for r in rs],
+            [("default", (0, 1, 2, 3), False), ("partition0", (6,), False),
+             ("partition1", (4, 5), True), ("partition2", (7,), True)],
+        )  # fmt: skip
         entry = d.dispatch
         self.assertEqual(entry, g.entry)
         # The default falls through. Partition 0 jumps from the dispatch to the header
@@ -483,7 +536,7 @@ class WarpSpecialize(unittest.TestCase):
         self.assertEqual(d.warps, {4: 0, 5: 0, 6: 0, 7: 0, 8: 3, 9: 3, 10: 1, 11: 2})
         self.assertEqual((d.default_warps, d.exit_state, d.padding), (4, 4, (3,)))
         self.assertEqual((d.dispatch, d.header), ("$TOP", "$HDR"))
-        names = [(r.name, r.warps) for r in rs]
+        names = [(r.name, r.warps) for r in rs if not r.padding]
         self.assertEqual(
             names,
             [
@@ -493,6 +546,8 @@ class WarpSpecialize(unittest.TestCase):
                 ("partition2", (11,)),
             ],
         )
+        self.assertEqual([(r.name, r.warps) for r in rs if r.padding],
+                         [("partition3", (8, 9))])  # fmt: skip
         default, p0, p1 = (r.succs for r in rs[:3])
         self.assertEqual(default["$TOP"], ("$DEF",))
         after = g.blocks["$DL"].succs[1]
@@ -596,6 +651,85 @@ class WarpSpecialize(unittest.TestCase):
         self.assertEqual(([r.name for r in rs], d), (["default"], None))
         with self.assertRaisesRegex(cfg.CfgError, r"dispatch \(exit\): .*not the one"):
             cfg.roles(build(pair(1)))
+
+    def test_direct_dispatch(self):
+        g = build(WS_DIRECT)
+        rs, d = cfg.roles(g)
+        self.assertTrue(d.direct)
+        self.assertEqual((d.default_warps, d.exit_state, d.header), (4, None, "$HDR"))
+        self.assertEqual((d.warps, d.padding), ({4: 2, 5: 2, 6: 0, 7: 1}, (2,)))
+        # partitions numbered by first warp, those that do more than sync first
+        self.assertEqual(
+            [(r.name, r.warps, r.padding) for r in rs],
+            [("default", (0, 1, 2, 3), False), ("partition0", (6,), False),
+             ("partition1", (7,), False), ("partition2", (4, 5), True)],
+        )  # fmt: skip
+        default, p0, p1, pad = (r.succs for r in rs)
+        fall = g.blocks[g.entry].succs[1]
+        r7 = g.blocks["$HDR"].succs[1]
+        r6 = g.blocks["$L2"].succs[1]
+        self.assertEqual(default[g.entry], (fall,))
+        self.assertNotIn("$HDR", default)
+        # each worker passes the links up to its region, which ends in ret
+        self.assertEqual(
+            (p0[g.entry], p0["$HDR"], p0["$L2"]), (("$HDR",), ("$L2",), (r6,))
+        )
+        self.assertEqual((p1["$HDR"], p1[r7], p1["$RET"]), ((r7,), ("$RET",), ()))
+        self.assertNotIn("$L2", p1)
+        self.assertEqual((pad["$L2"], pad["$PAD"]), (("$PAD",), ("$RET",)))
+        self.assertIn("$P0L", p0)
+        for r in (p1, pad):
+            self.assertNotIn("$P0L", r)
+        # looked for in the Triton family only
+        rs, d = cfg.roles(g, "cute")
+        self.assertEqual(([r.name for r in rs], d), (["default"], None))
+        # the comparison may be on any form of the warp id's test (here `wid >= 7`)
+        rs, d = cfg.roles(build(WS_DIRECT.replace("setp.gt.u32 %p2, %r3, 6",
+                                                  "setp.ge.s32 %p2, %r3, 7")))  # fmt: skip
+        self.assertEqual(d.warps, {4: 2, 5: 2, 6: 0, 7: 1})
+        cases = [
+            (
+                "forks",
+                "2 fork barriers in the header",
+                WS_DIRECT.replace("$HDR:\n    barrier.sync 1;\n",
+                                  "$HDR:\n    barrier.sync 1;\n    barrier.sync 1;\n"),
+            ),
+            (
+                "forks",
+                "reaches ret after 0 fork barriers, not 1",
+                WS_DIRECT.replace("    setmaxnreg.dec.sync.aligned.u32 24;\n    barrier.sync 1;\n$RET:",
+                                  "    setmaxnreg.dec.sync.aligned.u32 24;\n$RET:"),
+            ),
+            (
+                "forks",
+                "the default reaches ret after 1 fork barriers, not 2",
+                WS_DIRECT.replace("    barrier.sync 1;\n    barrier.sync 1;\n    st.global",
+                                  "    barrier.sync 1;\n    st.global"),
+            ),
+            (
+                "forks",
+                "share",
+                WS_DIRECT.replace("    st.global.b32 [%rd1], %r1;\n    bra.uni $RET;",
+                                  "    st.global.b32 [%rd1], %r1;\n    bra.uni $P0L;"),
+            ),
+            (
+                "header",
+                "unexpected `st.global",
+                WS_DIRECT.replace("$HDR:\n    barrier.sync 1;\n",
+                                  "$HDR:\n    barrier.sync 1;\n    st.global.b32 [%rd1], %r3;\n"),
+            ),
+            (
+                "entry",
+                "taken when wid < 4",
+                WS_DIRECT.replace("@!%p1 bra $HDR", "@%p1 bra $HDR"),
+            ),
+        ]  # fmt: skip
+        for item, msg, text in cases:
+            with self.subTest(f"{item}: {msg}"):
+                with self.assertRaisesRegex(
+                    cfg.CfgError, rf"dispatch \({item}\): .*{msg}"
+                ):
+                    cfg.roles(build(text))
 
     def test_protocol_refusals(self):
         def drop(text, line):

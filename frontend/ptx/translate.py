@@ -225,7 +225,8 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
             "records": records,
             "target": facts.target,
             "shared_align": align,  # cluster.py: the peer-bit mask
-            "dispatch": dispatch is not None,  # mem.py: generic shared writes
+            # mem.py: generic shared writes (the state bytes of a switch-loop dispatch)
+            "dispatch": dispatch is not None and not dispatch.direct,
         },
     )
     work = pol.get("work") or {}
@@ -243,7 +244,12 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
             raise interp.Unsupported(
                 "role", role.name, f"warps {warps} are not contiguous"
             )
-        translators += _role(k, tree, role.name, warps[0], len(warps), pol)
+        got = _role(k, tree, role.name, warps[0], len(warps), pol)
+        if role.padding and not any(
+            s["op"] == "event" for tr in got for s in _statements(tr.stmts)
+        ):
+            continue  # padding warps that emit nothing (cfg.py): no role
+        translators += got
     facts.barriers = mem.barriers(translators)
     facts.clc = sync.finish(translators)
     facts.tmem = p1.top(translators) if p1 is not None else None
