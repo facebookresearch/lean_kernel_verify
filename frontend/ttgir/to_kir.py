@@ -14,10 +14,10 @@ compiled to that specialization. Every unsupported construct on the kept slice a
 dropped op whose result reaches the slice is a hard error naming the op and its loc, of
 kind "gap" (refused by design) or "error" (the case or LKV must be fixed; `KirError`).
 
-Translation switch (the PTX translation is experimental and opt-in):
-LKV_FRONTEND=ptx translates each specialization's PTX instead (build_ptx: the PTX core's
-Facts, frontend/ptx/translate.py, with this file's naming, tensors, inputs and checks;
-KIR `ir` "ptx"); unset or "legacy" is the TTGIR translation above, unchanged.
+Translation switch: LKV_FRONTEND=ptx, the default (unset or empty), translates each
+specialization's PTX instead (build_ptx: the PTX core's Facts, frontend/ptx/translate.py,
+with this file's naming, tensors, inputs and checks; KIR `ir` "ptx"); "legacy" is the
+TTGIR translation above.
 
 P1 pass (LKV_FRONTEND=ptx only; LKV_P1=0 skips it): the PTX core's P1-2 events
 (frontend/ptx/bulk.py; references/kir.md change 15) give a P1 KIR <spec>.p1.json per
@@ -2309,8 +2309,9 @@ def _with_clc(
 
 
 def frontend() -> str:
-    """The Layer-1 translation LKV_FRONTEND selects: "legacy" (unset) or "ptx"."""
-    name = os.environ.get("LKV_FRONTEND") or "legacy"
+    """The Layer-1 translation LKV_FRONTEND selects: "ptx" (unset, the TLX/Triton
+    default) or "legacy"."""
+    name = os.environ.get("LKV_FRONTEND") or "ptx"
     if name not in ("legacy", "ptx"):
         raise SystemExit(f"LKV_FRONTEND={name!r}: expected legacy or ptx")
     return name

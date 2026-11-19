@@ -628,7 +628,7 @@ PASS), and the persistent-handoff and split-role variants around them
 ## P1-2 async store sources reuse ordered (`KV.StoreReuse.Holds`)
 
 Decided on a P1 KIR whose top-level `p1` names P1-2 (`kir.md` change 15; the
-TTGIR frontend writes `<spec>.p1.json` under LKV_FRONTEND=ptx for every
+TTGIR frontend writes `<spec>.p1.json` in the PTX translation, its default, for every
 specialization with a bulk store, and `<spec>@cluster<dims>.p1.json` for a preferred
 cluster geometry, `frontend_ptx.md` "P1-2 pass") per input, over
 the clusters (a CTA without clusters) whose role traces are all complete.
@@ -936,7 +936,7 @@ with at least one note, whatever their outcome (a PASS can have notes).
 ### Scope: refused kernels and constructs, unchecked bug classes
 
 - **Clusters: CuTe, and TLX in the PTX translation.** CuTe cluster kernels
-  (2-CTA, cta_group::2), and TLX ones with `--frontend ptx` (P0 only), are
+  (2-CTA, cta_group::2), and TLX ones in the PTX translation (P0 only), are
   checked with one barrier ledger per cluster (kir.md change 11): remote
   mbarrier arrives, multicast commits, cta_group::2 and multicast TMA loads,
   shared::cluster bulk copies (inline PTX) and the cluster barrier; P1-1 runs
@@ -952,7 +952,7 @@ with at least one note, whatever their outcome (a PASS can have notes).
   `expect_tx` bytes `SlotLedger.bytesNeeded` counts (those that precede, in
   their roles, arrivals the phase needs); its landings go to their first
   possible phase, and P0-4 is UNDECIDED if they then overfill one.
-  Refused: 2-CTA TTGIR kernels in the default translation
+  Refused: 2-CTA TTGIR kernels in the legacy translation
   (`ttng.two-ctas`, remote mbarriers, DSMEM), TTGIR multi-CTA layouts
   (`ttg.num-ctas` > 1), CLC, im2col TMA, pointers carried by loops (TTGIR; CuTe:
   a loop-carried value that changes structure, e.g. a pointer into another

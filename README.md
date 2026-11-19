@@ -62,11 +62,13 @@ lean/KV: every role of every CTA evaluated per input into event traces, then per
 report.md / report.json: a verdict per (variant, input, spec), findings at source file:line
 ```
 
-`lkv.py run --frontend ptx` (experimental and opt-in: it still has known gaps and bugs;
-the default is `legacy`, the IR translation above) makes both frontends translate the
-kernel's PTX instead, with one shared core and one PTX op table
-([references/frontend_ptx.md](references/frontend_ptx.md)); the KIR then has `ir` `"ptx"`,
-and the report names the translation.
+For TLX/Triton kernels `lkv.py run` translates the kernel's PTX instead of the TTGIR by
+default, with one core and one PTX op table shared by both frontends
+([references/frontend_ptx.md](references/frontend_ptx.md)); it decides 2-CTA and other
+cluster kernels and the P1-2 spec, and still refuses some constructs the TTGIR
+translation handles (`--frontend legacy` selects that one). CuTe kernels keep the IR
+translation above unless `--frontend ptx`. The KIR then has `ir` `"ptx"`, and the report
+names the translation.
 
 The frontends keep only the ops that define control flow, addresses, masks, barrier
 operands or events, and stop with an error if a dropped op feeds one of them. A verdict
@@ -154,8 +156,8 @@ needs a Blackwell GPU).
 ```
 SKILL.md       the same workflow as an Agent Skill, for coding agents
 frontend/      Layer 1: ttgir/ (TLX/Triton) and cute/ (CuTe DSL) frontends, ptx/ (their
-               PTX translation, --frontend ptx), kir.py (the KIR contract), emit_lean.py
-               (KIR to Lean)
+               PTX translation: the TLX/Triton default), kir.py (the KIR contract),
+               emit_lean.py (KIR to Lean)
 lean/KV/       Layer 2: the KIR AST, the evaluator and the specs (Spec/)
 scripts/       lkv.py (run, check, export) and the Lean build and check scripts
 references/    the documentation below
@@ -172,7 +174,7 @@ tests/         lean/ (Lean layer), cute/, ttgir/ and ptx/ (frontends), e2e/ (lkv
 | [references/kir.md](references/kir.md)                                                                         | KIR, the JSON contract between the layers                            |
 | [references/frontend_ttgir.md](references/frontend_ttgir.md), [frontend_cute.md](references/frontend_cute.md) | the frontends: case formats, host patches, translation, refusals     |
 | [references/ir_ops.md](references/ir_ops.md), [ir_ops_cute.md](references/ir_ops_cute.md)                     | the op tables: which IR op becomes which KIR event or value          |
-| [references/frontend_ptx.md](references/frontend_ptx.md), [ir_ops_ptx.md](references/ir_ops_ptx.md)           | the PTX translation (`--frontend ptx`) and its op table              |
+| [references/frontend_ptx.md](references/frontend_ptx.md), [ir_ops_ptx.md](references/ir_ops_ptx.md)           | the PTX translation (the TLX/Triton default) and its op table        |
 | [references/cases.md](references/cases.md)                                                                     | writing a case file                                                  |
 | [references/bug_taxonomy.md](references/bug_taxonomy.md)                                                       | which bug classes are checked, and why                               |
 

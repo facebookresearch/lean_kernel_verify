@@ -2,15 +2,18 @@
 
 The frontend turns a TLX/Triton kernel plus a case file into KIR (`kir.md`) with no
 hand-written model of the kernel. The real host code runs on CPU, the real compiler
-produces TTGIR for the target GPU (sm_100 by default, or sm_103), and a fixed op table
-(`ir_ops.md`) translates the TTGIR.
+produces TTGIR for the target GPU (sm_100 by default, or sm_103) and its PTX, and
+`to_kir` translates the PTX by default (the PTX translation, "PTX translation" below) or,
+with `--frontend legacy`, the TTGIR with a fixed op table (`ir_ops.md`), as this page
+describes.
 Code: `frontend/ttgir/`. Tests: `tests/ttgir/`; a minimal case: `tests/e2e/cases/probe_tlx.json`.
 
 ```
 export_src.py   the kernel + the first-party modules it imports (also relative imports), at a revision
 dump            pin the environment (host_env), host code on CPU, launch capture, triton.compile
                 -> <spec>.ttgir, dump.json
-to_kir          TTGIR -> parse (mlir_text) -> slice (slicing) -> KIR (op_table) -> <spec>.kir.json
+to_kir          LKV_FRONTEND=legacy: TTGIR -> parse (mlir_text) -> slice (slicing) -> KIR
+                (op_table) -> <spec>.kir.json; ptx (the default): the PTX translation
 ```
 
 `host_env.py` (environment pinning), `host_reads.py` (host-read tracking) and
@@ -397,12 +400,14 @@ its cluster steals (`to_kir._with_clc`).
 
 ## PTX translation
 
-The experimental `lkv.py run --frontend ptx` (or `LKV_FRONTEND=ptx`) makes `to_kir`
-translate the PTX `dump` writes next to each TTGIR (`<spec>.ptx`) instead of the TTGIR,
+By default (`LKV_FRONTEND` unset or `ptx`; `lkv.py run --frontend ptx`) `to_kir`
+translates the PTX `dump` writes next to each TTGIR (`<spec>.ptx`) instead of the TTGIR,
 with the shared PTX translation of both frontends and its op table: `frontend_ptx.md` and
-`ir_ops_ptx.md` (TMA and bulk copies, CLC, refusals). The case file, the dump, the names,
-tensors, params, inputs, checks and `[to_kir] ... FAILED` lines stay; the default,
-`legacy`, is the TTGIR translation above.
+`ir_ops_ptx.md` (TMA and bulk copies, clusters, CLC, refusals); it also writes the P1-2
+KIRs. The case file, the dump, the names, tensors, params, inputs, checks and
+`[to_kir] ... FAILED` lines stay. `--frontend legacy` (`LKV_FRONTEND=legacy`) selects the
+TTGIR translation above: it decides some constructs the PTX translation refuses, refuses
+2-CTA kernels and checks no P1-2.
 
 ## Limitations
 
@@ -431,5 +436,5 @@ tensors, params, inputs, checks and `[to_kir] ... FAILED` lines stay; the defaul
 * `test_gpu_parity` needs a GB300 (or B200) host. Without a GPU it skips.
 * CLC is analyzed under three schedules, not every schedule the hardware may produce.
 * 2-CTA (cluster) kernels need cross-CTA events (target CTA of an arrive, DSMEM copies)
-  that this translation does not emit: the PTX translation (`--frontend ptx`,
+  that the TTGIR translation does not emit: the PTX translation (the default,
   `frontend_ptx.md`) checks them.

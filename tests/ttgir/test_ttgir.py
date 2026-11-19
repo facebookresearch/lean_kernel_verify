@@ -7,8 +7,10 @@
 
 Each test writes a kernel module plus its host function into a temporary source tree
 (the same layout an `sl cat` export has), runs the real dump (CPU host run, launch
-capture, compile for sm_100 or sm_103) and translates every specialization to KIR. The
-KIR is validated with frontend/kir.py (the kir.md contract check).
+capture, compile for sm_100 or sm_103) and translates every specialization to KIR with
+the legacy TTGIR translation (LKV_FRONTEND=legacy; the TLX/Triton default is the PTX
+translation, tested in tests/ptx). The KIR is validated with frontend/kir.py (the kir.md
+contract check).
 """
 
 import importlib.util
@@ -323,6 +325,8 @@ def case(
 class TtgirFrontendTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.frontend = os.environ.get("LKV_FRONTEND")
+        os.environ["LKV_FRONTEND"] = "legacy"  # the TTGIR translation (default: ptx)
         cls.root = Path(tempfile.mkdtemp(prefix="lkv_ttgir_src_"))
         cls.out = Path(tempfile.mkdtemp(prefix="lkv_ttgir_out_"))
         for name in ("lkv_test_kernels", "lkv_test_kernels_sm103"):
@@ -338,6 +342,10 @@ class TtgirFrontendTest(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.root)
         shutil.rmtree(cls.out)
+        if cls.frontend is None:
+            os.environ.pop("LKV_FRONTEND", None)
+        else:
+            os.environ["LKV_FRONTEND"] = cls.frontend
 
     def translate(self, c: dict) -> dict:
         out = self.out / c["name"]

@@ -24,6 +24,8 @@
   ERRORs always count, its FAIL and UNDECIDED only with --p1-strict; inputs the host
   rejects count as none; an export's revision marker names the analyzed revision;
   --target reaches the TTGIR dump and is refused for CuTe cases (exit status 2, never 1);
+  `run` translates with --frontend, else $LKV_FRONTEND, else the family's default (ptx for
+  TLX/Triton, legacy for CuTe);
   the report renders the frontend's environment record, and there marks the source lines
   of the CuTe DSL 4.4.2 PTX translation (LKV_FRONTEND=ptx) best effort (report.json
   `loc_quality`; a legacy report has no such key).
@@ -48,9 +50,11 @@
   An input the host rejects (a `raise` in its validation) and, for TLX, one it makes no
   launch for are listed as rejected with the reason; the other inputs still get verdicts.
   The shell sets a TRITON_* and a CUTE_DSL_* variable: the frontend must drop both and
-  the report must list them as ignored shell values. probe_cute runs twice: by default
-  (the legacy translation, KIR `ir` "cute-mlir") and with `--frontend ptx` (KIR `ir`
-  "ptx", the same verdicts); the report names the translation.
+  the report must list them as ignored shell values. Each probe runs twice, by default
+  and in the other translation: probe_tlx in the PTX translation (KIR `ir` "ptx") and with
+  `--frontend legacy` (KIR `ir` "ttgir"), probe_cute in the legacy translation (KIR `ir`
+  "cute-mlir") and with `--frontend ptx` (KIR `ir` "ptx"), with the same verdicts; the
+  report names the translation.
 
 Outputs: $LKV_E2E_OUT (default ${TMPDIR:-/tmp}/lkv_e2e_$USER), one directory per test.
 """
@@ -963,6 +967,21 @@ class Unit(unittest.TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)  # an ERROR; 1 would mean a FAIL
         self.assertIn("must be inside an fbsource checkout", r.stderr)
 
+    def test_default_translation_per_family(self):
+        # --frontend, else $LKV_FRONTEND, else ptx for TLX/Triton and legacy for CuTe
+        ttgir, cute = {"src_root": "src"}, {"builder": "b.py"}
+        with mock.patch.dict(os.environ):
+            os.environ.pop("LKV_FRONTEND", None)
+            self.assertEqual(lkv_py.translation_of(ttgir), "ptx")
+            self.assertEqual(lkv_py.translation_of(cute), "legacy")
+            self.assertEqual(lkv_py.translation_of(ttgir, "legacy"), "legacy")
+            self.assertEqual(lkv_py.translation_of(cute, "ptx"), "ptx")
+            os.environ["LKV_FRONTEND"] = "legacy"
+            self.assertEqual(lkv_py.translation_of(ttgir), "legacy")
+            self.assertEqual(lkv_py.translation_of(ttgir, "ptx"), "ptx")
+            os.environ["LKV_FRONTEND"] = ""  # empty: unset
+            self.assertEqual(lkv_py.translation_of(ttgir), "ptx")
+
     def test_cute_cases_refuse_sm103(self):
         case = HERE / "cases/probe_cute.json"
         r = subprocess.run(
@@ -1108,9 +1127,23 @@ class EndToEnd(unittest.TestCase):
             self.assertIn(f"- `{inp}`: {got[inp]}", rejected)
 
     def test_probe_tlx(self):
+        report = self.probe_tlx("probe_tlx")
+        self.assertEqual(report["translation"], "ptx")  # the TLX/Triton default
+        self.assertEqual(kir_irs(report), {"ptx"})
+
+    def test_probe_tlx_legacy(self):
+        report = self.probe_tlx("probe_tlx_legacy", "--frontend", "legacy")
+        self.assertEqual(report["translation"], "legacy")
+        self.assertEqual(kir_irs(report), {"ttgir"})
+        md = (OUT / "probe_tlx_legacy/report.md").read_text()
+        self.assertIn("- translation: `legacy`", md)
+
+    def probe_tlx(self, out, *args):
+        """`lkv.py run` of probe_tlx into OUT/out (args: lkv.py options) and its checks;
+        returns the report."""
         case = str(HERE / "cases/probe_tlx.json")
-        report = lkv("run", "probe_tlx", case, env=SHELL_ENV)
-        self.assert_shell_env_ignored("probe_tlx", report)
+        report = lkv("run", out, case, *args, env=SHELL_ENV)
+        self.assert_shell_env_ignored(out, report)
         self.assertEqual(report["result"]["outcome"], "FAIL")  # the seeded bug
         got = runs(report)
         self.assertEqual(
@@ -1129,13 +1162,14 @@ class EndToEnd(unittest.TestCase):
             want = {"P0-3"} if name.endswith("_floor") else set()
             self.assertEqual(failing(verdicts), want, name)
         self.assert_rejected(
-            "probe_tlx",
+            out,
             report,
             {
                 "two_dim": r"^ValueError: probe takes a 1-D tensor at lkv_e2e_probe_tlx\.py:\d+$",
                 "empty_skipped": r"^no launch of probe \(the host launched: nothing\)$",
             },
         )
+        return report
 
     def test_probe_cute(self):
         report = self.probe_cute("probe_cute")

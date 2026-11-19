@@ -8,7 +8,8 @@ each piece to its document.
 kernel source (TLX/Triton or CuTe DSL) + case file (config, small concrete inputs)
    |  frontend/*/dump.py     host code + compile on CPU with the real compiler (no GPU)
    v
-compiler IR (TTGIR for TLX/Triton, CuTe DSL MLIR)
+compiler output: the PTX (TLX/Triton by default; frontend/ptx/, frontend_ptx.md) or
+the IR (TTGIR for TLX/Triton with --frontend legacy, CuTe DSL MLIR by default)
    |  frontend/*/to_kir.py   Layer 1: op table + program slicing -> KIR (JSON)
    v
 KIR program (roles, structured control flow, integer expressions, events)
@@ -197,12 +198,13 @@ it names in `elision_flags` the flags that select a mask-elided fast path.
 
 ## Trust base
 
-1. The compiler IR for the analyzed config (lowering below it is not checked),
-   produced by the real host code under the frontend's host patches
-   (`frontend_ttgir.md`, `frontend_cute.md`).
-2. The op table: one Lean-facing meaning per IR op, written from the PTX ISA and
-   the TLX/CuTe docs (`references/ir_ops.md`, `references/ir_ops_cute.md`),
-   identical for every kernel. Its issuing-thread rows for CuTe TMA stores follow
+1. The compiler output for the analyzed config (lowering below it is not checked):
+   the kernel's PTX in the PTX translation (the TLX/Triton default, CuTe with
+   `--frontend ptx`), else its IR, produced by the real host code under the
+   frontend's host patches (`frontend_ttgir.md`, `frontend_cute.md`).
+2. The op table: one Lean-facing meaning per op, written from the PTX ISA and
+   the TLX/CuTe docs (`references/ir_ops_ptx.md` for the PTX translation, else
+   `references/ir_ops.md`, `references/ir_ops_cute.md`), identical for every kernel. Its issuing-thread rows for CuTe TMA stores follow
    the waterfall loop ptxas emits (measured on hardware for the compilers the DSLs
    embed), and those for TMA loads and reduces the `elect.sync` the DSL emits
    (`ir_ops_cute.md`, "Issuing threads"; `tests/cute` checks the PTX).

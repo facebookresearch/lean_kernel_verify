@@ -21,10 +21,11 @@ run    dump with the case's frontend (a buck2 binary: CuTe DSL if the case has a
        compiler and the kernel (frontend/ttgir/host_env.py) and the report repeats its
        record (dump.json "env": the case's env, the shell values it ignored, the
        effective values, Triton's cache-invalidating variables).
-       --frontend selects to_kir's Layer-1 translation (default $LKV_FRONTEND, else
-       legacy): legacy translates the TTGIR / CuTe DSL MLIR, ptx (experimental) the
-       kernel's PTX (references/frontend_ptx.md); run sets LKV_FRONTEND for the frontend,
-       and the report names the translation (report.json "translation").
+       --frontend selects to_kir's Layer-1 translation (default $LKV_FRONTEND, else the
+       family's: ptx for TLX/Triton cases, legacy for CuTe DSL ones): legacy translates
+       the TTGIR / CuTe DSL MLIR, ptx the kernel's PTX (references/frontend_ptx.md); run
+       sets LKV_FRONTEND for the frontend, and the report names the translation
+       (report.json "translation").
 check  the Layer-2 half of `run` on existing KIR files (e.g. tests/lean fixtures).
 export write fbsource PATHs at REV under OUT_DIR with read-only `sl files`/`sl cat`: a
        file with the first-party modules it imports at OUT_DIR/<path below fbcode/>
@@ -259,6 +260,18 @@ def tail(path, n=15):
 
 def frontend_of(case):
     return "cute" if "builder" in case else "ttgir"
+
+
+# The Layer-1 translation of each family when neither --frontend nor $LKV_FRONTEND names
+# one (references/frontend_ptx.md): the PTX translation for TLX/Triton, legacy for CuTe.
+DEFAULT_TRANSLATION = {"ttgir": "ptx", "cute": "legacy"}
+
+
+def translation_of(case, chosen=None):
+    """The translation `run` uses for `case`: --frontend (`chosen`), else
+    $LKV_FRONTEND, else the family's default (DEFAULT_TRANSLATION)."""
+    env = os.environ.get("LKV_FRONTEND")
+    return chosen or env or DEFAULT_TRANSLATION[frontend_of(case)]
 
 
 def src_root(case_path, case, src):
@@ -1653,8 +1666,9 @@ def cmd_run(args):
     case = json.loads(case_path.read_text())
     if frontend_of(case) == "cute" and args.target != "sm_100":
         die("lkv: the CuTe frontend compiles for sm_100 only")
-    if args.frontend not in ("legacy", "ptx"):  # a default from $LKV_FRONTEND
-        die(f"lkv: LKV_FRONTEND={args.frontend!r}: expected legacy or ptx")
+    translation = translation_of(case, args.frontend)
+    if translation not in ("legacy", "ptx"):  # from $LKV_FRONTEND
+        die(f"lkv: LKV_FRONTEND={translation!r}: expected legacy or ptx")
     if FBCODE is None:
         die(
             f"lkv: run builds the frontend with buck2, so the skill must be inside an "
@@ -1665,12 +1679,12 @@ def cmd_run(args):
     ).resolve()
     out.mkdir(parents=True, exist_ok=True)
     root = src_root(case_path, case, args.src)
-    os.environ["LKV_FRONTEND"] = args.frontend  # read by both frontends' to_kir
+    os.environ["LKV_FRONTEND"] = translation  # read by both frontends' to_kir
     report = {
         "case": case["name"],
         "case_file": str(case_path),
         "frontend": frontend_of(case),
-        "translation": args.frontend,
+        "translation": translation,
         "target": args.target,
         "rev": source_rev(case, root, args.src),
         "src": str(root),
@@ -1739,9 +1753,9 @@ def main():
             p.add_argument(
                 "--frontend",
                 choices=("legacy", "ptx"),
-                default=os.environ.get("LKV_FRONTEND") or "legacy",
                 help="Layer-1 translation: legacy (TTGIR / CuTe DSL MLIR) or ptx (the "
-                "kernel's PTX, experimental); default $LKV_FRONTEND, else legacy",
+                "kernel's PTX); default $LKV_FRONTEND, else ptx for TLX/Triton cases and "
+                "legacy for CuTe DSL ones",
             )
         else:
             p.add_argument(
