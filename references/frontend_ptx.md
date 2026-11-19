@@ -177,6 +177,18 @@ variant must have the same block and cluster.
   has a role only if its translation emits an event (a cluster kernel's padding warps
   arrive on the cluster barrier, "Clusters, tcgen05, CLC"). A failing item refuses the
   kernel and names the item. A branch on the warp inside a role is a mask.
+  A dispatch may run no round (item rounds, cfg.py): the default decides once, at a
+  branch outside every loop, on every path and before any fork barrier, whose two sides
+  meet only at `ret`; one side runs the protocol above, the other stores the exit state
+  for every worker before its one fork barrier and returns (a TLX kernel with an early
+  exit when no work is left). Its workers then pass the header
+  once, read the exit state and return. The default's branch condition is the decision:
+  it must be one value of the launch (parameters, program id, metadata: a weak integer
+  load of a tensor), else the variant is refused (data, or a value that differs between
+  the default's threads: the workers learn it from the state bytes only). Each worker's
+  region is a KIR `if` on it (the code before, the header's first pass included, runs in
+  either case), so on an input where the default takes the zero-round side no worker
+  event runs; the P0-6 pass does the same (and refuses a decision that is data).
   The direct dispatch of Triton's single-warp-specialize lowering
   (`tlx.async_tasks(exclusive=True)`: one warp_specialize in the module, no state bytes,
   no switch loop) is matched too: the entry as above; the worker side's first block with
@@ -195,9 +207,12 @@ variant must have the same block and cluster.
   first and second one (both protocols). A worker's `ld.shared` there of bytes the
   default stored gets the stored value (byte by byte, so a capture split into bytes is
   put back together) if the default's store runs unconditionally (statically known
-  issuing threads, no runtime condition) and its value is one value in every thread that
+  issuing threads, no runtime condition: no predicate, branch on a uniform condition or
+  loop around it, but the decision of a dispatch that may run no round, on its round side,
+  under which the workers load it) and its value is one value in every thread that
   depends on nothing but the launch (parameters, program id, shared symbols, metadata);
-  otherwise the load is Data as any shared load. Every other write of shared memory
+  otherwise the load is Data as any shared load (so is a worker's load before its region
+  in a dispatch that may run no round). Every other write of shared memory
   reports the bytes it may touch, over the role's executing threads (the bounds of its
   offsets plus its size): `st.shared` (an unknown address, a condition, a value of a
   role, a worker's, the default's after its first fork barrier), `stmatrix` (a 16-byte

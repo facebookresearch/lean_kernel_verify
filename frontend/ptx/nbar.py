@@ -977,6 +977,9 @@ class _Nb(interp.Translator):
 
     def _run_if(self, node, dec) -> None:  # noqa: C901 (one case per condition class)
         reg, neg = node.branch.guard
+        gate = self.k.gate_at
+        if gate is not None and node.block == gate[0] and self.name == "default":
+            self._gate(node, gate[1])
         self.cur = node.branch
         c = self.env.get(reg)
         if c is None:
@@ -1046,6 +1049,29 @@ class _Nb(interp.Translator):
             )
             self.ctx["keep"].append(node)  # id(node) stays this If's
         return memo[id(node)]
+
+    def _gate(self, node, full: str) -> None:
+        """The default's decision whether the workers run their round (cfg.py, item
+        rounds): recorded as in the P0 translation (interp.Translator._gate_if), so that
+        each worker's region runs under it (run_gated); the If itself is translated as
+        any other. A decision that is data, differs between threads or is no value of the
+        launch refuses the P0-6 KIR: the workers' barriers could not be paired."""
+        reg, neg = node.branch.guard
+        c = self.env.get(reg)
+        why = "the decision whether the warp-specialize workers run a round"
+        if c is None or isinstance(c, interp.Data):
+            self.fail(node.branch, f"{why} is data: the workers cannot evaluate it")
+        cu = self.uniform(E.not1(c) if neg else c)
+        if cu is None or not interp._launch_only(
+            cu, self.k.mem.used_params, self.created
+        ):
+            self.fail(node.branch, f"{why} is no value of the launch that every thread of "
+                                   "the default and the workers evaluates alike")  # fmt: skip
+        full_then = self.k.mem.cfg.blocks[node.block].succs[0] == full
+        g = cu if full_then else E.not1(cu)
+        if self.k.gate is not None and self.k.gate != g:
+            self.fail(node.branch, f"{why} differs between the parts of the default")
+        self.k.gate = g
 
     def _exact_if(self, node, cu, dec=None) -> None:
         if E.is_const(cu):
@@ -1889,7 +1915,8 @@ def _translate(facts, text, entry, records, pol, module=None) -> None:
     facts.written = written
     k = interp.Kernel(fn, mem, locs, facts.block, facts.cluster, pol["max_iters"],
                       split=True, vectorize=False, srclocs=srclocs,
-                      switches=switches)  # fmt: skip
+                      switches=switches,
+                      gate_at=dispatch.gate if dispatch is not None else None)  # fmt: skip
     facts.dispatch = dispatch is not None
     forks = {id(i) for i in fn.instructions() if facts.dispatch and C._is_fork(i)}
     loop_ids: dict = {}
@@ -1912,7 +1939,7 @@ def _translate(facts, text, entry, records, pol, module=None) -> None:
             raise interp.Unsupported(
                 "role", role.name, f"warps {warps} are not contiguous"
             )
-        for tr in _role(k, tree, role.name, warps[0], len(warps), ctx):
+        for tr in _role(k, tree, role.name, warps[0], len(warps), ctx, role.gate):
             name = _name(pol["family"], role.name, tr, warps)
             facts.roles.append({"name": name, "w0": tr.w0, "warps": tr.nw,
                                 "body": tr.stmts})  # fmt: skip
@@ -1941,15 +1968,18 @@ def _name(family: str, role: str, tr, warps) -> str:
     return f"{role}:w{tr.w0}-{tr.w0 + tr.nw - 1}"
 
 
-def _role(k, tree, name: str, w0: int, nw: int, ctx: dict) -> list:
+def _role(k, tree, name: str, w0: int, nw: int, ctx: dict, gate=None) -> list:
     """The translators of one role, after splitting it into warp ranges (translate.py
-    _role, without the P0 prologues)."""
+    _role, without the P0 prologues; `gate`: cfg.Role.gate)."""
     out, todo = [], [(w0, nw)]
     while todo:
         a, n = todo.pop(0)
         tr = _Nb(k, tree, a, n, name, ctx, (w0, nw))
         try:
-            tr.run(tree.body)
+            if gate is None:
+                tr.run(tree.body)
+            else:
+                tr.run_gated(tree.body, gate)
             tr.flush()
         except interp.SplitWarps as s:
             todo = s.groups + todo

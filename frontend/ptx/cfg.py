@@ -67,6 +67,15 @@ wrong.
   forks    the count of fork barriers (barrier.sync 1, no count) never depends on the
            path: none before the header, 1 in it, 2 in each used state's region, 4 in
            the default
+  rounds   or the default decides once whether the workers run their round: one
+           conditional branch G outside every loop, on every path of the default and with
+           no fork barrier before it, whose two successors are entered from G alone and
+           meet only at ret; on every path of one (the round side F) the default runs the
+           protocol above (4 fork barriers, the table before the first, the exit state
+           after the second; "on every path" of F), on every path of the other (the
+           zero-round side Z) it stores the exit state E to every worker before its one
+           fork barrier and returns. No other st.shared to smem + constant touches the
+           state bytes (none before G)
 
 Each worker runs the switch loop exactly twice: once into its state, once into E. So
 state k's role is the pre-dispatch code, the worker-side code up to the header, one pass
@@ -74,7 +83,14 @@ of the header and of the brx.idx block (or the chain links up to the one decidin
 with their branches resolved to target k, the region from target k to its back edges
 into the header, then `ret`. The header pass stays because the pure instructions LLVM
 puts in the header, the brx.idx block and the links (anything else there is refused)
-define registers the regions read; their second pass, into E, only precedes `ret`. A used state whose region only syncs (fork and cluster
+define registers the regions read; their second pass, into E, only precedes `ret`. In a
+dispatch that may run no round (item rounds), a worker that reads E at its first pass
+returns at once: its role runs the region only if the default took F (Role.gate, the
+region's first block; Dispatch.gate: G and F). The translation (interp.py) takes the
+default's branch condition at G as the decision (a value of the launch that every
+role can evaluate, else refused) and translates each worker's region under it, and the
+captures the default stores on F before its first fork barrier hold under it.
+A used state whose region only syncs (fork and cluster
 barriers, setmaxnreg, unconditional bra) is padding (Role.padding): its warps run the
 shared code and that region, and translate.py keeps its role only if that emits an event
 (a cluster kernel's padding warps arrive on the cluster barrier). Roles: "default" (warps
@@ -183,6 +199,9 @@ class Role:
     # A padding state's role (its region only syncs): translate.py keeps it only if its
     # translation emits an event.
     padding: bool = False
+    # A worker of a dispatch that may run no round (module doc, item rounds): its region's
+    # first block, from which the role runs only if the default chose the round.
+    gate: str | None = None
 
 
 @dataclass
@@ -194,6 +213,9 @@ class Dispatch:
     dispatch: str  # the block ending in the wid < D branch
     header: str  # the switch loop header: one pass of it in each worker role
     direct: bool = False  # the direct dispatch (no state bytes, module doc)
+    # A dispatch that may run no round (module doc, item rounds): (G, F), the default's
+    # decision block and the first block of its side that runs the round.
+    gate: tuple | None = None
 
 
 # ---------------------------------------------------------------------------- CFG
@@ -471,8 +493,8 @@ def _warp_specialized(cfg, h, ld, arms, nwarps):
         for b, blk in blocks.items()
         if blk.instrs and blk.instrs[-1].base in ("ret", "exit")
     )
-    pre, side, dflt = _parts(cfg, h, db, default, worker, ret)
-    warps, E = _state_map(cfg, smem, K, D, nwarps, arms, default, dflt, ret)
+    pre, side, dflt, gate = _parts(cfg, h, db, default, worker, ret)
+    warps, E = _state_map(cfg, smem, K, D, nwarps, arms, default, dflt, ret, gate)
     first = {b: blocks[b].succs for b in dflt}
     out = [
         Role("default", tuple(range(D)), cfg.entry, _flow(cfg, pre, db, default, first))
@@ -490,8 +512,10 @@ def _warp_specialized(cfg, h, ld, arms, nwarps):
         rest.update({u: _to(blocks[u].succs, h, ret) for u in region})
         mine = tuple(w for w, s in warps.items() if s == k)
         succs = _flow(cfg, pre, db, worker, rest)
-        out.append(Role(f"partition{k}", mine, cfg.entry, succs, pad))
-    return out, Dispatch(D, warps, E, tuple(padding), db, h)
+        out.append(Role(f"partition{k}", mine, cfg.entry, succs, pad,
+                        t if gate is not None else None))  # fmt: skip
+    cut = (gate.g, gate.full) if gate is not None else None
+    return out, Dispatch(D, warps, E, tuple(padding), db, h, gate=cut)
 
 
 # ---------------------------------------------------------------- direct dispatch
@@ -684,7 +708,12 @@ def _parts(cfg, h, db, default, worker, ret):
     the header and the default; they and the switch loop must not overlap."""
     pre = _forks(cfg, cfg.entry, {default, worker}, "before the dispatch")
     side = _forks(cfg, worker, {h}, "on the worker side") if worker != h else {}
-    dflt = _forks(cfg, default, set(), "in the default")
+    gate = None
+    try:
+        dflt = _forks(cfg, default, set(), "in the default")
+    except CfgError as e:
+        gate = _gate(cfg, default, ret, e)  # item rounds, else e
+        dflt = {**gate.top, **gate.zero_forks, **gate.full_forks}
     parts = {
         "pre-dispatch": pre,
         "worker-side": side,
@@ -699,23 +728,77 @@ def _parts(cfg, h, db, default, worker, ret):
         raise _no(cfg, "entry", f"{cfg.where(db)} does not dominate both sides")
     if any(_nforks(cfg, b) for b in [*pre, *side]):
         raise _no(cfg, "forks", "a fork barrier before the switch loop header")
-    if dflt.get(ret) != 4:
+    if gate is None and dflt.get(ret) != 4:
         n = dflt.get(ret, "no")
         raise _no(
             cfg, "forks", f"the default reaches ret after {n} fork barriers, not 4"
         )
-    return pre, side, dflt
+    return pre, side, dflt, gate
 
 
-def _state_map(cfg, smem, K, D, nwarps, arms, default, dflt, ret):
-    """({worker warp: state}, exit state) from the default's two rounds of stores."""
+@dataclass
+class _Gate:
+    """A default that decides at block g whether the workers run their round (module
+    doc, item rounds): the first blocks of its round side and its zero-round side, and
+    {block: fork barriers before it} of the code before the decision and of each side."""
+
+    g: str
+    full: str
+    zero: str
+    top: dict
+    full_forks: dict
+    zero_forks: dict
+
+
+def _gate(cfg, default, ret, err):
+    """The _Gate of a default whose fork barrier count depends on the path because it
+    may run no round (module doc, item rounds); else raise err, the path dependence."""
+    blocks = cfg.blocks
+    looped = set().union(*cfg.loops.values()) if cfg.loops else set()
+    found = []
+    for g in _reach(cfg, default, set()):
+        succs = blocks[g].succs
+        if g in looped or len(succs) != 2 or succs[0] == succs[1]:
+            continue
+        if any(blocks[x].preds != [g] for x in succs):
+            continue  # a side entered otherwise
+        if g != default and ret in _reach(cfg, default, {g}):
+            continue  # g not on every path of the default
+        try:
+            top = _forks(cfg, default, set(succs), "in the default")
+            sides = [_forks(cfg, x, set(), "in the default") for x in succs]
+        except CfgError:
+            continue
+        if any(_nforks(cfg, b) for b in top) or sorted(
+            (x.get(ret) or 0 for x in sides)
+        ) != [1, 4]:
+            continue
+        if set(sides[0]) & set(sides[1]) != {ret} or set(top) & (
+            set(sides[0]) | set(sides[1])
+        ):
+            continue
+        z, f = (0, 1) if sides[0][ret] == 1 else (1, 0)
+        found.append(_Gate(g, succs[f], succs[z], top, sides[f], sides[z]))
+    if len(found) != 1:
+        raise err
+    return found[0]
+
+
+def _state_map(cfg, smem, K, D, nwarps, arms, default, dflt, ret, gate=None):
+    """({worker warp: state}, exit state) from the default's two rounds of stores (and,
+    with a gate, its zero-round side's stores of the exit state)."""
     lo, hi = K + D, K + nwarps
-    table, exit_ = _state_stores(cfg, smem, lo, hi, default, dflt, ret)
-    for item, got in (("table", table), ("exit", exit_)):
+    table, exit_, zero = _state_stores(cfg, smem, lo, hi, default, dflt, ret, gate)
+    rounds = (("table", table), ("exit", exit_))
+    for item, got in rounds + ((("rounds", zero),) if gate is not None else ()):
         missing = [a - K for a in range(lo, hi) if a not in got]
         if missing:
             raise _no(cfg, item, f"the state byte of warps {missing} is not written")
     E = exit_[lo]
+    if gate is not None and set(zero.values()) != {E}:
+        raise _no(cfg, "rounds", f"the zero-round side ({cfg.where(gate.zero)}) writes "
+                                 f"states {sorted(set(zero.values()))}, not the exit "
+                                 f"state {E}")  # fmt: skip
     if (
         set(exit_.values()) != {E}
         or E not in arms
@@ -985,11 +1068,13 @@ def _state_base(cfg, h, ld, wid):
     return syms[0], addr[""]
 
 
-def _state_stores(cfg, smem, lo, hi, default, dflt, ret):
+def _state_stores(cfg, smem, lo, hi, default, dflt, ret, gate=None):
     """({byte: state} stored before the default's first fork barrier, {byte: state}
-    stored after its second and before its fourth), from the st.shared to smem +
-    constant overlapping [lo, hi); CfgError for any other such store."""
-    rounds = ({}, {})
+    stored after its second and before its fourth, {byte: state} stored on a gate's
+    zero-round side), from the st.shared to smem + constant overlapping [lo, hi);
+    CfgError for any other such store. With a gate, the first two are the round side's
+    and "on every path" is of that side."""
+    rounds = ({}, {}, {})
     for b, blk in cfg.blocks.items():
         for k, i in enumerate(blk.instrs):
             if ops.mnemonic(i.opcode) != "st.shared":
@@ -1002,17 +1087,19 @@ def _state_stores(cfg, smem, lo, hi, default, dflt, ret):
             span = range(max(addr[""], lo), min(addr[""] + size, hi))
             if not span:
                 continue
+            start, forks = _store_side(gate, b, default, dflt)
             n = (
-                dflt[b] + sum(_is_fork(x) for x in blk.instrs[:k])
-                if b in dflt
+                forks[b] + sum(_is_fork(x) for x in blk.instrs[:k])
+                if b in forks
                 else None
             )
-            item = "exit" if n is not None and n >= 2 else "table"
-            why = _store_fault(cfg, i, n, b, default, ret)
+            item, why = _store_item(
+                gate, start, default, n, _store_fault(cfg, i, n, b, start, ret)
+            )
             if why:
                 msg = f"`{i.text}` at line {i.line} writes the state bytes {why}"
                 raise _no(cfg, item, msg)
-            got = rounds[n > 0]
+            got = rounds[2] if start == getattr(gate, "zero", None) else rounds[n > 0]
             vals = _immediates(i.operands[1])  # not None: _store_fault
             k = size // len(vals)
             data = b"".join((v % (1 << 8 * k)).to_bytes(k, "little") for v in vals)
@@ -1025,9 +1112,30 @@ def _state_stores(cfg, smem, lo, hi, default, dflt, ret):
     return rounds
 
 
+def _store_side(gate, b, default, dflt):
+    """(the first block of the part of the default holding block b, its {block: fork
+    barriers before it}): the default's, or with a gate its zero-round or round side's."""
+    if gate is not None and b in gate.zero_forks:
+        return gate.zero, gate.zero_forks
+    if gate is not None and b in gate.full_forks:
+        return gate.full, gate.full_forks
+    return default, dflt
+
+
+def _store_item(gate, start, default, n, why):
+    """(protocol item, fault or None) of a state store after n fork barriers of the part
+    of the default starting at `start` (_store_side), whose fault so far is `why`."""
+    if gate is not None and start == gate.zero:
+        return "rounds", why
+    if gate is not None and start == default and n is not None:
+        return "table", "before the decision whether the workers run a round"
+    return ("exit" if n is not None and n >= 2 else "table"), why
+
+
 def _store_fault(cfg, i, n, b, default, ret):
-    """Why store i (in block b, after n fork barriers of the default; None outside the
-    default) to the state bytes breaks the protocol, or None."""
+    """Why store i (in block b, after n fork barriers of the default, or of the gate's
+    side `default` starts; None outside the default) to the state bytes breaks the
+    protocol, or None."""
     if n is None:
         return "outside the default"
     if n not in (0, 2, 3):

@@ -254,7 +254,8 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
                  work_fields=tuple(work.get("fields", ())), work_mode=work.get("mode", "gate"),
                  work_per=dict(work.get("per", {})),
                  srclocs=srclocs, p1=p1, switches=switches,
-                 captures={} if dispatch is not None else None)  # fmt: skip
+                 captures={} if dispatch is not None else None,
+                 gate_at=dispatch.gate if dispatch is not None else None)  # fmt: skip
     translators = []
     for role in roles:
         tree = R.build(cfg, role)
@@ -263,7 +264,7 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
             raise interp.Unsupported(
                 "role", role.name, f"warps {warps} are not contiguous"
             )
-        got = _role(k, tree, role.name, warps[0], len(warps), pol)
+        got = _role(k, tree, role.name, warps[0], len(warps), pol, role.gate)
         if role.padding and not any(
             s["op"] == "event" for tr in got for s in _statements(tr.stmts)
         ):
@@ -314,15 +315,19 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
     facts.params = dict(sorted(mem.used_params.items()))
 
 
-def _role(k, tree, name, w0, nw, pol) -> list:
+def _role(k, tree, name, w0, nw, pol, gate=None) -> list:
     """The translators of one role: itself, or (policy "warps") its parts after
-    partition refinement (frontend/cute/to_kir.py Variant.roles)."""
+    partition refinement (frontend/cute/to_kir.py Variant.roles). `gate`: a worker of a
+    dispatch that may run no round, its region's first block (cfg.Role.gate)."""
     out, todo = [], [(w0, nw)]
     while todo:
         a, n = todo.pop(0)
         tr = interp.Translator(k, tree, a, n, name)
         try:
-            tr.run(tree.body)
+            if gate is None:
+                tr.run(tree.body)
+            else:
+                tr.run_gated(tree.body, gate)
             tr.flush()
         except interp.SplitWarps as s:
             todo = s.groups + todo

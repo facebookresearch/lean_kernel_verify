@@ -18,7 +18,14 @@ a control-flow shape a gap, an exception of the core an error at its instruction
 anchors under both rules (TTGIR gate: one event after the definition; CuTe each: -1 at
 the role's start, then the anchored load's index), and an anchored load counting only
 where its predicate holds. param_table names a struct's pointer field only by the tensor
-its address starts in every record that has a non-null pointer.
+its address starts in every record that has a non-null pointer. Captures: forwarded
+(also bytewise), unknown where the store may not happen (a predicate or a branch on a
+uniform runtime condition), runs in only some of the default's threads, differs between
+threads or follows the first fork barrier, refused where overwritten after a read. A
+dispatch that may run no round (cfg.py, item rounds): each worker's region a KIR `if` on
+the default's decision (a parameter, a metadata load), captures of the round side
+forwarded under it, refused where the decision is data or differs between the default's
+threads.
 """
 
 import sys
@@ -552,6 +559,9 @@ class Captures(unittest.TestCase):
             # a store after the default's first fork barrier
             CAP.replace(CAP_STORE, "").replace("    barrier.sync 1;\n    barrier.sync 1;\n    add.s32 %r21",
                         "    barrier.sync 1;\n" + CAP_STORE + "    barrier.sync 1;\n    add.s32 %r21", 1),
+            # a store in a branch on a uniform runtime condition (a KIR `if`) may not happen
+            CAP.replace(CAP_STORE, "    setp.eq.s32 %p9, %r20, 0;\n    @%p9 bra $SKIP;\n" + CAP_STORE
+                        + "$SKIP:\n"),
         ]  # fmt: skip
         for text in cases:
             f = ws_facts(text)
@@ -580,6 +590,89 @@ class Captures(unittest.TestCase):
             CAP.replace(CAP_LOAD, CAP_LOAD + "    st.shared.b32 [smem+32], 0;\n")
         )
         self.assertIn("may overwrite a warp-specialize capture", f.refusals[0]["msg"])
+
+
+# WS whose default may run no round (cfg.py, item rounds): with n < 1 it stores the exit
+# state 3 for every worker before one fork barrier and returns, before the barrier init's
+# arrive and the store; partition0 (warp 6) then never waits.
+ZERO_IF = "    setp.lt.s32 %p9, %r20, 1;\n"
+ZERO = WS.replace(
+    "    st.shared.b32 [smem+24], 33554689;\n",
+    ZERO_IF + "    @%p9 bra $NONE;\n    st.shared.b32 [smem+24], 33554689;\n",
+).replace(
+    "    st.shared.b32 [smem+24], 50529027;\n    barrier.sync 1;\n$RET:\n",
+    "    st.shared.b32 [smem+24], 50529027;\n    barrier.sync 1;\n    bra.uni $RET;\n$NONE:\n"
+    "    st.shared.b32 [smem+24], 50529027;\n    barrier.sync 1;\n$RET:\n",
+)
+
+
+class ZeroRounds(unittest.TestCase):
+    def trace(self, f, role, meta=None, **inp):
+        return [t[0] for t in evaluate(f, {"x.shape.0": 64, **inp}, meta, role=role)]
+
+    def test_regions_run_under_the_decision(self):
+        f = ws_facts(ZERO)
+        self.assertEqual(f.refusals, [])
+        self.assertEqual(kir_errors(f), [])
+        # partition0's region (its wait) is a KIR `if` on the default's decision (n >= 1,
+        # the default's round side); the code before it runs in either case
+        (top,) = [s for s in f.roles[1]["body"] if s["op"] == "if"]
+        self.assertEqual([s["ev"] for s in statements(top["then"]) if s["op"] == "event"],
+                         ["wait"])  # fmt: skip
+        self.assertEqual(top["else"], [])
+        for n, worker, default in ((0, [], ["bar_init"]),
+                                   (1, ["wait"], ["bar_init", "gstore", "arrive"]),
+                                   (5, ["wait"], ["bar_init", "gstore", "arrive"])):  # fmt: skip
+            self.assertEqual(self.trace(f, 1, n=n), worker, n)
+            self.assertEqual(self.trace(f, 0, n=n), default, n)
+
+    def test_decision_from_metadata(self):
+        # a weak load of x: the metadata `load` both roles evaluate
+        f = ws_facts(
+            ZERO.replace(
+                ZERO_IF,
+                "    ld.global.b32 %r50, [%rd1];\n    setp.lt.s32 %p9, %r50, 1;\n",
+            )
+        )
+        self.assertEqual(f.refusals, [])
+        self.assertTrue(f.tensors["x"]["metadata"])
+        lets = [s["expr"] for s in f.roles[1]["body"] if s["op"] == "let"]
+        self.assertIn("'e': 'load'", str(lets))
+        self.assertEqual(self.trace(f, 1, {"x": [0] * 64}, n=0), [])
+        self.assertEqual(self.trace(f, 1, {"x": [1] * 64}, n=0), ["wait"])
+
+    def test_capture_under_the_decision(self):
+        # a capture the default stores on its round side holds where the region runs
+        text = ZERO.replace("    st.shared.b32 [smem+24], 33554689;\n",
+                            "    st.shared.b32 [smem+24], 33554689;\n" + CAP_STORE).replace(
+            "$P0:\n    barrier.sync 1;\n", "$P0:\n" + CAP_LOAD + "    barrier.sync 1;\n").replace(
+            "    and.b32 %r10, %r9, 1;\n", "    and.b32 %r10, %r41, 1;\n")  # fmt: skip
+        f = ws_facts(text)
+        self.assertEqual(f.refusals, [])
+        waits = [[t for t in evaluate(f, {"n": n, "x.shape.0": 64}, role=1) if t[0] == "wait"]
+                 for n in (0, 1, 2)]  # fmt: skip
+        self.assertEqual(
+            waits, [[], [("wait", "mbar_16", 0, 0)], [("wait", "mbar_16", 0, 1)]]
+        )
+        # on the zero-round side it would be no capture
+        g = ws_facts(text.replace(CAP_STORE, "").replace(
+            "$NONE:\n", "$NONE:\n" + CAP_STORE))  # fmt: skip
+        self.assertIn("reaches", g.refusals[0]["msg"] if g.refusals else "")
+
+    def test_refusals(self):
+        cases = [
+            # a strong load: data the workers cannot evaluate
+            ("depends on data", ZERO.replace(ZERO_IF, "    ld.relaxed.gpu.global.b32 %r50, [%rd1];\n"
+                                                      "    setp.lt.s32 %p9, %r50, 1;\n")),
+            # the threads of the default disagree
+            ("differs between the default's threads",
+             ZERO.replace(ZERO_IF, "    setp.lt.u32 %p9, %r1, 64;\n")),
+        ]  # fmt: skip
+        for msg, text in cases:
+            with self.subTest(msg):
+                f = ws_facts(text)
+                self.assertIn(msg, f.refusals[0]["msg"] if f.refusals else "")
+                self.assertIn("run a round", f.refusals[0]["msg"])
 
 
 # A switch on pid % 4 (LLVM's jump table of a select chain): cfg.lower_switches makes it a

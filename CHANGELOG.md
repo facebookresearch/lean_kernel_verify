@@ -146,3 +146,11 @@ First public release.
   it names, the only accesses whose check reads it; elsewhere it is -1.
 - Docs: CuTe DSL 4.4.2 compiles with the PTX compiler it embeds (12.9.83), not CUDA
   13.0's ptxas; a TMA reduce is once per warp only behind the DSL's `elect.sync`.
+- PTX translation: a TLX/Triton warp-specialize dispatch whose default may run no round
+  (it decides once whether to store the state table or only the exit state before one
+  fork barrier, e.g. an early exit when no work is left) is translated: each worker's
+  region runs under the default's decision, which must be a value of the launch
+  (frontend_ptx.md). It was refused ("the fork barriers ... depend on the path").
+- PTX translation: a warp-specialize capture the default stores in a branch on a
+  uniform runtime condition or in a loop is no longer forwarded to the workers as if it
+  always ran (it may not); the workers' loads of it are data.

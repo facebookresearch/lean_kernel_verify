@@ -24,7 +24,8 @@ every role). A footprint through a ring-buffer index (x % k as LLVM writes it) i
 unless the arithmetic may wrap at its width; one through a strength-reduced loop-carried
 offset keeps the capture under a KIR assume; one under elect.sync covers every lane that
 may be elected; a TMA landing through a packed sub-byte descriptor may touch any byte.
-The op table's shared-memory writers are all covered: each is one of
+Each arm of an if (on a uniform value or per warp) counts the default's fork barriers
+from the If. The op table's shared-memory writers are all covered: each is one of
 interp.CAPTURE_WRITERS and reaches a capture hook through the dispatch of its class.
 """
 
@@ -123,9 +124,9 @@ _PREDS = {"early": ("%p5", "%p8"), "default": ("%p5", "%p8"), "late": ("%p10", "
           "after": ("%p10", "%p9")}  # fmt: skip
 
 
-def kernel(cluster: int = 1, **hooks) -> str:
+def kernel(cluster: int = 1, text: str = BODY, **hooks) -> str:
     decl = ", ".join(_DECL[k].format(i=i) for i, (k, _n, _v) in enumerate(PARAMS))
-    body = BODY.format(**{h: hooks.get(h, "").replace("{one}", _PREDS[h][0]).replace(
+    body = text.format(**{h: hooks.get(h, "").replace("{one}", _PREDS[h][0]).replace(
         "{elect}", _PREDS[h][1]) for h in _PREDS})  # fmt: skip
     req = f".reqnctapercluster {cluster}, 1, 1\n" if cluster > 1 else ""
     return f"""
@@ -146,7 +147,7 @@ def kernel(cluster: int = 1, **hooks) -> str:
 """  # fmt: skip
 
 
-def run(cluster: int = 1, **hooks):
+def run(cluster: int = 1, text: str = BODY, **hooks):
     params = []
     for i, (k, name, v) in enumerate(PARAMS):
         p = {"i": i, "ptx": f"k_param_{i}", "name": name, "kind": _KIND[k],
@@ -158,7 +159,7 @@ def run(cluster: int = 1, **hooks):
     pol = T.policy(
         "ttgir", src_root=SRC, params=table, tensors={"x": {"elem_bytes": 4}}
     )
-    return T.translate(kernel(cluster, **hooks), "k", recs, pol)
+    return T.translate(kernel(cluster, text, **hooks), "k", recs, pol)
 
 
 def _statements(stmts):
@@ -414,6 +415,20 @@ class Captures(unittest.TestCase):
             self.assertEqual(
                 run(2, **{hook: red.replace("AT", "128")}).refusals, [], hook
             )
+
+    def test_fork_barriers_in_both_arms(self):
+        # the default runs its two fork barriers in both arms of an if, on n (a KIR `if`)
+        # or on its warp (masked), and writes the capture in one arm before them: each
+        # arm counts its fork barriers from the If, whichever arm is translated first
+        forks = "    barrier.sync 1;\n    barrier.sync 1;\n"
+        for cond in ("%r20, 3", "%r3, 0"):
+            for write in ("st.shared.b32 [global_smem+32]", "st.u32 [%rd9+32]"):
+                for arms in ((write, ""), ("", write)):
+                    a, b = (f"    {w}, %r1;\n" if w else "" for w in arms)
+                    text = BODY.replace("{default}" + forks, (
+                        f"    setp.gt.s32 %p20, {cond};\n    @%p20 bra $THEN;\n{a}{forks}"
+                        f"    bra.uni $JOIN;\n$THEN:\n{b}{forks}$JOIN:\n"))  # fmt: skip
+                    self.assertIn(UNKNOWN, refusal(run(text=text)), (cond, write, arms))
 
     def test_writes_after_the_second_fork_barrier(self):
         # this CTA's own writes after partition1's second fork barrier follow every read

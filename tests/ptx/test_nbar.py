@@ -21,8 +21,9 @@ one role inside a loop on uniform data sharing its region key, also where the lo
 bound is a ballot of per-lane data alike in every warp; a loop bound read from a tensor
 with recorded contents (an exact KIR loop over a metadata `load`, without contents a
 repeated region, of a tensor the kernel writes undecided); a cycle entered at two
-blocks (made reducible by node splitting); a call (refused, P0-6 undecided); and the
-KIRs frontend/kir.py accepts.
+blocks (made reducible by node splitting); a call (refused, P0-6 undecided); a
+warp-specialized kernel whose default may run no round (the workers' barriers under its
+decision, refused on a decision that is data); and the KIRs frontend/kir.py accepts.
 """
 
 import sys
@@ -90,6 +91,25 @@ $BYPASS:
     barrier.sync 1;
     bra.uni $LOOP;
 """
+
+
+# WS whose default may run no round (cfg.py, item rounds): with n < 1 it stores the exit
+# state for every worker before one fork barrier and returns; barrier 4 (160 threads) is
+# the default's and partition0's on the round side only.
+WS_ZERO = (
+    WS.replace(
+        "    st.shared.b32 [smem+24], 33554689;\n",
+        "    ld.param.b32 %r4, [k_param_1];\n    setp.lt.s32 %p3, %r4, 1;\n"
+        "    @%p3 bra $NONE;\n    st.shared.b32 [smem+24], 33554689;\n",
+    )
+    .replace("    bar.sync 2, 128;\n", "    bar.sync 2, 128;\n    bar.sync 4, 160;\n")
+    .replace(
+        "    st.shared.b32 [smem+24], 50529027;\n    barrier.sync 1;\n$RET:\n",
+        "    st.shared.b32 [smem+24], 50529027;\n    barrier.sync 1;\n    bra.uni $RET;\n"
+        "$NONE:\n    st.shared.b32 [smem+24], 50529027;\n    barrier.sync 1;\n$RET:\n",
+    )
+    .replace("    bar.sync 3, 32;\n", "    bar.sync 3, 32;\n    bar.sync 4, 160;\n")
+)
 
 
 def facts(body, threads=128, family="ttgir", meta=()):
@@ -215,6 +235,28 @@ $END:
         got = sorted((s["role"], s["id"], s["count"]) for s in sites(f, "counted"))
         self.assertEqual(got, [("default", 2, 128), ("partition0", 3, 32)])
         self.assertEqual(sites(f, "open"), [])
+
+    def test_dispatch_without_rounds(self):
+        f = facts(WS_ZERO, threads=256)
+        self.ok(f)
+        got = sorted((s["role"], s["id"], s["count"]) for s in sites(f, "counted"))
+        self.assertEqual(got, [("default", 2, 128), ("default", 4, 160),
+                               ("partition0", 3, 32), ("partition0", 4, 160)])  # fmt: skip
+        # partition0's barriers run under the default's decision (n >= 1), a KIR `if`
+        # like the default's own
+        body = {r["name"]: r["body"] for r in f.roles}
+        (gate,) = [s for s in body["partition0"] if s["op"] == "if"]
+        self.assertEqual([x["id"]["v"] for x in _stmts(gate["then"]) if x.get("ev") == "named_bar"],
+                         [3, 4])  # fmt: skip
+        self.assertFalse(any(x.get("ev") == "named_bar" for x in body["partition0"]))
+        (dif,) = [s for s in body["default"] if s["op"] == "if"]
+        self.assertEqual(sorted(x["id"]["v"] for side in ("then", "else")
+                                for x in _stmts(dif[side]) if x.get("ev") == "named_bar"),
+                         [2, 4])  # fmt: skip
+        # a decision on data (a strong load) cannot be paired: refused
+        g = facts(WS_ZERO.replace("    ld.param.b32 %r4, [k_param_1];\n",
+                                  "    ld.relaxed.gpu.global.b32 %r4, [%rd1];\n"), threads=256)  # fmt: skip
+        self.assertIn("run a round is data", g.refusals[0]["msg"] if g.refusals else "")
 
     def test_id_from_memory_is_not_certain(self):
         f = facts("""

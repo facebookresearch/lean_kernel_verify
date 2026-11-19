@@ -26,7 +26,12 @@ refusals, a padding target reached through two links: a role per path, each tran
 fork barriers in each spelling (`bar.sync 1`, `barrier.sync.aligned 1` count too); and one
 refusal per protocol item (entry, header, table, exit, forks), each
 naming its item, among them branches on the complement result q of a `setp p|q` (not
-read as the comparison).
+read as the comparison). A dispatch that may run no round (item rounds: the default
+decides once whether to store the table or only the exit state before one fork barrier):
+its decision block and round side, each worker's region start (Role.gate), and the
+refusals of a zero-round side that writes another state, not every worker's state or
+after its fork barrier, of a state store before the decision and of fork counts the item
+does not admit.
 """
 
 import sys
@@ -224,6 +229,20 @@ $RET:
     ret;
 """,
     threads=384,
+)
+
+
+# WS_FALL whose default may run no round: with n < 1 it stores the exit state 3 for every
+# worker, runs one fork barrier and returns, so the workers pass the header once, read 3
+# and return (Triton's warp-specialized kernel with an early exit before its dispatch).
+WS_ZERO = WS_FALL.replace(
+    "    st.shared.b32 [global_smem+24], 33554689;\n",
+    "    ld.param.b32 %r4, [k_param_1];\n    setp.lt.s32 %p3, %r4, 1;\n"
+    "    @%p3 bra $NONE;\n    st.shared.b32 [global_smem+24], 33554689;\n",
+).replace(
+    "    st.shared.b32 [global_smem+24], 50529027;\n    barrier.sync 1;\n$RET:\n",
+    "    st.shared.b32 [global_smem+24], 50529027;\n    barrier.sync 1;\n    bra.uni $RET;\n"
+    "$NONE:\n    st.shared.b32 [global_smem+24], 50529027;\n    barrier.sync 1;\n$RET:\n",
 )
 
 
@@ -984,6 +1003,59 @@ class WarpSpecialize(unittest.TestCase):
             ),
             ("forks", "not 4", WS_FALL.replace(exit_ + "    barrier.sync 1;\n", exit_)),
         ]
+        for item, msg, text in cases:
+            with self.subTest(f"{item}: {msg}"):
+                with self.assertRaisesRegex(
+                    cfg.CfgError, rf"dispatch \({item}\): .*{msg}"
+                ):
+                    cfg.roles(build(text))
+
+    def test_zero_rounds(self):
+        g = build(WS_ZERO)
+        rs, d = cfg.roles(g)
+        gate = holding(g, "@%p3 bra $NONE")
+        self.assertEqual(d.gate, (gate, g.blocks[gate].succs[1]))
+        self.assertEqual(g.blocks[gate].succs[0], "$NONE")
+        self.assertEqual(
+            (d.warps, d.exit_state, d.padding), ({4: 1, 5: 1, 6: 0, 7: 2}, 3, (1, 2))
+        )
+        # every worker's region runs only if the default took the round side; the
+        # default's role holds both sides
+        self.assertEqual([(r.name, r.gate) for r in rs],
+                         [("default", None), ("partition0", "$P0"), ("partition1", "$PAD1"),
+                          ("partition2", "$PAD2")])  # fmt: skip
+        self.assertEqual(rs[0].succs[gate], g.blocks[gate].succs)
+        self.assertEqual(rs[0].succs["$NONE"], ("$RET",))
+        # without the early exit nothing changes
+        self.assertIsNone(cfg.roles(build(WS_FALL))[1].gate)
+        self.assertTrue(all(r.gate is None for r in cfg.roles(build(WS_FALL))[0]))
+
+    def test_zero_round_refusals(self):
+        none = "$NONE:\n    st.shared.b32 [global_smem+24], 50529027;\n    barrier.sync 1;\n"
+        cases = [
+            # the zero-round side writes a state other than the exit state
+            ("rounds", "writes states \\[1\\], not the exit state 3",
+             WS_ZERO.replace(none, none.replace("50529027", "16843009"))),
+            # ... or not every worker's
+            ("rounds", "state byte of warps \\[6, 7\\] is not written",
+             WS_ZERO.replace(none, none.replace("st.shared.b32 [global_smem+24], 50529027",
+                                                "st.shared.b16 [global_smem+24], 771"))),
+            # ... or after its fork barrier
+            ("rounds", "after 1 fork barriers",
+             WS_ZERO.replace(none, "$NONE:\n    barrier.sync 1;\n"
+                                   "    st.shared.b32 [global_smem+24], 50529027;\n")),
+            # a state store before the decision
+            ("table", "before the decision whether the workers run a round",
+             WS_ZERO.replace("    @%p3 bra $NONE;\n",
+                             "    st.shared.b8 [global_smem+24], 3;\n    @%p3 bra $NONE;\n")),
+            # two fork barriers on the zero-round side: no decision, the count depends on
+            # the path
+            ("forks", "depend on the path",
+             WS_ZERO.replace(none, none + "    barrier.sync 1;\n")),
+            # a fork barrier before the decision
+            ("forks", "depend on the path",
+             WS_ZERO.replace("    @%p3 bra $NONE;\n", "    barrier.sync 1;\n    @%p3 bra $NONE;\n")),
+        ]  # fmt: skip
         for item, msg, text in cases:
             with self.subTest(f"{item}: {msg}"):
                 with self.assertRaisesRegex(

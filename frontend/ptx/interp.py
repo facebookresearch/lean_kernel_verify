@@ -174,6 +174,11 @@ class Kernel:
     capture_dirty: list = field(default_factory=list)
     # (shared symbol, byte) of the captures a worker read as known (check_capture_barriers)
     capture_forwarded: set = field(default_factory=set)
+    # A dispatch that may run no round (cfg.py, item rounds): (G, F) of cfg.Dispatch.gate,
+    # and the condition under which the default takes F, a value of the launch the default
+    # records at G (Translator._gate_if) and each worker's region runs under (run_gated)
+    gate_at: tuple | None = None
+    gate: tuple | None = None
 
 
 # An mbarrier event awaiting its array (mem.Memory.barriers): the KIR event (bar and idx
@@ -235,6 +240,8 @@ class Translator:
         # loop-invariant binding
         self.hoist: list = []
         self.regions: list = []  # open If branches: (id(node), side) (barrier keys)
+        self.uconds: list = []  # the conditions of the open uniform If arms (the captures)
+        self.gated = False  # in a worker's region under the dispatch's gate (run_gated)
         self.work_scopes: list = [{}]  # work fields defined in each open region
         self.work_events = 0
         self.novalue: dict = {}  # `per` field defined without a value -> its first anchor
@@ -781,6 +788,10 @@ class Translator:
 
     def run_if(self, node: R.If) -> None:
         assert node.branch.guard is not None, "regions.py: an If is a guarded bra"
+        gate = self.k.gate_at
+        if gate is not None and node.block == gate[0] and self.name == "default":
+            self._gate_if(node, gate[1])
+            return
         if isinstance(self.env.get(node.branch.guard[0]), Data) and self._inert(node):
             return
         c = self._cond(node)
@@ -796,6 +807,73 @@ class Translator:
                 self._masked_if(node, c)
         else:
             self._uniform_if(node, cu)
+
+    def _gate_if(self, node: R.If, full: str) -> None:
+        """The default's decision whether the workers run their round (cfg.py, item
+        rounds; `full`: the first block of the side that runs it). The workers learn it
+        from the state bytes only, so it must be one value of the launch that each worker
+        evaluates alike (parameters, program id, metadata): recorded in Kernel.gate,
+        under which run_gated translates their regions; else the variant is refused. The
+        two sides are a KIR `if`, each from the fork barriers before the decision."""
+        assert node.branch.guard is not None  # (cfg.py: G is a conditional branch)
+        reg, _neg = node.branch.guard
+        self.cur = node.branch
+        why = "the decision whether the warp-specialize workers run a round"
+        if isinstance(self.env.get(reg), Data):
+            self.fail(node.branch, f"{why} depends on data ({self.env[reg].origin}): "
+                                   "the workers cannot evaluate it")  # fmt: skip
+        c = self._cond(node)
+        cu = self.uniform(c)
+        if cu is None:
+            self.fail(node.branch, f"{why} differs between the default's threads")
+        if not _launch_only(cu, self.k.mem.used_params, self.created):
+            self.fail(node.branch, f"{why} is no value of the launch (parameters, program "
+                                   "id, metadata): the workers cannot evaluate it")  # fmt: skip
+        full_then = self.k.mem.cfg.blocks[node.block].succs[0] == full
+        g = cu if full_then else E.not1(cu)
+        if self.k.gate is not None and self.k.gate != g:
+            self.fail(node.branch, f"{why} differs between the parts of the default")
+        self.k.gate = g
+        if E.is_const(cu):
+            self.run(node.then if cu[2] else node.else_)
+            return
+        self._uniform_if(node, cu)
+
+    def run_gated(self, seq: list, start: str) -> None:
+        """A worker role of a dispatch that may run no round (cfg.Role.gate): its region,
+        from the top-level node of block `start` on, runs under the default's decision
+        (Kernel.gate, a KIR `if`); the code before (the worker side, the switch loop
+        header's first pass) runs in either case."""
+        at = next((j for j, n in enumerate(seq) if _starts(n, start)), None)
+        if at is None:
+            self.fail(self.cur, f"the region at {start} of a warp-specialize worker does "
+                                "not start at the top of its role")  # fmt: skip
+        self.run(seq[:at])
+        self.flush()
+        g = self.k.gate
+        if g is None:
+            self.fail(self.cur, "the default never reached its decision whether the "
+                                "warp-specialize workers run a round")  # fmt: skip
+        if E.is_const(g) and not g[2]:
+            return
+        cj = None if E.is_const(g) else self.json(g)
+        saved, self.stmts = self.stmts, []
+        mark = self.push_scope()
+        self.regions.append(("gate", 1))
+        self.uconds.append(g)
+        self.gated = True
+        self.run(seq[at:])
+        self.flush()
+        self.gated = False
+        self.uconds.pop()
+        self.regions.pop()
+        self.pop_scope(mark)
+        body, self.stmts = self.stmts, saved
+        if cj is None:
+            self.stmts += body
+        elif body:
+            self.stmts.append({"op": "if", "cond": cj, "then": body, "else": [],
+                               "loc": self.loc()})  # fmt: skip
 
     def _inert(self, node: R.If, c=None) -> bool:
         """A branch whose arms emit nothing controls no event, so its condition is no root
@@ -887,11 +965,23 @@ class Translator:
         return out, self.env, local
 
     def _uniform_if(self, node: R.If, c) -> None:
+        """A KIR `if` on the uniform condition c; each arm counts its fork barriers from
+        the count before the If (the captures)."""
         loc = self.loc(node.branch)
         cj = self.json(c)  # before the branches, which may reuse its lets
-        env0 = self.env
-        then_s, env_t, loc_t = self._branch(node, 1, node.then, env0)
-        else_s, env_e, loc_e = self._branch(node, 0, node.else_, env0)
+        env0, f0 = self.env, self.forks
+        self.uconds.append(c)
+        try:
+            then_s, env_t, loc_t = self._branch(node, 1, node.then, env0)
+        finally:
+            self.uconds.pop()
+        f1, self.forks = self.forks, f0
+        self.uconds.append(E.not1(c))
+        try:
+            else_s, env_e, loc_e = self._branch(node, 0, node.else_, env0)
+        finally:
+            self.uconds.pop()
+        self.forks = max(f1, self.forks)
         self.env = dict(env0)
         self.cur = node.branch
         pre = []
@@ -925,7 +1015,7 @@ class Translator:
             )
 
     def _masked_if(self, node: R.If, c) -> None:
-        env0, saved = self.env, self.mask
+        env0, saved, f0 = self.env, self.mask, self.forks
         self.env = dict(env0)
         self.mask = E.and1(saved, c)
         self.regions.append((id(node), 1))
@@ -934,7 +1024,12 @@ class Translator:
         self.env = dict(env0)
         self.mask = E.and1(saved, E.not1(c))
         self.regions[-1] = (id(node), 0)
+        f1, self.forks = (
+            self.forks,
+            f0,
+        )  # (each arm from the fork barriers before the If)
         self.run(node.else_)
+        self.forks = max(f1, self.forks)
         self.regions.pop()
         env_e = self.env
         self.mask = saved
@@ -1903,7 +1998,9 @@ class Translator:
         """A shared write in a kernel with a warp-specialize dispatch (the captures,
         frontend_ptx.md "Threads and roles"): the default's st.shared before its first
         fork barrier records the bytes it writes if it runs unconditionally (statically
-        known issuing threads, no runtime condition) and stores one value in every
+        known issuing threads, no runtime condition: no predicate, uniform `if` or loop
+        around it, but the decision of a dispatch that may run no round on its round
+        side, under which the workers read it, run_gated) and stores one value in every
         thread that depends on nothing but the launch (parameters, program id, shared
         symbols, metadata): a worker reads that value between its first and second fork
         barrier. Any other shared write before the workers' reads (at an unknown address,
@@ -1922,6 +2019,8 @@ class Translator:
             and self.name == "default"
             and not self.forks
             and not maybe
+            and not self.loops
+            and self.uconds in ([], [self.k.gate])
         ):
             uni, var = self.split_mask()
             act = self.active(var)
@@ -1964,6 +2063,8 @@ class Translator:
         caps = self.k.captures
         if caps is None or None in caps or self.name == "default" or self.forks != 1:
             return False
+        if self.k.gate_at is not None and not self.gated:
+            return False  # before its region: the default may have run no round
         mem = next((x for x in i.operands if x[0] == "mem"), None)
         where = self._capture_bytes(i, mem) if mem else None
         if where is None or any(caps.get(b) is None for b in where):
@@ -2898,6 +2999,15 @@ def _exit_values(exits: dict, carried: list, live, values: list) -> None:
     for k, r in enumerate(carried):
         if r not in live:
             exits[k] = values[k] if exits.get(k, values[k]) is values[k] else None
+
+
+def _starts(node, block: str) -> bool:
+    """A region tree node (regions.py) starts at CFG block `block`."""
+    if isinstance(node, R.Block):
+        return node.name == block
+    if isinstance(node, R.If):
+        return node.block == block
+    return isinstance(node, (R.Loop, R.Wait)) and node.header == block
 
 
 def _effects(seq) -> bool:
