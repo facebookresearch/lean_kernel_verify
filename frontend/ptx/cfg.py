@@ -82,7 +82,8 @@ directly, and every partition, padding included, ends in `ret`. Items:
            previous link as its only predecessor (the header is the first link). Each
            worker warp w (D <= w < nwarps) follows the links' comparisons evaluated at
            w to the first block that is no link: its partition's target. Two warps that
-           reach one target through different links: refused (unless it is padding)
+           reach one target through different links: refused, unless it is padding
+           (then a role per path)
   forks    none before the header, 1 in it, 1 on every path of each partition from its
            target to ret (the barrier after the captures' loads), 2 on every path of the
            default to ret; the regions share no block with the default, the pre-dispatch
@@ -521,8 +522,9 @@ def _is_wid(cfg, pos):
 
 
 def _wid_chain(cfg, h, wid, D, nwarps):
-    """{target: (links from h to it, its warps)}: each worker warp follows the links'
-    comparisons to its partition's target (module doc, item chain)."""
+    """{(target, links from h to it): its warps}: each worker warp follows the links'
+    comparisons to its partition's target (module doc, item chain); a target reached
+    through several paths has an entry per path (padding only, _direct_roles)."""
     arms: dict = {}
     for w in range(D, nwarps):
         path, b = (), h
@@ -534,13 +536,7 @@ def _wid_chain(cfg, h, wid, D, nwarps):
             b = t[1] if t[0](w) else t[2]
         if b == h or b in path:
             raise _no(cfg, "header", f"warp {w} does not leave the dispatch chain")
-        got = arms.setdefault(b, (path, []))
-        if got[0] != path:
-            got = arms[b] = (
-                None,
-                got[1],
-            )  # several paths: padding only (_direct_roles)
-        got[1].append(w)
+        arms.setdefault((b, path), []).append(w)
     return arms
 
 
@@ -567,11 +563,11 @@ def _direct_roles(cfg, h, db, D, default, worker, arms):
         raise _no(
             cfg, "forks", f"the default reaches ret after {n} fork barriers, not 2"
         )
-    links = {u for path, _ws in arms.values() for u in path or ()} | {h}
+    links = {u for _t, path in arms for u in path} | {h}
     fixed = {"pre-dispatch": set(pre), "worker-side": set(side),
              "default": set(dflt) - {ret}, "dispatch chain": links}  # fmt: skip
     regions = {}
-    for t in arms:
+    for t in dict.fromkeys(t for t, _path in arms):
         reg = regions[t] = _forks(cfg, t, set(), f"in the partition at {cfg.where(t)}")
         if reg.get(ret) != 1:
             n = reg.get(ret, "no")
@@ -587,27 +583,28 @@ def _direct_roles(cfg, h, db, D, default, worker, arms):
             raise _no(cfg, "forks", f"the {a} and {c} code share {shared}")
     pad = {t for t, reg in regions.items()
            if all(_syncs_only(i) for u in reg if u != ret for i in blocks[u].instrs)}  # fmt: skip
-    for t, (path, ws) in arms.items():
-        if path is None and t not in pad:
+    for t in regions:
+        paths = [a for a in arms if a[0] == t]
+        if len(paths) > 1 and t not in pad:
+            ws = sorted(w for a in paths for w in arms[a])
             raise _no(cfg, "chain", f"warps {ws} reach the partition at {cfg.where(t)} "
                                     "through different links")  # fmt: skip
-    order = sorted(arms, key=lambda t: (t in pad, min(arms[t][1])))
+    order = sorted(arms, key=lambda a: (a[0] in pad, min(arms[a])))
     first = {b: blocks[b].succs for b in dflt}
     out = [
         Role("default", tuple(range(D)), cfg.entry, _flow(cfg, pre, db, default, first))
     ]
     warps = {}
-    for k, t in enumerate(order):
-        path, ws = arms[t]
+    for k, (t, path) in enumerate(order):
+        ws = arms[t, path]
         warps.update(dict.fromkeys(ws, k))
         rest = {u: blocks[u].succs for u in side}
-        if path is not None:
-            rest.update(zip(path, [(u,) for u in path[1:] + (t,)]))
+        rest.update(zip(path, [(u,) for u in path[1:] + (t,)]))
         rest.update({u: blocks[u].succs for u in regions[t]})
         rest[ret] = ()
         succs = _flow(cfg, pre, db, worker, rest)
         out.append(Role(f"partition{k}", tuple(sorted(ws)), cfg.entry, succs, t in pad))
-    padding = tuple(k for k, t in enumerate(order) if t in pad)
+    padding = tuple(k for k, (t, _path) in enumerate(order) if t in pad)
     return out, Dispatch(D, dict(sorted(warps.items())), None, padding, db, h, True)
 
 

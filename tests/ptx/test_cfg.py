@@ -22,7 +22,8 @@ a vector of immediates; the dispatch as a compare chain without brx.idx (each ro
 passing the links up to its own; looked for in Triton kernels only); padding states'
 roles (marked, translate.py keeps them only if they emit); the direct dispatch of the
 single-warp-specialize lowering (warp-id links, regions ending in ret, numbering, its
-refusals); and one refusal per protocol item (entry, header, table, exit, forks), each
+refusals, a padding target reached through two links: a role per path, each translated);
+and one refusal per protocol item (entry, header, table, exit, forks), each
 naming its item, among them branches on the complement result q of a `setp p|q` (not
 read as the comparison).
 """
@@ -41,7 +42,7 @@ if __package__ in (None, ""):
     sys.modules["lkv_root"] = _root
     __package__ = "lkv_root.tests.ptx"  # noqa: A001
 
-from ...frontend.ptx import cfg, parse  # noqa: E402
+from ...frontend.ptx import cfg, parse, regions, translate as T  # noqa: E402
 
 HEAD = """
 .version 9.3
@@ -315,6 +316,45 @@ $P0L:
     bra.uni $RET;
 $PAD:
     setmaxnreg.dec.sync.aligned.u32 24;
+    barrier.sync 1;
+$RET:
+    ret;
+""",
+    threads=256,
+)
+
+
+# WS_DIRECT without the capture and the loop, whose padding target $PAD is reached through
+# two links: warp 5 takes $L2's branch, warp 4 the next link's (`wid != 6`), warp 6 falls
+# through to its region.
+WS_DIRECT_PAD_TWO_LINKS = kernel(
+    """
+    mov.u32 %r1, %tid.x;
+    shr.u32 %r2, %r1, 5;
+    shfl.sync.idx.b32 %r3, %r2, 0, 31, -1;
+    ld.param.u64 %rd1, [k_param_0];
+    setp.lt.u32 %p1, %r3, 4;
+    @!%p1 bra $HDR;
+    barrier.sync 1;
+    barrier.sync 1;
+    st.global.b32 [%rd1], %r1;
+    bra.uni $RET;
+$HDR:
+    barrier.sync 1;
+    setp.gt.u32 %p2, %r3, 6;
+    @!%p2 bra $L2;
+    barrier.sync 1;
+    st.global.b32 [%rd1+4], %r3;
+    bra.uni $RET;
+$L2:
+    setp.eq.b32 %p3, %r3, 5;
+    @%p3 bra $PAD;
+    setp.eq.b32 %p4, %r3, 6;
+    @!%p4 bra $PAD;
+    barrier.sync 1;
+    st.global.b32 [%rd1+8], %r3;
+    bra.uni $RET;
+$PAD:
     barrier.sync 1;
 $RET:
     ret;
@@ -730,6 +770,45 @@ class WarpSpecialize(unittest.TestCase):
                     cfg.CfgError, rf"dispatch \({item}\): .*{msg}"
                 ):
                     cfg.roles(build(text))
+
+    def test_direct_padding_through_two_links(self):
+        g = build(WS_DIRECT_PAD_TWO_LINKS)
+        rs, d = cfg.roles(g)
+        self.assertEqual((d.warps, d.padding), ({4: 2, 5: 3, 6: 0, 7: 1}, (2, 3)))
+        self.assertEqual(
+            [(r.name, r.warps, r.padding) for r in rs],
+            [("default", (0, 1, 2, 3), False), ("partition0", (6,), False),
+             ("partition1", (7,), False), ("partition2", (4,), True),
+             ("partition3", (5,), True)],
+        )  # fmt: skip
+        # each padding role passes its own links (one role for both passed none, and
+        # its region tree failed with a KeyError)
+        link = g.blocks["$L2"].succs[1]
+        pad4, pad5 = rs[3].succs, rs[4].succs
+        self.assertEqual(
+            (pad4["$HDR"], pad4["$L2"], pad4[link]), (("$L2",), (link,), ("$PAD",))
+        )
+        self.assertEqual((pad5["$HDR"], pad5["$L2"]), (("$L2",), ("$PAD",)))
+        self.assertNotIn(link, pad5)
+        for r in rs:
+            regions.build(g, r)
+        params = [{"ptx": "k_param_0", "kind": "ptr", "name": "x", "size": 8, "fields": {}},
+                  {"ptx": "k_param_1", "kind": "scalar", "name": "n", "size": 4, "fields": {}}]  # fmt: skip
+        pol = T.policy("ttgir", params=params, tensors={"x": {"elem_bytes": 4}})
+        f = T.translate(WS_DIRECT_PAD_TWO_LINKS, "k", [{"block": [256, 1, 1]}], pol)
+        self.assertEqual(f.refusals, [])
+        self.assertEqual(
+            [r["name"] for r in f.roles], ["default", "partition0", "partition1"]
+        )
+        # a target that does more than sync, reached through two links: refused
+        text = WS_DIRECT_PAD_TWO_LINKS.replace(
+            "$PAD:\n    barrier.sync 1;\n",
+            "$PAD:\n    barrier.sync 1;\n    st.global.b32 [%rd1+12], %r3;\n",
+        )
+        with self.assertRaisesRegex(
+            cfg.CfgError, r"dispatch \(chain\): warps \[4, 5\] reach the partition at "
+        ):
+            cfg.roles(build(text))
 
     def test_protocol_refusals(self):
         def drop(text, line):

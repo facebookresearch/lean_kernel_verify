@@ -56,7 +56,7 @@ def _reads(x, out: set) -> None:
             out.add(x["name"])
             return
         for k, v in x.items():
-            if k not in NESTED:
+            if k not in NESTED or "op" not in x:
                 _reads(v, out)
     elif isinstance(x, list):
         for v in x:

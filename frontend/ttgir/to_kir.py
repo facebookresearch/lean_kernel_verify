@@ -1421,6 +1421,7 @@ def result_type(op: Op, k: int) -> str:
 
 # -- KIR document ---------------------------------------------------------------------------
 def build(ttgir: str, dump: dict, key: str, case: dict) -> dict:
+    check_required_cluster(dump, key)
     module = parse(ttgir, dump["src_root"])
     target = dump["target"]
     m = re.search(r'ttg\.target = "cuda:(\d+)"', module.attrs)
@@ -1558,6 +1559,7 @@ def build_ptx(where: Path, dump: dict, key: str, case: dict) -> dict:
     from ..ptx import anchors, parse as ptx_parse, translate as T
 
     launches = _launches(dump, key)
+    check_required_cluster(dump, key)
     spec = dump["specs"][key]
     snap0 = launches[0][1]["args"]
     annotations = _annotations(case, [inp["name"] for inp, _ in launches], key)
@@ -1616,6 +1618,26 @@ def build_ptx(where: Path, dump: dict, key: str, case: dict) -> dict:
         _add_clc(tensors, params)
     return _document(dump, key, case, "ptx", facts.target, params, tensors, facts.barriers,
                      roles, launches, written, {}, facts.clc)  # fmt: skip
+
+
+def check_required_cluster(dump: dict, key: str) -> None:
+    """KirError (gap) if a launch of the specialization records a function attribute
+    REQUIRED_CLUSTER (cuFuncSetAttribute; LaunchRecord attrs.func_attributes
+    .required_cluster) other than its cluster dims: which of the two the hardware uses
+    is not modeled, so the geometry LKV would check may not be the one that runs (an
+    absent attribute: the launch's cluster)."""
+    for inp, la in _launches(dump, key):
+        rec = la.get("launch") or {}  # (a dump without launch records: no attribute)
+        attrs = (rec.get("attrs") or {}).get("func_attributes") or {}
+        req, cluster = (
+            attrs.get("required_cluster"),
+            tuple(rec.get("cluster") or (1, 1, 1)),
+        )
+        if req is not None and tuple(req) != cluster:
+            raise KirError(f"the launch of input {inp['name']} has cluster dims {cluster} "
+                           f"but its function's required cluster (cuFuncSetAttribute "
+                           f"REQUIRED_CLUSTER) is {tuple(req)} (gap: which one the "
+                           "hardware uses is not modeled)")  # fmt: skip
 
 
 def _desc_blocks(launches: list) -> dict:

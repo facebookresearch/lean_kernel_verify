@@ -59,7 +59,10 @@ size, alignment of every parameter); any difference fails the dump. The launch a
 are `pdl`, `cooperative` and `preferred_cluster`; a TLX record also has
 `func_attributes` when the host set function attributes on the launched kernel before
 the launch: `{"required_cluster": [x, y, z]}` (frontend_ttgir.md, dump.json and patch
-13).
+13). A launch whose `required_cluster` differs from its `cluster` is refused (a gap:
+which of the two the hardware uses is not modeled, so the geometry LKV would check may
+not be the one that runs; `to_kir.check_required_cluster`, both TTGIR translations); an
+absent attribute is the launch's cluster.
 
 Parameters are named by position, never by guessing from addresses: TLX by the jit
 argument names in Triton's own parameter packing (a host descriptor expands to its

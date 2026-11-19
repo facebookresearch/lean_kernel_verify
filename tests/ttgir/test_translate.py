@@ -959,6 +959,43 @@ class VariableNamesTest(unittest.TestCase):
             "for": ([let(t0, K.const(1, 32)), dict(loop)], ["x", "x@9"]),
             # Taken by a param.
             "param": ([let(t1, c1)], [None, "x@9"]),
+            # t0 is read again on the next trip, after t1 is assigned: the back edge
+            # keeps it live.
+            "loop": (
+                [
+                    let(t0, c1),
+                    {
+                        "op": "for",
+                        "var": "i",
+                        "lb": c32,
+                        "ub": K.const(3, 32),
+                        "step": c32,
+                        "body": [use(t0), let(t1, c1)],
+                    },
+                ],
+                ["x", "x@9"],
+            ),
+            "while": (
+                [
+                    let(t0, c1),
+                    {
+                        "op": "while",
+                        "cond": c1,
+                        "max_iters": 3,
+                        "body": [use(t0), let(t1, c1)],
+                    },
+                ],
+                ["x", "x@9"],
+            ),
+            # A work field named like a nested statement list is read too.
+            "work_field": (
+                [
+                    let(t0, c32),
+                    let(t1, c32),
+                    {"op": "event", "ev": "work", "fields": {"body": K.var(t0, 32)}},
+                ],
+                ["x", "x@9"],
+            ),
         }
 
         def pairs(out, body):  # (named statement, tokenized statement)
@@ -1449,6 +1486,39 @@ class ClcScheduleTest(unittest.TestCase):
                 ),
             ):
                 to_kir._with_clc(self._input(4), schedule, 0)
+
+
+class RequiredClusterTest(unittest.TestCase):
+    """check_required_cluster: a launch whose function's REQUIRED_CLUSTER attribute
+    (cuFuncSetAttribute) differs from its cluster dims is refused (gap)."""
+
+    @staticmethod
+    def _dump(*recs) -> dict:
+        return {"inputs": [{"name": f"i{k}", "launches": [{"spec": "s", "launch": r}]}
+                           for k, r in enumerate(recs)]}  # fmt: skip
+
+    def test_required_cluster(self):
+        dump = self._dump
+        for attrs in ({}, {"func_attributes": {}},
+                      {"func_attributes": {"required_cluster": [2, 1, 1]}}):  # fmt: skip
+            to_kir.check_required_cluster(
+                dump({"cluster": [2, 1, 1], "attrs": attrs}), "s"
+            )
+        # a launch with regular cluster 1 (required 1) and preferred cluster 3
+        pref3 = {"cluster": [1, 1, 1], "attrs": {"preferred_cluster": [3, 1, 1],
+                                                 "func_attributes": {"required_cluster": [1, 1, 1]}}}  # fmt: skip
+        to_kir.check_required_cluster(dump(pref3), "s")
+        bad = {
+            "cluster": [1, 1, 1],
+            "attrs": {"func_attributes": {"required_cluster": [2, 1, 1]}},
+        }
+        with self.assertRaises(to_kir.KirError) as e:
+            to_kir.check_required_cluster(dump(pref3, bad), "s")
+        self.assertIn(
+            "cluster dims (1, 1, 1) but its function's required cluster",
+            str(e.exception),
+        )
+        self.assertEqual(to_kir.failure_kind(e.exception), "gap")
 
 
 class TmemRectTest(unittest.TestCase):

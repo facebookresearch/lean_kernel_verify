@@ -22,9 +22,12 @@ Two hooks (both documented in references/frontend_ttgir.md):
 `warmup` calls (`kernel.warmup(...)`) compile without launching, here as on the GPU: they
 are not recorded as launches and return the compiled kernel, with a stand-in CUfunction
 handle (`Functions`). Host code may set function attributes on that handle through the
-driver API (`ctypes.CDLL("libcuda.so.1").cuFuncSetAttribute`, answered by `_Libcuda`);
-the attributes the CPU run models are recorded and every later launch of that kernel
-carries them in its LaunchRecord (`attrs.func_attributes`). Preloads are not recorded.
+driver API (`ctypes.CDLL("libcuda.so.1").cuFuncSetAttribute`, or the library from
+`ctypes.cdll.LoadLibrary`, answered by `_Libcuda`); the attributes the CPU run models are
+recorded and every later launch of that kernel carries them in its LaunchRecord
+(`attrs.func_attributes`). A launch of a kernel whose handle the host loaded
+(`_init_handles()`) but set no attribute on through `_Libcuda` fails: the handle may have
+reached a driver call the CPU run does not see. Preloads are not recorded.
 
 Arguments are snapshotted at capture time because later pre_hooks mutate the same
 TensorDescriptor objects. The specialization (tt.divisibility of pointers and ints, ints
@@ -59,6 +62,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from itertools import zip_longest
+from typing import Any, cast
 
 import torch
 import triton.backends.nvidia.driver as nvidia_driver
@@ -128,12 +132,14 @@ LIBCUDA = ("libcuda.so", "libcuda.so.1")
 
 @dataclass
 class Function:
-    """A kernel a `warmup` compiled: its stand-in CUfunction handle and the function
-    attributes the host set on it, by LaunchRecord `func_attributes` entry."""
+    """A kernel a `warmup` compiled: its stand-in CUfunction handle, the function
+    attributes the host set on it, by LaunchRecord `func_attributes` entry, and whether
+    host code loaded the handle (`_init_handles()`)."""
 
     handle: int
     kernel: object  # the CompiledKernel
     attributes: dict = field(default_factory=dict)
+    handed_out: bool = False
 
 
 @dataclass
@@ -153,6 +159,7 @@ class Functions:
         def init_handles():  # loads nothing: the CPU run has no device
             kernel.function = handle
             kernel._run = _no_launch
+            fn.handed_out = True
 
         kernel._init_handles = init_handles
         return fn
@@ -166,9 +173,9 @@ def _no_launch(*args, **kwargs):
 
 
 class _Libcuda:
-    """Stand-in for `ctypes.CDLL("libcuda.so.1")` during the host run: only
-    `cuFuncSetAttribute` on a handle of `Functions`, for the attributes in
-    REQUIRED_CLUSTER. Any other driver function, attribute or handle raises."""
+    """Stand-in for `ctypes.CDLL("libcuda.so.1")` (and `ctypes.cdll.LoadLibrary`) during
+    the host run: only `cuFuncSetAttribute` on a handle of `Functions`, for the attributes
+    in REQUIRED_CLUSTER. Any other driver function, attribute or handle raises."""
 
     def __init__(self, functions: Functions):
         self.cuFuncSetAttribute = _CuFuncSetAttribute(functions)
@@ -227,6 +234,7 @@ class Capture:
             JITFunction._do_compile,
             Autotuner.run,
             ctypes.CDLL,
+            ctypes.cdll,
         )
         orig_run = JITFunction.run
         orig_cdll = ctypes.CDLL
@@ -249,10 +257,18 @@ class Capture:
             entry = (id(jit), device_key, key)
             if warmup:
                 return capture.warmup(entry, jit, signature, constexprs, options, attrs)
+            fn = capture.functions.by_entry.get(entry)
+            if fn is not None and fn.handed_out and not fn.attributes:
+                raise RuntimeError(
+                    f"{jit.fn.__name__}: launched after the host loaded the function "
+                    "handle of its warmup kernel (_init_handles()) without setting an "
+                    "attribute through the libcuda stand-in: a driver call the CPU run "
+                    "does not see (a libcuda loaded before the host call, cuda-python) "
+                    "may have set one"
+                )
             launch = _record(
                 jit, device_key, signature, constexprs, options, attrs, capture.reads
             )
-            fn = capture.functions.by_entry.get(entry)
             if fn is not None:
                 launch.func_attributes = copy.deepcopy(fn.attributes)
             capture.launches.append(launch)
@@ -267,6 +283,7 @@ class Capture:
         JITFunction._do_compile = do_compile
         Autotuner.run = _autotuner_run
         ctypes.CDLL = cdll
+        ctypes.cdll = ctypes.LibraryLoader(cast(Any, cdll))
         self.reads.__enter__()
         return self
 
@@ -277,6 +294,7 @@ class Capture:
             JITFunction._do_compile,
             Autotuner.run,
             ctypes.CDLL,
+            ctypes.cdll,
         ) = self._saved
         return False
 

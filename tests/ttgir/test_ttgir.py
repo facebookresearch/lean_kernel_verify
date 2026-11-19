@@ -193,10 +193,12 @@ def run_required_cluster(x, use, BLOCK=128):
     if x.numel() not in SINGLE_CTA:
         compiled = probe.warmup(x, x.numel(), BLOCK=BLOCK, grid=grid, **extra)
         compiled._init_handles()
-        libcuda = ctypes.CDLL("libcuda.so.1")
+        loader = ctypes.cdll.LoadLibrary if use == "cdll_loader" else ctypes.CDLL
+        libcuda = loader("libcuda.so.1")
         if use == "other_function":
             libcuda.cuFuncGetAttribute
-        for attr in (8,) if use == "other_attribute" else (11, 12, 13):
+        # "unrecorded": the handle goes to a driver call the CPU run does not see
+        for attr in {"other_attribute": (8,), "unrecorded": ()}.get(use, (11, 12, 13)):
             err = libcuda.cuFuncSetAttribute(ctypes.c_void_p(compiled.function), attr, 1)
             if err != 0:
                 raise RuntimeError(f"cuFuncSetAttribute({attr}) failed with CUDA error {err}")
@@ -891,6 +893,12 @@ class TtgirFrontendTest(unittest.TestCase):
             self.assertEqual(main["func_attributes"], {"required_cluster": [1, 1, 1]})
             self.assertNotIn("func_attributes", other)
         self.assert_valid(to_kir.translate(self.out / c["name"] / "dump.json", c))
+        # The library from ctypes.cdll.LoadLibrary is the stand-in too.
+        c = attributes_case("cdll_loader", [2048])
+        d = dump.run(c, self.out / c["name"])
+        main, other = (la["launch"]["attrs"] for la in d["inputs"][0]["launches"])
+        self.assertEqual(main["func_attributes"], {"required_cluster": [1, 1, 1]})
+        self.assertNotIn("func_attributes", other)
         # Cluster dims fixed at compile time: the driver answers CUDA_ERROR_NOT_PERMITTED
         # and this host refuses the input.
         c = attributes_case("compile_time_cluster", [512])
@@ -907,6 +915,13 @@ class TtgirFrontendTest(unittest.TestCase):
                 "is not modeled",
             ),
             ("other_function", AttributeError, "not cuFuncGetAttribute"),
+            # the host loaded the handle but set no attribute through the stand-in
+            (
+                "unrecorded",
+                RuntimeError,
+                r"_init_handles\(\)\) without setting an attribute through the libcuda "
+                "stand-in",
+            ),
         ):
             with self.subTest(use=use):
                 c = attributes_case(use, [1024])
