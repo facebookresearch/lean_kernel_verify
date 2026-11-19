@@ -181,6 +181,9 @@ inductive Stmt where
   | «if» (cond : Expr) («then» «else» : List Stmt) (loc : Loc)
   | event (ev : Event)
   | assert (cond : Expr) (msg : String) (loc : Loc)
+  /-- A model assumption the frontend could not prove statically (KIR change 16): false on
+  an input, the role stops there as at an out-of-bounds metadata load (Eval.lean). -/
+  | assume (cond : Expr) (msg : String) (loc : Loc)
   deriving Repr, Inhabited
 
 inductive TensorKind where

@@ -18,7 +18,8 @@ becomes a gstore), global views built from data and elect.sync, shfl.sync,
 vote.ballot.sync and make_warp_uniform under a partial warp are rejected; to_kir's
 metadata-write, provenance (metadata and host reads against skipped launches),
 DSL-version (Python package and native libraries), validate-before-write and per-role
-addr-marking rules.
+addr-marking rules; a launch with a preferred cluster other than its cluster refused
+(gap).
 """
 
 import json
@@ -1887,6 +1888,26 @@ class Dsl461Test(unittest.TestCase):
             Unsupported, re.escape("R4: nvvm.tcgen05.mma (DSL 4.6.1's MMA)")
         ):
             translate(_dsl461(mma), nwarps=1, p1=True)
+
+
+class PreferredClusterTest(unittest.TestCase):
+    def test_a_preferred_cluster_is_refused(self):
+        # a launch whose preferred cluster differs from its cluster: clusters of either
+        # size may run and the CuTe translations check one geometry (gap)
+        rec = {
+            "cluster": [2, 1, 1],
+            "attrs": {"pdl": False, "preferred_cluster": [4, 1, 1]},
+        }
+        gap = to_kir.preferred_cluster_gap([{"launch_records": [rec]}])
+        self.assertIn(
+            "a preferred cluster (4, 1, 1) beside the cluster dims (2, 1, 1)", gap
+        )
+        for attrs in ({"pdl": False}, {"preferred_cluster": [2, 1, 1]}):
+            same = {"cluster": [2, 1, 1], "attrs": attrs}
+            self.assertIsNone(
+                to_kir.preferred_cluster_gap([{"launch_records": [same]}])
+            )
+        self.assertIsNone(to_kir.preferred_cluster_gap([{"capture_error": "x"}]))
 
 
 if __name__ == "__main__":

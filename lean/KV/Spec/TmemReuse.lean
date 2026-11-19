@@ -619,8 +619,8 @@ def analyze (r : Run) (Ls : Ledgers) : P1Out := Id.run do
   match stops[0]? with
   | some (pid, t) =>
     let line : Issue :=
-      { loc := (t.events.back?.map (·.loc)).getD "", context := h.roleCtx pid t.role,
-        msg := s!"not decided on this input: {stops.size} role trace(s) stop at an out-of-bounds metadata load (P0-1), so their later events are unknown; the lines of this spec that are not `not decided` lines are certain counterexamples" }
+      { loc := t.stopLoc, context := h.roleCtx pid t.role,
+        msg := s!"not decided on this input: {stops.size} role trace(s) stop at {stopReasons (stops.map (·.2))}, so their later events are unknown; the lines of this spec that are not `not decided` lines are certain counterexamples" }
     issues := #[line] ++ issues
   | none => pure ()
   return { ok, issues, notes, certain, accesses := nacc, pairs := npairs, lockOnly := nlock, named := nnamed,

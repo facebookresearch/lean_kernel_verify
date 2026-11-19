@@ -28,6 +28,7 @@ ranges ranges.py:12: cta (0,0,0) role w: tcgen05.cp at ranges.py:12 (role w, war
 ranges ranges.py:13: cta (0,0,0) role w: tcgen05.ld at ranges.py:13 (role w, warp 1) reads lanes [0,32) x cols [0,8): outside lanes [32,64), the lane quarter of warp 1
 ranges_relative writes lanes [0,128) x cols [254,258): outside lanes [0,128) x cols [0,256) of the allocation
 meta_oob_p1 meta_oob_p1.py:9: cta (0,0,0) role w: not decided on this input: 1 role trace(s) stop at an out-of-bounds metadata load
+assume_p1 assume_p1.py:9: cta (0,0,0) role w: not decided on this input: 1 role trace(s) stop at a model assumption that does not hold (the copy misses the capture)
 hang_vacuous note: hang_vacuous.py:10: cta (0,0,0) role w: the P1 ledger finds 1 wait(s) that never return in the lockstep model
 cluster_pair cluster_pair.py:21: cluster (0,0,0) roles mma of cta (0,0,0) / drain of cta (0,0,0): tcgen05.ld at cluster_pair.py:21 (role drain of cta (0,0,0), warp 1) in the TMEM of cta (0,0,0) reads lanes [32,64) x cols [64,96); tcgen05.mma at cluster_pair.py:12 (role mma of cta (0,0,0), warp 0) in the TMEM of cta (0,0,0), cta (1,0,0) writes D lanes [0,128) x cols [64,128): unordered, even under the lockstep reading.
 cluster_pair cluster_pair.py:21: cluster (0,0,0) roles mma of cta (0,0,0) / drain of cta (1,0,0): tcgen05.ld at cluster_pair.py:21 (role drain of cta (1,0,0), warp 1) in the TMEM of cta (1,0,0) reads lanes [32,64) x cols [64,96)

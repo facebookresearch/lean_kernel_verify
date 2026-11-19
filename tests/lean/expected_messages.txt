@@ -99,6 +99,12 @@ ambiguous_shares amb.py:22: cta (0,0,0) slot y[0]: role w (consumer convention, 
 meta_oob_load oob.py:5: cta (1,0,0) role default: load meta[1] outside the metadata tensor (shape [1]): an out-of-bounds global read
 meta_oob_load oob.py:5: cta (1,0,0) role default: not decided on this input: 1 role trace(s) stop at an out-of-bounds metadata load (P0-1)
 meta_oob_load ?: tensor out: 1 element(s) written more than once by plain stores (rows [0, 1)); e.g. offset 0 (row 0) 2 times, by oob.py:6 (cta (0,0,0) role default) and oob.py:8 (cta (0,0,0) role default)
+assume assume.py:9: cta (1,0,0) role default: not decided on this input: 1 role trace(s) stop at a model assumption that does not hold (the write misses the capture), so their later events are unknown
+assume assume.py:5: cta (0,0,0) role default: gload inp: 1 lane(s) outside allocation [0, 3]: offsets [4, 5)
+assume ?: tensor out: 1 element(s) written more than once by plain stores (rows [0, 1)); e.g. offset 0 (row 0) 2 times, by assume.py:6 (cta (0,0,0) role default) and assume.py:8 (cta (0,0,0) role default)
+assume_reader assume_reader.py:4: cta (1,0,0) role writer: not decided on this input: 1 role trace(s) stop at a model assumption that does not hold (the write misses the capture), so their later events are unknown
+assume_reader assume_reader.py:8: cta (1,0,0) role reader: gload inp: 1 lane(s) outside allocation [0, 3]: offsets [10, 11)
+assume_reader assume_reader.py:8: cta (0,0,0) role reader: gload inp: 1 lane(s) outside allocation [0, 3]: offsets [30, 31)
 progress_latejoin_cycle r1.py:11: cta (0,0,0) slot x[0]: role c (consumer convention, 1 waits): this wait never returns: even with every arrival as early as the roles' waits allow, 2 arrival(s) reach the slot before it and its phase needs 3
 progress_commit_ring r2.py:4: cta (0,0,0) slot ca[0]: role a (consumer convention, 4 waits): this wait never returns
 lap_tma_wait_evidence note: r3.py:15: cta (0,0,0) slot full[0] role b: wait #1 (parity 1, consumer convention) synchronizes with phase 4, not phase 2 after its previous wait: phase 3 surely completed before it (role a's wait at r3.py:9 needs it and surely returned before)

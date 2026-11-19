@@ -320,8 +320,8 @@ def stmt(s, indent, chunks):
             block(s["else"], indent, chunks),
             loc,
         )
-    if op == "assert":
-        return ctor("assert", expr(s["cond"]), lstr(s["msg"]), loc)
+    if op in ("assert", "assume"):
+        return ctor(op, expr(s["cond"]), lstr(s["msg"]), loc)
     raise AssertionError(op)
 
 

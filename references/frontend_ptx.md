@@ -195,11 +195,41 @@ variant must have the same block and cluster.
   put back together) if the default's store runs unconditionally (statically known
   issuing threads, no runtime condition) and its value is one value in every thread that
   depends on nothing but the launch (parameters, program id, shared symbols, metadata);
-  otherwise the load is Data as any shared load. Any other shared write before the
-  workers' loads (an unknown address, a condition, a value of a role, a worker's write,
-  the default's after its first fork barrier) makes the bytes it may touch unknown; roles
-  are translated one after the other, the default first, so such a write of a byte
-  another role already read refuses the kernel.
+  otherwise the load is Data as any shared load. Every other write of shared memory
+  reports the bytes it may touch, over the role's executing threads (the bounds of its
+  offsets plus its size): `st.shared` (an unknown address, a condition, a value of a
+  role, a worker's, the default's after its first fork barrier), `stmatrix` (a 16-byte
+  row per address-giving lane), `atom`/`red.shared`, generic `st`/`atom`/`red` through
+  `cvta.shared` (a direct dispatch does not refuse them) or a data address (any byte),
+  the landings of TMA loads (the
+  hardware box; any byte through a packed sub-byte descriptor, whose shared-memory copy
+  may be wider than its packed bytes), bulk copies and `cp.async`, a CLC response (16 bytes),
+  `st.async`/`red.async`, `tcgen05.alloc`'s address slot, `tensormap.replace` of a
+  staging buffer and `mbarrier.inval` (the op-table rows that write shared memory are
+  listed in interp.CAPTURE_WRITERS; tests/ptx/test_captures.py checks the table against
+  them). The bounds come from interval arithmetic, including masks and the ring-buffer
+  index `x % k` as LLVM writes it for any x (`x - ((x + b) & -k)`, `x - q k` with q a
+  multiply-high quotient): bounds on the arithmetic, no claim about the quotient. Such a
+  write before the workers' loads makes the captured bytes it may touch unknown (all of
+  them if its address is no shared symbol plus an offset); roles are translated one
+  after the other, the default first, so such a write of a byte another role already
+  read refuses the kernel. A write after its role's second fork barrier follows every
+  worker's loads, unless it lands in another CTA's shared memory (`st.async`,
+  `red.async`, a shared::cluster bulk copy, a multicast TMA, bulk copy or CLC
+  response): no barrier of the CTA orders that one, so it counts wherever it is issued.
+  An asynchronous write (a landing, a CLC response) may land after a later store: the
+  default records no capture over bytes an earlier asynchronous or remote write may
+  touch. A write whose offsets have no static bounds (an offset LLVM carries
+  strength-reduced through a loop, unrelated to the counter it was derived from) keeps
+  the captures under KIR `assume`s (kir.md change 16; `a shared write misses the
+  warp-specialize captures [lo, hi)`, per executing thread) that its bytes miss each
+  run of known captures, evaluated on every input. Such a write over a capture is no
+  certain violation (it may land after the workers read it), so where the assumption
+  does not hold the role stops there and the input is undecided (P0-2..P0-6, P1), never
+  a FAIL; the report names the assumption. An mbarrier object changes at all its events but waits (some
+  asynchronous, some from another CTA, at an index that may be loop-carried): after
+  every role, each mbarrier array's bytes (a PASS needs every index in range) must miss
+  every capture a worker read, else the kernel is refused.
 * **CuTe DSL.** Partition refinement: a role starts as every warp of the block; a branch
   condition, mbarrier address, remote CTA rank, named-barrier id or count, or a select
   between two tensors that is uniform within each warp but differs between warps of the
@@ -396,7 +426,10 @@ Coordinates, footprints, transaction bytes, issuing threads, sub-byte formats:
   except that cross-cluster check, which pairs only clusters of one geometry (Limits).
   CLC with a preferred geometry is refused. If the launches disagree on the preferred
   dims, the all-preferred geometry is the refused variant `<spec>@cluster` (a gap for
-  every input of the specialization) and the regular KIR is still checked.
+  every input of the specialization) and the regular KIR is still checked. The P0-6 and
+  P1-2 KIRs are made from the regular geometry only. A CuTe launch with a preferred
+  cluster other than its cluster is refused (gap: the CuTe translations check one
+  geometry; `cute/to_kir.preferred_cluster_gap`).
 * **tcgen05 in P0.** No event except `tcgen05.commit`, an asynchronous `commit_arrive` on
   its mbarrier; the P0 specs do not see tensor memory.
 * **CLC (TLX).** `try_cancel` and its queries follow the schedule model of
@@ -664,10 +697,13 @@ assembly rerolls LLVM's unrolled blocks into `for` loops (the same trace).
 * Shared memory, TMEM, MMA math, named barriers and fences are outside the P0 slice; TMEM
   accesses, `tcgen05.wait` and named barriers are P1 events (CuTe), fences and TMEM
   lifetime are not checked.
-* Preferred cluster geometries are checked all-preferred and all-regular (P0-6 too); P0-3 of a launch
-  that mixes them is covered only where both geometries write the same elements per
-  preferred-size group of CTAs, which is not checked, and P1-2's tensormap check across
-  clusters only between clusters of one geometry ("Clusters, tcgen05, CLC").
+* Preferred cluster geometries (TLX/Triton) are checked all-preferred and all-regular (P0-6
+  and P1-2 too); P0-3 of a launch that mixes them is covered only where both geometries
+  write the same elements per preferred-size group of CTAs, which is not checked, and
+  P1-2's tensormap check across clusters only between clusters of one geometry ("Clusters,
+  tcgen05, CLC"). A CuTe launch with a preferred cluster is refused (gap), as is a TLX
+  launch whose function's required cluster (cuFuncSetAttribute) differs from its cluster
+  dims.
 * Refused by design: CuTe CLC, P1-1 on TLX, TMEM addresses relative
   to the allocation, multicast bulk copies, multicast or cta_group::2 TMA loads and
   shared::cluster bulk copies and reduces that several lanes of a warp may execute (issuing not

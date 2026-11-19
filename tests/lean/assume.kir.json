@@ -1,0 +1,381 @@
+{
+ "kir_version": 1,
+ "kernel": "assume",
+ "source": "tests/lean/assume.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "A",
+   "type": "i32"
+  },
+  {
+   "name": "OOB",
+   "type": "i32"
+  },
+  {
+   "name": "DUP",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "inp",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "const",
+     "v": 4,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false
+  },
+  {
+   "name": "out",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "const",
+     "v": 8,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "output",
+   "metadata": false
+  }
+ ],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "default",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "ne",
+      "a": {
+       "e": "var",
+       "name": "OOB",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "loc": "assume.py:4",
+     "then": [
+      {
+       "op": "event",
+       "ev": "gload",
+       "loc": "assume.py:5",
+       "tensor": "inp",
+       "offsets": {
+        "t": "full",
+        "v": 4,
+        "shape": [
+         1
+        ],
+        "w": 32
+       },
+       "mask": null
+      }
+     ],
+     "else": []
+    },
+    {
+     "op": "event",
+     "ev": "gstore",
+     "loc": "assume.py:6",
+     "tensor": "out",
+     "offsets": {
+      "t": "bin",
+      "o": "add",
+      "a": {
+       "t": "range",
+       "start": 0,
+       "end": 4,
+       "shape": [
+        4
+       ],
+       "w": 32
+      },
+      "b": {
+       "t": "splat",
+       "a": {
+        "e": "bin",
+        "o": "mul",
+        "a": {
+         "e": "pid",
+         "axis": 0,
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 4,
+         "w": 32
+        },
+        "w": 32,
+        "addr": true
+       },
+       "shape": [
+        4
+       ],
+       "w": 32
+      },
+      "shape": [
+       4
+      ],
+      "w": 32,
+      "addr": true
+     },
+     "mask": null
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "bin",
+      "o": "and",
+      "a": {
+       "e": "cmp",
+       "o": "ne",
+       "a": {
+        "e": "var",
+        "name": "DUP",
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "w": 1
+      },
+      "b": {
+       "e": "cmp",
+       "o": "eq",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "w": 1
+      },
+      "w": 1
+     },
+     "loc": "assume.py:7",
+     "then": [
+      {
+       "op": "event",
+       "ev": "gstore",
+       "loc": "assume.py:8",
+       "tensor": "out",
+       "offsets": {
+        "t": "full",
+        "v": 0,
+        "shape": [
+         1
+        ],
+        "w": 32
+       },
+       "mask": null
+      }
+     ],
+     "else": []
+    },
+    {
+     "op": "assume",
+     "cond": {
+      "e": "bin",
+      "o": "or",
+      "a": {
+       "e": "cmp",
+       "o": "ne",
+       "a": {
+        "e": "var",
+        "name": "A",
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "w": 1
+      },
+      "b": {
+       "e": "cmp",
+       "o": "ne",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "w": 1
+      },
+      "w": 1
+     },
+     "msg": "the write misses the capture",
+     "loc": "assume.py:9"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "bin",
+      "o": "and",
+      "a": {
+       "e": "cmp",
+       "o": "eq",
+       "a": {
+        "e": "var",
+        "name": "A",
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "w": 1
+      },
+      "b": {
+       "e": "cmp",
+       "o": "eq",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "w": 1
+      },
+      "w": 1
+     },
+     "loc": "assume.py:10",
+     "then": [
+      {
+       "op": "event",
+       "ev": "gload",
+       "loc": "assume.py:11",
+       "tensor": "inp",
+       "offsets": {
+        "t": "full",
+        "v": 100,
+        "shape": [
+         1
+        ],
+        "w": 32
+       },
+       "mask": null
+      }
+     ],
+     "else": []
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "assume",
+  "inputs": [
+   {
+    "name": "holds",
+    "params": {
+     "A": 1,
+     "OOB": 0,
+     "DUP": 0
+    },
+    "intended_writes": {
+     "out": "all"
+    }
+   },
+   {
+    "name": "fails",
+    "params": {
+     "A": 0,
+     "OOB": 0,
+     "DUP": 0
+    },
+    "intended_writes": {
+     "out": "all"
+    }
+   },
+   {
+    "name": "oob_before",
+    "params": {
+     "A": 0,
+     "OOB": 1,
+     "DUP": 0
+    },
+    "intended_writes": {
+     "out": "all"
+    }
+   },
+   {
+    "name": "dup_before",
+    "params": {
+     "A": 0,
+     "OOB": 0,
+     "DUP": 1
+    },
+    "intended_writes": {
+     "out": "all"
+    }
+   }
+  ]
+ }
+}

@@ -1,0 +1,211 @@
+{
+ "kir_version": 1,
+ "kernel": "assume_reader",
+ "source": "tests/lean/assume_reader.kir.json",
+ "ir": "ttgir",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "A",
+   "type": "i32"
+  },
+  {
+   "name": "CAP",
+   "type": "i32"
+  },
+  {
+   "name": "BOTH",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "inp",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "const",
+     "v": 4,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "input",
+   "metadata": false
+  }
+ ],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "writer",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "assume",
+     "cond": {
+      "e": "bin",
+      "o": "or",
+      "a": {
+       "e": "cmp",
+       "o": "ne",
+       "a": {
+        "e": "var",
+        "name": "A",
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "w": 1
+      },
+      "b": {
+       "e": "cmp",
+       "o": "ne",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "w": 1
+      },
+      "w": 1
+     },
+     "msg": "the write misses the capture",
+     "loc": "assume_reader.py:4"
+    }
+   ]
+  },
+  {
+   "name": "reader",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "bin",
+      "o": "or",
+      "a": {
+       "e": "cmp",
+       "o": "eq",
+       "a": {
+        "e": "pid",
+        "axis": 0,
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "w": 1
+      },
+      "b": {
+       "e": "cmp",
+       "o": "ne",
+       "a": {
+        "e": "var",
+        "name": "BOTH",
+        "w": 32
+       },
+       "b": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "w": 1
+      },
+      "w": 1
+     },
+     "loc": "assume_reader.py:7",
+     "then": [
+      {
+       "op": "event",
+       "ev": "gload",
+       "loc": "assume_reader.py:8",
+       "tensor": "inp",
+       "offsets": {
+        "t": "splat",
+        "a": {
+         "e": "var",
+         "name": "CAP",
+         "w": 32
+        },
+        "shape": [
+         1
+        ],
+        "w": 32
+       },
+       "mask": null
+      }
+     ],
+     "else": []
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "assume_reader",
+  "inputs": [
+   {
+    "name": "holds",
+    "params": {
+     "A": 1,
+     "CAP": 10,
+     "BOTH": 0
+    },
+    "intended_writes": {}
+   },
+   {
+    "name": "fails",
+    "params": {
+     "A": 0,
+     "CAP": 20,
+     "BOTH": 0
+    },
+    "intended_writes": {}
+   },
+   {
+    "name": "fails_both",
+    "params": {
+     "A": 0,
+     "CAP": 30,
+     "BOTH": 1
+    },
+    "intended_writes": {}
+   }
+  ]
+ }
+}

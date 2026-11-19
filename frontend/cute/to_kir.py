@@ -1587,6 +1587,24 @@ def _writes(variant, launch: dict) -> list:
     ]
 
 
+def preferred_cluster_gap(las: list) -> str | None:
+    """The refusal (gap) of a variant some launch of which asks for a preferred cluster
+    shape (cudaLaunchAttributePreferredClusterDimension, recorded by host_patches as
+    attrs.preferred_cluster) other than its cluster dims: the device may then run
+    clusters of either size, and the CuTe translations check one geometry (the PTX
+    translation of TLX/Triton kernels checks both, references/frontend_ptx.md
+    "Clusters"); None otherwise."""
+    for la in las:
+        for r in la.get("launch_records", []):
+            pref = (r.get("attrs") or {}).get("preferred_cluster")
+            cluster = tuple(r.get("cluster") or (1, 1, 1))
+            if pref and tuple(pref) != cluster:
+                return (f"cuda.launch_ex: a preferred cluster {tuple(pref)} beside the cluster "
+                        f"dims {cluster} (gap: clusters of either size may run; the CuTe "
+                        "translations check only the regular geometry)")  # fmt: skip
+    return None
+
+
 def _load_dump(out: Path) -> dict:
     """<out>/dump.json; one an older dump wrote (per-input launch indices, no address
     hints) is refused."""
@@ -1656,6 +1674,12 @@ def run(case_path: Path, out: Path, p1: bool = True) -> list:
         if not launches:
             entry["error"] = "compiled but never launched"
             entry["kind"] = "gap"
+            continue
+        gap = preferred_cluster_gap(las)
+        if gap is not None:  # the regular geometry alone would be checked
+            entry["error"], entry["kind"] = gap, "gap"
+            if ptx:
+                writers[digest] = ptx_writer(case, dump, recs, launches, las)
             continue
         try:
             if ptx:

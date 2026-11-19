@@ -242,6 +242,7 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
             "records": records,
             "target": facts.target,
             "shared_align": align,  # cluster.py: the peer-bit mask
+            "shared_extern": extern,  # interp.py: one region (the captures' footprints)
             # mem.py: generic shared writes (the state bytes of a switch-loop dispatch)
             "dispatch": dispatch is not None and not dispatch.direct,
         },
@@ -269,6 +270,7 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
             continue  # padding warps that emit nothing (cfg.py): no role
         translators += got
     facts.barriers = mem.barriers(translators)
+    interp.check_capture_barriers(k, mem.arrays)
     facts.clc = sync.finish(translators)
     facts.tmem = p1.top(translators) if p1 is not None else None
     if p1 is not None and p1.bulk is not None and bulk.finish(p1.bulk, translators):

@@ -341,7 +341,12 @@ that select it. The kernel's `elision_flags` annotation becomes the KIR
 `case.elision_flags` (P0-5).
 
 **Clusters.** The cluster dims come from the launch (`cuda.launch_cfg.cluster_dim` is
-on the host slice) and must be constants; the KIR gets `cluster` (kir.md change 11).
+on the host slice) and must be constants; the KIR gets `cluster` (kir.md change 11). A
+launch that also asks for a preferred cluster shape (the launch attribute
+`cudaLaunchAttributePreferredClusterDimension`, LaunchRecord `attrs.preferred_cluster`)
+other than its cluster dims is refused in both translations (a gap: clusters of either
+size may run, and only the regular geometry would be checked; the PTX translation of
+TLX/Triton kernels checks both, frontend_ptx.md "Clusters").
 `%cluster_ctarank` is `x % cx + (y % cy) * cx + (z % cz) * cx * cy` over the CTA's
 `pid`, `%clusterid` / `%nclusterid` / `%cluster_ctaid` / `%cluster_nctaid` likewise.
 `nvvm.mapa.shared.cluster` makes a remote pointer (`interp.Remote`: a shared-memory

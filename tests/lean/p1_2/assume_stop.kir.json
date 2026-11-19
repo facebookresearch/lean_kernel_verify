@@ -1,0 +1,196 @@
+{
+ "kir_version": 1,
+ "kernel": "assume_stop",
+ "source": "tests/lean/p1_2/assume_stop.kir.json",
+ "ir": "ptx",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "w",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "bulk_store",
+     "loc": "assume_stop.py:2",
+     "kind": "bulk",
+     "warp": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "sym": "smem",
+     "src": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "bytes": 1024,
+     "lane": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "bulk_commit",
+     "loc": "assume_stop.py:3"
+    },
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 2,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "smem_write",
+       "loc": "assume_stop.py:4",
+       "sym": "smem",
+       "offsets": {
+        "t": "splat",
+        "shape": [
+         1
+        ],
+        "w": 32,
+        "a": {
+         "e": "const",
+         "v": 0,
+         "w": 32
+        }
+       },
+       "mask": null,
+       "bytes": 16,
+       "warp": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "lane": {
+        "e": "const",
+        "v": 5,
+        "w": 32
+       }
+      }
+     ],
+     "else": [],
+     "loc": "assume_stop.py:4"
+    },
+    {
+     "op": "assume",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "var",
+       "name": "MODE",
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "msg": "the write misses the capture",
+     "loc": "assume_stop.py:5"
+    },
+    {
+     "op": "event",
+     "ev": "smem_write",
+     "loc": "assume_stop.py:6",
+     "sym": "smem",
+     "offsets": {
+      "t": "splat",
+      "shape": [
+       1
+      ],
+      "w": 32,
+      "a": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      }
+     },
+     "mask": null,
+     "bytes": 16,
+     "warp": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "lane": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     }
+    }
+   ]
+  }
+ ],
+ "p1": [
+  "P1-2"
+ ],
+ "case": {
+  "name": "assume_stop",
+  "inputs": [
+   {
+    "name": "holds",
+    "params": {
+     "MODE": 0
+    }
+   },
+   {
+    "name": "fails",
+    "params": {
+     "MODE": 1
+    }
+   },
+   {
+    "name": "pair_before",
+    "params": {
+     "MODE": 2
+    }
+   }
+  ]
+ }
+}

@@ -16,7 +16,8 @@
   not a kernel error); an evaluation error's kind decides its specs (kernel error: FAIL,
   model limit: UNDECIDED, unexpected: ERROR), and an INCONSISTENT verdict is an ERROR; a
   variant without verdicts is UNDECIDED if the frontend refuses it by design, else an
-  ERROR; a spec, or its all-preferred geometry, for
+  ERROR (a refused all-preferred cluster geometry `<spec>@cluster<dims>` for the inputs
+  of its spec whose grid the dims divide); a spec, or its all-preferred geometry, for
   which to_kir wrote neither a P0-6 KIR nor a P0-6 failure is an ERROR too; the outcome
   and exit status are FAIL (1) on any FAIL, else ERROR (2) on any
   failure, else UNDECIDED (0) on anything a known limit leaves open, else PASS (0); P1-1
@@ -32,8 +33,10 @@
   counterexamples, any other text among the counterexamples or the evaluation error.
   Every evaluation error has the kind tests/lean/eval_errors and segmented_gload
   bad_layout pin, and every spec of its input that kind's outcome; the other UNDECIDED
-  outcomes are exactly P0-2..P0-5 of the four inputs with an out-of-bounds metadata load
-  (meta_oob_load out_of_range, eval_errors meta_oob, meta_masked_load unmasked_empty,
+  outcomes are exactly P0-1..P0-5 of the inputs of `assume` and `assume_reader` whose
+  assumption does not hold (KIR change 16; the certain counterexamples of a CTA where no
+  trace stopped stay FAILs), P0-2..P0-5 of the four inputs with an out-of-bounds
+  metadata load (meta_oob_load out_of_range, eval_errors meta_oob, meta_masked_load unmasked_empty,
   meta_oob_elided out_of_range) and P0-2/P0-4 of ledger_cycle's inputs and ledger_confirm
   at_budget (a barrier ledger that does not converge) where nothing but the `not decided`
   line is listed, and P0-4 of cluster_pair_prologue peer_unordered, cluster_multicast_pipeline
@@ -1009,11 +1012,12 @@ class EndToEnd(unittest.TestCase):
     def assert_outcomes(self, report):
         """Every evaluation error has the kind EVAL_ERROR_KINDS pins, and every spec of its
         input that kind's outcome; the other UNDECIDED outcomes are the specs of the inputs
-        with an out-of-bounds metadata load or a barrier ledger that does not converge that
-        list nothing but the `not decided` line (its other lines are certain
-        counterexamples), and P0-4 of the inputs whose peer CTA's bytes balance only if a
-        landing completes a later phase than its issue order shows (LANDER_UNDECIDED), which
-        list nothing but the `not decided` line; there is no other ERROR."""
+        with an assumption that does not hold, an out-of-bounds metadata load (but P0-1) or
+        a barrier ledger that does not converge that list nothing but the `not decided`
+        line (its other lines are certain counterexamples), and P0-4 of the inputs whose
+        peer CTA's bytes balance only if a landing completes a later phase than its issue
+        order shows (LANDER_UNDECIDED), which list nothing but the `not decided` line;
+        there is no other ERROR."""
         outcomes, evals, only_marker = {}, {}, set()
         for v, i in runs_of_report(report):
             if i["eval_error"]:
@@ -1044,6 +1048,13 @@ class EndToEnd(unittest.TestCase):
             ("meta_masked_load", "unmasked_empty"),
             ("meta_oob_elided", "out_of_range"),
         }
+        assumed = {  # an assumption that does not hold (KIR change 16): P0-1 too
+            ("assume", "fails"),
+            ("assume", "oob_before"),
+            ("assume", "dup_before"),
+            ("assume_reader", "fails"),
+            ("assume_reader", "fails_both"),
+        }
         unconverged = {
             ("ledger_cycle", i) for i in ("extra0", "extra1", "hang_elsewhere")
         } | {("ledger_confirm", "at_budget")}
@@ -1054,8 +1065,8 @@ class EndToEnd(unittest.TestCase):
             of_kind("limit")
             | {
                 (*x, label)
-                for x in stopped | unconverged
-                for label in SPECS[1:]
+                for x in stopped | unconverged | assumed
+                for label in (SPECS if x in assumed else SPECS[1:])
                 if (*x, label) in only_marker
             }
             | LANDER_UNDECIDED,
@@ -1063,6 +1074,13 @@ class EndToEnd(unittest.TestCase):
         self.assertLessEqual(LANDER_UNDECIDED, only_marker)
         # A stopped input FAILs a spec it has a certain counterexample for.
         self.assertIn(("meta_oob_load", "out_of_range", "P0-3"), outcomes["FAIL"])
+        self.assertIn(("assume", "oob_before", "P0-1"), outcomes["FAIL"])
+        self.assertIn(("assume", "dup_before", "P0-3"), outcomes["FAIL"])
+        self.assertIn(("assume_reader", "fails_both", "P0-1"), outcomes["FAIL"])
+        # An assumption that does not hold is no P0-1 finding (an assert would FAIL all),
+        # and leaves P0-1 undecided, also for the other roles of its CTA.
+        self.assertIn(("assume", "fails", "P0-1"), outcomes["UNDECIDED"])
+        self.assertIn(("assume_reader", "fails", "P0-1"), outcomes["UNDECIDED"])
         self.assertIn(("meta_oob_elided", "out_of_range", "P0-2"), outcomes["FAIL"])
         # So does a CTA's certain hang beside a CTA whose ledger does not converge.
         self.assertIn(("ledger_cycle", "hang_elsewhere", "P0-2"), outcomes["FAIL"])

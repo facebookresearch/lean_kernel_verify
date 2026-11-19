@@ -21,8 +21,8 @@ is not mistaken for a missing one), or, if the evaluation stops,
 `read` (gload), `write` (gstore, tma_store), `atomic` (gatomic, tma_reduce), `tma_load`.
 A pointer access counts its masked-in lanes; a TMA access the in-extent elements of its
 box (`TensorInfo.tmaElems`, as P0-1 and P0-3 read it). Rows are `TensorInfo.rowOf` (TMA:
-the box's row coordinates). A role trace that stops at an out-of-bounds metadata load
-counts its events up to the load. Two frontends that give the same verdicts but different
+the box's row coordinates). A role trace that stops (an out-of-bounds metadata load, an
+assumption that does not hold) counts its events up to there. Two frontends that give the same verdicts but different
 lines lost or moved an access that the specs did not catch.
 -/
 import Std.Data.HashSet

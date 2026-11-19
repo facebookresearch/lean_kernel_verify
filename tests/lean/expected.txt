@@ -163,6 +163,20 @@ ambiguous_shares          y_after_all_x_phases PASS FAIL PASS PASS PASS
 # An out-of-range metadata load is a P0-1 FAIL; the other specs are undecided with their certain lines.
 meta_oob_load             in_range         PASS PASS PASS PASS PASS
 meta_oob_load             out_of_range     FAIL FAIL FAIL FAIL FAIL
+# assume (KIR change 16): false in CTA 1 on fails, oob_before, dup_before; its role stops
+# there (P0-1..P0-5 undecided, the read after it never evaluated); the P0-1 read and the
+# P0-3 duplicate store of CTA 0, where no trace stopped, stay certain FAILs
+assume                    holds            PASS PASS PASS PASS PASS
+assume                    fails            FAIL FAIL FAIL FAIL FAIL
+assume                    oob_before       FAIL FAIL FAIL FAIL FAIL
+assume                    dup_before       FAIL FAIL FAIL FAIL FAIL
+# assume_reader: the writer's assumption false in CTA 1 (fails, fails_both); the reader's
+# out-of-bounds read there may use a value the broken assumption made wrong (P0-1
+# undecided); the same read in CTA 0 (fails_both) or with the assumption holding stays a
+# certain FAIL
+assume_reader             holds            FAIL PASS PASS PASS PASS
+assume_reader             fails            FAIL FAIL FAIL FAIL FAIL
+assume_reader             fails_both       FAIL FAIL FAIL FAIL FAIL
 # More seeded inputs per rule, each with its control.
 # Progress pass: a late join (R = K) that only the pass sees; a three-role ring with a commit hop.
 progress_latejoin_cycle   parity0_deadlock PASS FAIL PASS PASS PASS

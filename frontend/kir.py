@@ -144,6 +144,7 @@ STMT_FIELDS = {
     "while": {"cond", "body", "max_iters"},
     "if": {"cond", "then", "else"},
     "assert": {"cond", "msg"},
+    "assume": {"cond", "msg"},
 }
 EVENT_FIELDS = {
     "bar_init": ({"bar", "idx", "count"}, set()),
@@ -557,7 +558,7 @@ class _Checker:
             self.cond(f"{path}.cond", s["cond"], scope)
             self.block(f"{path}.then", s["then"], scope)
             self.block(f"{path}.else", s["else"], scope)
-        elif op == "assert":
+        elif op in ("assert", "assume"):
             self.cond(f"{path}.cond", s["cond"], scope)
             self.string(f"{path}.msg", s["msg"])
 

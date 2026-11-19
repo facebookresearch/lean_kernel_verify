@@ -1069,6 +1069,30 @@ def meta_oob():
     return k
 
 
+def assume_p1():
+    """A role whose `assume` (KIR change 16) does not hold before its copy stops there: P1-1
+    undecided (not FAIL), as at an out-of-bounds metadata load; where it holds, PASS."""
+    f = "assume_p1.py"
+    body = [
+        {"op": "assume", "cond": {"e": "cmp", "o": "slt", "a": var("M"), "b": c(3), "w": 1},
+         "msg": "the copy misses the capture", "loc": f"{f}:9"},
+        cp(0, f"{f}:10"),
+    ]  # fmt: skip
+    r_body = [
+        tmem("ld", c(0), [rect("data", False, c(0), 32, c(32), 32)], f"{f}:20"),
+        twait(True, f"{f}:21"),
+    ]
+    return kernel(
+        "assume_p1",
+        [role("w", 1, body), role("r", 1, r_body)],
+        [],
+        [
+            {"name": "holds", "params": {"M": 1, "MODE": 0}},
+            {"name": "fails", "params": {"M": 5, "MODE": 0}},
+        ],
+    )
+
+
 def hang():
     """A wait that never returns (nobody arrives on `never`) before an unordered copy: FAIL
     with the N3 note that happens-before after the blocked wait is vacuous."""
@@ -1222,6 +1246,7 @@ FIXTURES = {
     "ranges": ranges,
     "ranges_relative": ranges_relative,
     "meta_oob_p1": meta_oob,
+    "assume_p1": assume_p1,
     "hang_vacuous": hang,
     "cluster_pair": cluster_pair,
     "ledger_cycle": ledger_cycle,

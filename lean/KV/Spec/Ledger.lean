@@ -1182,9 +1182,9 @@ def ledger (h : Host) (c : ClusterTrace) (precise : Bool := false) : Array SlotL
                                   roles := l.roles.map fun rs => if !rs.lander then rs else
                                     { rs with tx := rs.tx.map fun x => { x with floor := floor i rs.role x.pos } } }
 
-/-- The clusters of the run whose roles all ran to their end (a trace cut short at an
-out-of-bounds metadata load has no meaningful ledger), in the order of their first CTA, each
-with its CTAs by rank. -/
+/-- The clusters of the run whose roles all ran to their end (a trace cut short, at an
+out-of-bounds metadata load or an assumption that does not hold, has no meaningful ledger),
+in the order of their first CTA, each with its CTAs by rank. -/
 def Run.clusters (r : Run) : Array ClusterTrace := Id.run do
   let n := r.host.csize
   let mut idx : Std.HashMap (Nat × Nat × Nat) Nat := {}

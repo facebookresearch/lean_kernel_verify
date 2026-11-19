@@ -28,3 +28,5 @@ blocked_cross not decided on this input: the write at blocked_cross.py:6 (role w
 blocked_cross F2: the write at blocked_cross.py:6 (role w, every lane of warp 0) writes the tensormap at scratch+0 (in cta (1,0,0)) while the TMA store at blocked_cross.py:2 (role w, lane 0 of warp 0)
 blocked not decided on this input: the write at blocked.py:3 (role a, the elected lane of warp 0) writes smem [0, 16) and the bulk store at blocked.py:10 (role b, the elected lane of warp 1) reading smem[0, 1024): unordered even under the lockstep reading, but the write follows a wait the P1 ledger finds blocked
 blocked F1: the write at blocked.py:3 (role a, the elected lane of warp 0) writes smem [0, 16) while the bulk store at blocked.py:10 (role b, the elected lane of warp 1) reading smem[0, 1024) may still read it
+assume_stop F1: the write at assume_stop.py:6 (role w, lane 0 of warp 0) writes smem [0, 16) while the bulk store at assume_stop.py:2
+assume_stop assume_stop.py:5: cta (0,0,0) role w: not decided on this input: 1 role trace(s) stop at a model assumption that does not hold (the write misses the capture)

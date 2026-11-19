@@ -15,7 +15,10 @@ and returns one event trace per (CTA, role).
   expressions one event per node evaluation (first offending lane).
 * A metadata `load` whose index lies outside the tensor's extents records a `metaOob`
   event (a P0-1 violation) and stops its role: its later events depend on the unknown value
-  read. The other roles and CTAs run to completion (roles share no values).
+  read. The other roles and CTAs run to completion (roles share no values). An `assume`
+  whose condition is false (KIR change 16: a model assumption the frontend could not prove
+  statically, false on this input) stops its role the same way, without an event; the
+  trace records why it stopped (`StopWhy`).
 * Verdict errors (evaluation stops: every spec's theorem is refuted), each of a kind
   (`ErrKind`, references/specs.md "Evaluation errors"). `kernel`, a certain error of the
   kernel or its host on the input, so every spec FAILs: a failed device `assert`, a barrier
@@ -266,11 +269,46 @@ structure TEvent where
   /-- Current work item. -/
   work : Array (String × Int)
 
+/-- Why a role trace stopped before its end: an out-of-bounds metadata `load` (its
+`metaOob` event, the trace's last, a P0-1 violation) or an `assume` whose condition is
+false on the input (KIR change 16; no event), with the assumption and its loc. -/
+inductive StopWhy where
+  | metaOob
+  | assume (msg : String) (loc : Loc)
+  deriving Inhabited, BEq
+
+/-- The reason, as the summary lines print it. -/
+def StopWhy.text : StopWhy → String
+  | .metaOob => "an out-of-bounds metadata load"
+  | .assume msg _ => s!"a model assumption that does not hold ({msg})"
+
+/-- The reason, as the `not decided` lines print it. -/
+def StopWhy.detail : StopWhy → String
+  | .metaOob => "an out-of-bounds metadata load (P0-1)"
+  | w => w.text
+
 structure RoleTrace where
   role : Nat
   events : Array TEvent
-  /-- The role stopped at a `metaOob` event (its last); later events are unknown. -/
+  /-- The role stopped before its end (`why`); later events are unknown. -/
   stopped : Bool
+  /-- Why it stopped (meaningful only if `stopped`). -/
+  why : StopWhy := .metaOob
+
+/-- Where a stopped trace stopped: the `assume`'s loc, else its last event's (the
+`metaOob` event). -/
+def RoleTrace.stopLoc (t : RoleTrace) : Loc :=
+  match t.why with
+  | .assume _ loc => loc
+  | .metaOob => (t.events.back?.map (·.loc)).getD ""
+
+/-- The distinct reasons the stopped traces `ts` stopped, in order (`detail`: the `not
+decided` lines' form, else the summaries'). -/
+def stopReasons (ts : Array RoleTrace) (detail : Bool := true) : String :=
+  let xs := ts.foldl (init := (#[] : Array String)) fun acc t =>
+    let s := if detail then t.why.detail else t.why.text
+    if acc.contains s then acc else acc.push s
+  " and ".intercalate xs.toList
 
 structure CtaTrace where
   pid : Nat × Nat × Nat
@@ -285,7 +323,8 @@ structure Run where
   host : Host
   ctas : Array CtaTrace
 
-/-- Every role of every CTA ran to its end (no out-of-bounds metadata load). -/
+/-- Every role of every CTA ran to its end (no trace stopped: an out-of-bounds metadata
+load, an assumption that does not hold). -/
 def Run.complete (r : Run) : Bool := r.ctas.all (·.complete)
 
 /-- Who must act on an evaluation error (references/specs.md, "Evaluation errors"):
@@ -310,8 +349,10 @@ structure EvalError where
   loc : Loc
   /-- "cta (x,y,z) role r", or "host" for input setup. -/
   context : String
-  /-- Raised after a `metaOob` event: ends the role, not the evaluation. -/
+  /-- Raised after a `metaOob` event or by an `assume` that does not hold: ends the role,
+  not the evaluation, for the reason `why`. -/
   stop : Bool := false
+  why : StopWhy := .metaOob
   kind : ErrKind := .unexpected
 
 /-! ## Evaluation monad -/
@@ -706,6 +747,10 @@ def execStmt : Stmt → M Unit
   | .event ev => execEvent ev
   | .assert c msg loc => do
     unless ← evalCond loc c do throwK loc .kernel s!"device assert failed: {msg}"
+  | .assume c msg loc => do
+    unless ← evalCond loc c do
+      throw { msg := s!"assumption does not hold: {msg}", loc, context := "", stop := true,
+              why := .assume msg loc }
 
 def execBlock : List Stmt → M Unit
   | [] => pure ()
@@ -727,14 +772,14 @@ def hostInts (h : Host) (es : List Expr) : Except EvalError (Array Int) :=
   | .ok vs _ => .ok (vs.map Val.int).toArray
   | .error e _ => .error { e with context := "host" }
 
-/-- Trace of role `ri` of CTA `pid`; a role that stops at a `metaOob` event keeps the
-events up to it. -/
+/-- Trace of role `ri` of CTA `pid`; a role that stops (a `metaOob` event, an `assume`
+that does not hold) keeps the events up to it and the reason. -/
 def runRole (h : Host) (pid : Nat × Nat × Nat) (ri : Nat) (role : Role) (rank : Nat := 0) :
     Except EvalError RoleTrace :=
   match runM h pid role true (execBlock role.body) rank with
   | .ok () s => .ok { role := ri, events := s.trace, stopped := false }
   | .error e s =>
-    if e.stop then .ok { role := ri, events := s.trace, stopped := true }
+    if e.stop then .ok { role := ri, events := s.trace, stopped := true, why := e.why }
     else .error { e with context := s!"cta {pidStr pid} role {role.name}" }
 
 def lookup {α : Type} (xs : List (String × α)) (k : String) : Option α :=

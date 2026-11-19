@@ -323,6 +323,13 @@ class Tma:
         d = self._desc(tr, i, i.operands[1])
         coords = self._coords(tr, i, d, i.operands[1])
         sym, off, extra = cluster.load_slot(tr, i)  # its cta_mask and leader
+        box = d.msg if d.msg is not None else d.box  # its landing: the hardware box
+        # (a packed format's shared-memory copy may be wider than its packed bytes)
+        known = not d.packed and box and all(isinstance(x, int) and x > 0 for x in box)
+        nb = math.prod(box) * max(1, d.elem_bytes) if known else None
+        tr.capture_landing(
+            i, cluster._address(tr, i.operands[0]), nb, "cta_mask" in extra
+        )
         if tr.k.p1 is not None and tr.k.p1.bulk is not None:  # P1-2: its landing
             if "cta_mask" in extra:
                 tr.fail(

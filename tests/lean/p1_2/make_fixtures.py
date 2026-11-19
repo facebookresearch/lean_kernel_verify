@@ -411,6 +411,28 @@ def same_thread():
     return kernel("same_thread", roles, inputs, ("MODE",))
 
 
+def assume_stop():
+    """A 1-warp role: lane 0's bulk store of shared bytes [0, 1024), commit, then an `assume`
+    (KIR change 16) of MODE == 0 and lane 0's 16-byte write at 0 with no wait (an F1
+    violation where reached). MODE: 0 the assumption holds (the write FAILs as usual); 1 it
+    does not: the role stops before the write, so P1-2 is undecided, not FAIL; 2 lane 5
+    writes before the assumption, which does not hold either: undecided too, the pair is not
+    listed (P1-2 decides pairs only in clusters whose roles all ran to their end, as after an
+    out-of-bounds metadata load)."""
+    f = "assume_stop.py"
+    w0 = c(0)
+    body = [
+        store(c(0), 1024, f"{f}:2", lane=0, kind="bulk"),
+        commit(f"{f}:3"),
+        when(mode_is(2), [write1(c(0), 16, f"{f}:4", w0, c(5))], f"{f}:4"),
+        {"op": "assume", "cond": mode_is(0), "msg": "the write misses the capture", "loc": f"{f}:5"},
+        write1(c(0), 16, f"{f}:6", w0, c(0)),
+    ]  # fmt: skip
+    roles = [role("w", 1, body)]
+    inputs = [inp("holds", MODE=0), inp("fails", MODE=1), inp("pair_before", MODE=2)]
+    return kernel("assume_stop", roles, inputs, ("MODE",))
+
+
 # ------------------------------------------------------------------ landings
 
 
@@ -597,7 +619,7 @@ def cluster_remote():
 
 def main():
     for k in (staging(), staging_wide(), tmap_rebuild(), handoff(), same_thread(), landing(),
-              pair_chain(), blocked(), blocked_cross(), cluster_remote()):  # fmt: skip
+              pair_chain(), blocked(), blocked_cross(), cluster_remote(), assume_stop()):  # fmt: skip
         (HERE / f"{k['kernel']}.kir.json").write_text(json.dumps(k, indent=1) + "\n")
 
 

@@ -133,6 +133,7 @@ class Memory:
             if v.space == "local"
         }
         self.loads: dict = {}  # id(ld.global) -> (tensor, element index), for anchors
+        self.arrays: list = []  # barriers(): (symbol, offset, entries, count, kind)
         self.tma = tma.Tma(
             self, policy.get("records") or []
         )  # tma.py: TMA, bulk copies
@@ -778,6 +779,7 @@ class Memory:
             sync.use_ranges(translators)  # sync.py: offsets over stage slots
             arrays = _split(arrays, uses, _profiles(translators))
         names = self._names(arrays, inits)
+        self.arrays = arrays  # (interp.check_capture_barriers)
         for u in uses:
             if u.event["bar"] is None:  # (cluster.py's cluster barrier has its own)
                 _resolve(u, arrays, names)

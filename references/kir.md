@@ -122,6 +122,18 @@ follow items 1 to 3 and 8.
     `cta_threads := some n` and the theorems of the named specs
     (`KV.Holds .storeReuse` for P1-2); a P0 KIR and a P1 KIR without `p1` emit as
     before.
+16. **`assume` (a model assumption).** A new statement `assume` {`cond`, `msg`}: a
+    condition the frontend relies on but could not prove statically (e.g. that a
+    write misses the bytes of a warp-specialize capture, frontend_ptx.md). Where it
+    is false on an input, that is not a certain violation of the kernel: the role
+    stops there as at an out-of-bounds metadata load (change 7), its later events
+    unknown, so P0-2..P0-6, P1-1 and P1-2 are undecided on that input and only the
+    findings that are certain anyway are listed (P0-1 and P0-3 on the events that
+    ran, the CTAs whose roles completed for P0-2/P0-4); the `not decided` lines and
+    the summary name the assumption (`a model assumption that does not hold (msg)`).
+    It records no event and changes nothing where it holds; IR.lean's `Stmt` gained
+    the constructor `assume`. A device `assert` (a certain error where false: every
+    spec FAILs) is unchanged.
 
 ## Top level
 
@@ -221,6 +233,7 @@ Arrival counts are multiplied by it unless the event says `"per_warp": true`
 | `if`     | `cond`, `then`, `else`                                                                                        |
 | `event`  | the Event's fields inline: `{"op": "event", "ev": "wait", "bar": ..., "idx": ..., "parity": ..., "loc": ...}` |
 | `assert` | `cond`, `msg` (device-side assert in the IR)                                                                  |
+| `assume` | `cond`, `msg` (a model assumption, change 16: false on an input, the role stops there, undecided)             |
 
 Every Stmt carries `"loc": "file:line"` when the IR has one; events always do.
 

@@ -37,9 +37,10 @@ extracted model:
   several logical barriers, as the CuTe frontend's per-pipeline arrays of full and empty
   barriers do.
 
-P0-2 is decided on the CTAs whose roles all ran to their end; an input with an
-out-of-bounds metadata load (P0-1) leaves it undecided (Check.lean), and so does a cluster
-whose barrier ledger does not converge (Ledger.lean, `unconverged`).
+P0-2 is decided on the CTAs whose roles all ran to their end; an input with a stopped
+role trace (an out-of-bounds metadata load, P0-1, or an assumption that does not hold)
+leaves it undecided (Check.lean), and so does a cluster whose barrier ledger does not
+converge (Ledger.lean, `unconverged`).
 
 Notes (no effect on the verdict): phases that complete after a role's last wait (R < K,
 e.g. CUTLASS producer_tail's trailing arrive_and_expect_tx, or an empty barrier's final

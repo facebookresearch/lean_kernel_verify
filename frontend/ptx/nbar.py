@@ -405,7 +405,7 @@ class _Nb(interp.Translator):
     def barrier_event(self, ev, sym, addr, mode, lanes=False, **fields) -> None:
         return
 
-    def require(self, cond, msg) -> None:
+    def require(self, cond, msg: str, op: str = "assert") -> None:
         return
 
     def collective(self, what) -> None:

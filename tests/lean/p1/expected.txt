@@ -70,6 +70,8 @@ ranges_relative        in_range                    PASS
 ranges_relative        col_out_of_range            FAIL
 meta_oob_p1            in_bounds                   PASS
 meta_oob_p1            oob                         FAIL
+assume_p1              holds                       PASS
+assume_p1              fails                       FAIL
 hang_vacuous           blocked                     FAIL
 cluster_pair           ordered                     PASS
 cluster_pair           last_unwaited               FAIL

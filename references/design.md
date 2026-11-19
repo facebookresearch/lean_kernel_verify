@@ -31,7 +31,8 @@ evaluation stopped at a certain kernel error; ERROR when LKV, the case or the
 environment failed: a frontend error, invalid KIR, a Lean error, an
 INCONSISTENT verdict, an unexpected evaluation error; UNDECIDED at a known
 limit: a construct the frontend refuses by design, a model limit such as a
-division by zero, an out-of-bounds metadata load before anything certain, a
+division by zero, an out-of-bounds metadata load or a model assumption (KIR
+`assume`) that does not hold before anything certain, a
 barrier ledger that does not converge, another CTA's TMA bytes whose phases
 only lower bounds give);
 then the FAIL, ERROR and UNDECIDED findings and the notes, grouped by spec and
@@ -145,8 +146,8 @@ constructs (e.g. lane-divergent barrier ops, indirect calls) are hard errors.
 - A refuted theorem without a certain counterexample is not a FAIL
   (`SpecResult.certain`; Lean prints `UNDECIDED <input> <spec>`): every spec of an
   input whose evaluation stops with an error that is not a kernel error, a spec
-  of an input with an out-of-bounds metadata load that finds nothing certain on
-  the evaluated events, P0-2 and P0-4 with nothing certain outside a cluster whose
+  of an input with an out-of-bounds metadata load or an `assume` that does not hold
+  that finds nothing certain on the evaluated events, P0-2 and P0-4 with nothing certain outside a cluster whose
   barrier ledger does not converge, P0-4 with nothing certain outside a slot whose
   bytes from another CTA balance only if a landing completes a later phase than its
   issue order shows, and P1-1 with only pairs that the lockstep

@@ -29,7 +29,9 @@ Entry points.
   that load, and P0-2..P0-5 hold only on runs where every role trace is complete. On
   other runs they are false, listed with the counterexamples that are certain anyway:
   P0-2/P0-4 on the CTAs whose roles all completed, P0-3/P0-5 on the events evaluated (no
-  coverage holes). A spec without such a counterexample is undecided.
+  coverage holes). A spec without such a counterexample is undecided. A role whose
+  `assume` does not hold (KIR change 16) stops the same way, without a P0-1 finding: the
+  `not decided` line and the summary name the assumption.
 * On an input that sets an elision flag of the case (`Input.elisions`), the P0-1 and P0-3
   checks are P0-5's (MaskElision.lean); the summary line says so.
 -/
@@ -45,7 +47,7 @@ import KV.Spec.StoreReuse
 namespace KV
 
 def SpecId.Holds : SpecId → Run → Prop
-  | .bounds, r => Bounds.Holds r
+  | .bounds, r => r.complete ∧ Bounds.Holds r
   | .tripCount, r => r.complete ∧ TripCount.Holds r
   | .coverage, r => r.complete ∧ Coverage.Holds r
   | .barrier, r => r.complete ∧ Barrier.Holds r
@@ -55,7 +57,7 @@ def SpecId.Holds : SpecId → Run → Prop
   | .storeReuse, r => r.complete ∧ StoreReuse.Holds r
 
 instance : (s : SpecId) → (r : Run) → Decidable (s.Holds r)
-  | .bounds, r => inferInstanceAs (Decidable (Bounds.Holds r))
+  | .bounds, r => inferInstanceAs (Decidable (r.complete ∧ Bounds.Holds r))
   | .tripCount, r => inferInstanceAs (Decidable (r.complete ∧ TripCount.Holds r))
   | .coverage, r => inferInstanceAs (Decidable (r.complete ∧ Coverage.Holds r))
   | .barrier, r => inferInstanceAs (Decidable (r.complete ∧ Barrier.Holds r))
@@ -89,15 +91,40 @@ structure SpecResult where
   every spec is certain iff the error is a `kernel` error. -/
   certain : Bool
 
-/-- Why P0-2..P0-5 are undecided on `r`: the first role trace that stops at an
-out-of-bounds metadata load (none if every trace is complete). -/
+/-- Why P0-2..P0-5 are undecided on `r`: the first role trace that stops (an
+out-of-bounds metadata load, an assumption that does not hold; none if every trace is
+complete), with every reason a trace stopped for. -/
 def undecided (r : Run) : Array Issue :=
   let stops := r.ctas.flatMap fun c => (c.roles.filter (·.stopped)).map fun t => (c.pid, t)
   match stops[0]? with
   | none => #[]
   | some (pid, t) =>
-    #[{ loc := (t.events.back?.map (·.loc)).getD "", context := r.host.roleCtx pid t.role,
-        msg := s!"not decided on this input: {stops.size} role trace(s) stop at an out-of-bounds metadata load (P0-1), so their later events are unknown; the lines of this spec that are not `not decided` lines are certain counterexamples" }]
+    #[{ loc := t.stopLoc, context := r.host.roleCtx pid t.role,
+        msg := s!"not decided on this input: {stops.size} role trace(s) stop at {stopReasons (stops.map (·.2))}, so their later events are unknown; the lines of this spec that are not `not decided` lines are certain counterexamples" }]
+
+/-- The stopped role traces of `r`. -/
+def Run.stops (r : Run) : Array RoleTrace :=
+  r.ctas.flatMap fun c => c.roles.filter (·.stopped)
+
+/-- The trace stopped at an `assume` that does not hold. -/
+def RoleTrace.assumeStop (t : RoleTrace) : Bool :=
+  t.stopped && match t.why with
+    | .assume .. => true
+    | .metaOob => false
+
+/-- Some role trace of `r` stopped at an `assume` that does not hold. -/
+def Run.assumeStopped (r : Run) : Bool := r.ctas.any (·.roles.any (·.assumeStop))
+
+/-- `r` with every role trace of each cluster (each CTA without clusters) in which some
+trace stopped at an `assume` emptied and marked stopped: the events there may rest on a
+value the broken assumption made wrong (a warp-specialize capture another role read), so
+none of them is a certain counterexample. -/
+def Run.certainPart (r : Run) : Run :=
+  let bad := (r.ctas.filter (·.roles.any (·.assumeStop))).map (r.host.clusterOf ·.pid)
+  { r with ctas := r.ctas.map fun c =>
+      if bad.contains (r.host.clusterOf c.pid) then
+        { c with roles := c.roles.map fun t => { t with events := #[], stopped := true } }
+      else c }
 
 /-- Verdict, counterexamples and notes of spec `s` on run `r` with its barrier ledgers
 `Ls = r.ledgers` (computed once for P0-2 and P0-4); the same decision as `s.Holds r`. -/
@@ -110,13 +137,16 @@ def SpecId.result (s : SpecId) (r : Run) (Ls : Ledgers) : SpecResult :=
     { spec := s, holds := holds, issues := un ++ undec ++ own, notes := nts, certain := !own.isEmpty }
   match s with
   | .bounds =>
-    let own := Bounds.issues r
-    { spec := s, holds := decide (Bounds.Holds r), issues := own, notes := Bounds.notes r, certain := !own.isEmpty }
+    let own := Bounds.issues r.certainPart
+    { spec := s, holds := r.complete && decide (Bounds.Holds r),
+      issues := (if r.assumeStopped then un else #[]) ++ own, notes := Bounds.notes r,
+      certain := !own.isEmpty }
   | .tripCount => p0 (r.complete && decide (TripCount.HoldsWith Ls)) (TripCount.issues r.host Ls) (TripCount.notes r.host Ls) (unconverged r.host Ls)
-  | .coverage => p0 (r.complete && decide (Coverage.Holds r)) (Coverage.issues r) (Coverage.notes r)
+  | .coverage => p0 (r.complete && decide (Coverage.Holds r)) (Coverage.issues r.certainPart) (Coverage.notes r)
   | .barrier => p0 (r.complete && decide (Barrier.HoldsWith Ls)) (Barrier.issues r.host Ls) (Barrier.notes r.host Ls)
       (unconverged r.host Ls ++ Barrier.undecided r.host Ls)
-  | .maskElision => p0 (r.complete && decide (MaskElision.Holds r)) (MaskElision.issues r) (MaskElision.notes r)
+  | .maskElision => p0 (r.complete && decide (MaskElision.Holds r)) (MaskElision.issues r.certainPart)
+      (MaskElision.notes r)
   | .namedBarriers =>
     let o := NamedBarriers.analyze r
     { spec := s, holds := r.complete && o.ok, issues := un ++ o.certain ++ o.undecided,
@@ -146,11 +176,11 @@ def runCase (k : Kernel) (i : Input) : Report :=
         { spec := s, holds := false, issues := #[], notes := #[], certain := e.kind == .kernel } }
   | .ok r =>
     let events := r.ctas.foldl (fun n c => c.roles.foldl (fun n t => n + t.events.size) n) 0
-    let stops := r.ctas.foldl (fun n c => n + (c.roles.filter (·.stopped)).size) 0
+    let stops := r.stops
     let Ls := r.ledgers
     { kernel := k.kernel, input := i, error := none,
       summary := s!"grid {pidStr r.host.grid}{clusterStr r.host}: {r.ctas.size} CTA(s) x {k.roles.length} role(s), {events} events" ++
-        (if stops = 0 then "" else s!"; {stops} role trace(s) stop at an out-of-bounds metadata load, so P0-2..P0-5 are not decided") ++
+        (if stops.isEmpty then "" else s!"; {stops.size} role trace(s) stop at {stopReasons stops (detail := false)}, so {if r.assumeStopped then "P0-1" else "P0-2"}..P0-5 are not decided") ++
         (match i.elisions with
          | [] => ""
          | fs => s!"; elision flag(s) {", ".intercalate fs} set: the P0-1 and P0-3 checks of this input are reported under P0-5"),
@@ -174,7 +204,7 @@ def runP1 (k : Kernel) (i : Input) : Report :=
         { spec := s, holds := false, issues := #[], notes := #[], certain := e.kind == .kernel } }
   | .ok r => Id.run do
     let events : Nat := r.ctas.foldl (fun n c => c.roles.foldl (fun n t => n + t.events.size) n) 0
-    let stops : Nat := r.ctas.foldl (fun n c => n + (c.roles.filter (·.stopped)).size) 0
+    let stops := r.stops
     let Ls := r.ledgersP1
     let mut summary := s!"grid {pidStr r.host.grid}{clusterStr r.host}: {r.ctas.size} CTA(s) x {k.roles.length} role(s), {events} events; P1: "
     let mut res : List SpecResult := []
@@ -192,7 +222,7 @@ def runP1 (k : Kernel) (i : Input) : Report :=
         (if o.inconsistent.isEmpty then "" else s!" (inconsistent: ids {o.inconsistent.toList})") ++
         s!", {o.blocked} blocked wait(s)"]
     summary := summary ++ "; ".intercalate stats ++
-      (if stops = 0 then "" else s!"; {stops} role trace(s) stop at an out-of-bounds metadata load, so {", ".intercalate (specs.map (·.label))} {if specs.length = 1 then "is" else "are"} not decided")
+      (if stops.isEmpty then "" else s!"; {stops.size} role trace(s) stop at {stopReasons stops (detail := false)}, so {", ".intercalate (specs.map (·.label))} {if specs.length = 1 then "is" else "are"} not decided")
     return { kernel := k.kernel, input := i, error := none, summary, results := res }
 
 /-- P0-6 on a P0-6 KIR (references/specs.md, "P0-6") on input `i`: the summary line (named

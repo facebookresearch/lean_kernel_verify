@@ -116,8 +116,8 @@ python3 -I $S/scripts/lkv.py check K.kir.json... --out DIR   # Layer 2 alone on 
   evaluation error such as a `while` over `max_iters` or a case annotation
   error); **UNDECIDED** (not decided where LKV has a known limit, not an error:
   a construct the frontend refuses by design, a role trace stopped at an
-  out-of-bounds metadata load (itself a P0-1 FAIL) when nothing certain is found
-  for that spec, a division by zero, a barrier ledger that does not converge
+  out-of-bounds metadata load (itself a P0-1 FAIL) or at a model assumption that does
+  not hold (KIR `assume`) when nothing certain is found for that spec, a division by zero, a barrier ledger that does not converge
   (P0-2, P0-4), another CTA's TMA bytes that balance only if a landing completes a
   later phase than its issue order shows (P0-4), P1-1 pairs only the lockstep contents order). A variant without verdicts gives every spec of each of its inputs its
   outcome (UNDECIDED if refused by design, else ERROR).
@@ -308,7 +308,14 @@ remote mbarrier arrives, multicast commits, cta_group::2 and
 multicast TMA loads, DSMEM bulk copies and the cluster barrier are checked with one
 barrier ledger per cluster, and P1-1 runs per cluster (CuTe: a cta_group::2 MMA or copy
 accesses the TMEM of both CTAs of its pair); which CTA's data a copy carries is not
-checked. Refused: TTGIR 2-CTA kernels in the default translation (remote
+checked. A TLX/Triton launch with a preferred cluster is checked in both geometries (all
+regular, all preferred; P0-3 of a mix is not checked); a CuTe launch with one, and a TLX
+launch whose function's required cluster differs from its cluster, are refused. A
+warp-specialize capture (a value passed to the partitions through shared memory) is
+forwarded only where no shared write may overwrite it before the partitions read it
+(a strength-reduced offset: assumed per input by a KIR `assume`, which leaves the input
+undecided where it does not hold).
+Refused: TTGIR 2-CTA kernels in the default translation (remote
 barriers, DSMEM, multi-CTA layouts), CLC, im2col TMA, TTGIR loop-carried pointers (CuTe: a
 loop-carried value changing structure, e.g. a pointer into another tensor),
 side-effecting inline asm, a value that reaches an event through register

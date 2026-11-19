@@ -274,7 +274,29 @@ def remote_arrive(k):  # cluster_remote_arrive: the worker's arrive
 
 
 # (fixture, description, mutation, expected substring of some error)
+def assume_stmt(k):
+    return next(x for x in k["roles"][0]["body"] if x["op"] == "assume")
+
+
 MUTATIONS = [
+    (
+        "assume",
+        "an assume with an i32 condition (KIR change 16)",
+        lambda k: assume_stmt(k).update(cond=c(1)),
+        "condition must have w=1",
+    ),
+    (
+        "assume",
+        "an assume without a message",
+        lambda k: assume_stmt(k).pop("msg"),
+        "missing field 'msg'",
+    ),
+    (
+        "assume",
+        "an assume with a non-string message",
+        lambda k: assume_stmt(k).update(msg=3),
+        "expected a string",
+    ),
     (
         "cluster_pair_tma",
         "cta_mask without a cluster",

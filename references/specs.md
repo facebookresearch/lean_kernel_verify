@@ -26,8 +26,8 @@ verdict means. The Lean definitions are the authority; each section names them.
   kind `kernel error`). Refuted without either, a spec is neither proved nor
   violated, and Lean prints `UNDECIDED <input> <spec>`: every spec of an input
   whose evaluation stops with a `model limit` or an `unexpected` error, a spec
-  that finds nothing certain on an input with an out-of-bounds metadata load
-  ("Undecided specs"), P0-2 and P0-4 with nothing certain outside a cluster whose
+  that finds nothing certain on an input with an out-of-bounds metadata load or
+  an `assume` that does not hold ("Undecided specs"), P0-2 and P0-4 with nothing certain outside a cluster whose
   barrier ledger does not converge, P0-4 with nothing certain outside a slot whose
   bytes from another CTA balance only if a landing completes a later phase than its
   issue order shows (P0-4), and P1-1 with only U1 pairs or F1 pairs that a
@@ -591,7 +591,7 @@ cross-role pair is ordered under `sound`.
 | FAIL F1   | a conflicting cross-role pair not ordered even under `lock`: a timing-dependent TMEM race in the model under every fitting reading of the lockstep contents                                                                                                                                                                                                                                                                                          |
 | FAIL F2   | a rectangle outside lanes [0, 128) or columns [0, cols)                                                                                                                                                                                                                                                                                                                                                                                              |
 | FAIL F3   | an ld/st outside lanes [32 (w mod 4), +32) of its warp w                                                                                                                                                                                                                                                                                                                                                                                             |
-| undecided | a role trace stopped at an out-of-bounds metadata load; F1 pairs while a named barrier id is used with two counts, or in a cluster whose ledger does not converge; or (U1) cross-role pairs ordered under `lock` but not under `sound` when no certain counterexample (F1 with consistent named barriers, F2, F3) exists. First line `not decided on this input`; U1 pairs are listed as counterexamples (`ordered only under the lockstep contents of the ledger`) also when the input FAILs anyway |
+| undecided | a role trace stopped (an out-of-bounds metadata load, an assumption that does not hold); F1 pairs while a named barrier id is used with two counts, or in a cluster whose ledger does not converge; or (U1) cross-role pairs ordered under `lock` but not under `sound` when no certain counterexample (F1 with consistent named barriers, F2, F3) exists. First line `not decided on this input`; U1 pairs are listed as counterexamples (`ordered only under the lockstep contents of the ledger`) also when the input FAILs anyway |
 | NOTE N1   | a same-role pair involving a cp/mma that conflicts, is not a PTX pipelined pair (mma A/SF read -> mma D or cp; mma D -> mma D at the same address; cp -> mma A/SF read at the same address; ld/st -> ld/st) and is not separated by a completion of the first                                                                                                                                                                                        |
 | NOTE N2   | an intra-role cross-warp ld/st pair with no bar.sync of the role between the first one's completion and the second (only the lockstep reading of a role orders it)                                                                                                                                                                                                                                                                                   |
 | NOTE N3   | the P1 ledger finds a blocked wait: happens-before after it is vacuous                                                                                                                                                                                                                                                                                                                                                                               |
@@ -782,6 +782,22 @@ not a counterexample). A spec with such a counterexample FAILs; one without is
 UNDECIDED (`UNDECIDED <input> <P0-n>`).
 Other CTAs and roles are evaluated as usual (roles share no values).
 
+## Undecided specs: assumptions that do not hold
+
+A KIR `assume` (kir.md change 16) is a condition a frontend relies on but could not
+prove statically (the PTX translation: a write whose offsets have no static bounds
+misses a warp-specialize capture). Where it is false on an input, that is no
+certain violation of the kernel, only of LKV's model: the role stops there exactly
+as at an out-of-bounds metadata load, without a P0-1 finding. P0-2..P0-6, P1-1 and
+P1-2 are then refuted on that input, report a `not decided on this input` line at
+the `assume` naming it (`... role trace(s) stop at a model assumption that does not
+hold (<msg>) ...`; the summary line names it too) and list only what is certain
+anyway, as above (P0-1 and P0-3 on the events that ran, P0-2/P0-4 on the CTAs
+whose role traces completed; P1-2 and P1-1 decide no pair of a cluster with a
+stopped trace): UNDECIDED unless such a counterexample exists. Where it holds it
+changes nothing (`tests/lean/assume`, `p1/assume_p1`, `p1_2/assume_stop`). A device
+`assert` stays a certain error (every spec FAILs).
+
 ## Undecided specs: a barrier ledger that does not converge
 
 The phase classification and the lockstep contents of a cluster's ledger (one
@@ -829,7 +845,8 @@ no counterexample is listed. The error's kind (`Eval.lean` `ErrKind`, printed as
 ## Reports
 
 `#eval KV.runCase kernel input` prints a summary line (grid, CTAs, roles,
-events; role traces stopped at an out-of-bounds metadata load; the elision flags
+events; role traces stopped at an out-of-bounds metadata load or an assumption
+that does not hold, and why; the elision flags
 the input sets), then, per spec, PASS/FAIL from the decision procedure,
 counterexample lines `loc: context: message` (on an undecided spec, first the
 `not decided on this input` line) and note lines `note: loc: context: message`:

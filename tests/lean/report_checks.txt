@@ -19,6 +19,26 @@ stale_presumed_hang !role c (consumer convention, 3 waits) needs 3 completions
 meta_oob_load UNDECIDED out_of_range P0-2
 meta_oob_load !UNDECIDED out_of_range P0-1
 meta_oob_load !UNDECIDED out_of_range P0-3
+assume 2 CTA(s) x 1 role(s), 2 events; 1 role trace(s) stop at a model assumption that does not hold (the write misses the capture), so P0-1..P0-5 are not decided
+assume !UNDECIDED holds
+assume UNDECIDED fails P0-1
+assume UNDECIDED fails P0-2
+assume UNDECIDED fails P0-5
+assume !UNDECIDED oob_before P0-1
+assume UNDECIDED oob_before P0-3
+assume UNDECIDED dup_before P0-1
+assume !UNDECIDED dup_before P0-3
+assume UNDECIDED dup_before P0-4
+assume !offsets [100, 101)
+assume !cta (1,0,0) role default: gload
+assume !evaluation error
+assume !out-of-bounds metadata load
+assume_reader 2 CTA(s) x 2 role(s), 1 events; 1 role trace(s) stop at a model assumption that does not hold (the write misses the capture), so P0-1..P0-5 are not decided
+assume_reader !UNDECIDED holds
+assume_reader UNDECIDED fails P0-1
+assume_reader !UNDECIDED fails_both P0-1
+assume_reader !offsets [20, 21)
+assume_reader !cta (1,0,0) role reader: gload inp: 1 lane(s) outside allocation [0, 3]: offsets [30, 31)
 meta_oob_elided !UNDECIDED out_of_range P0-2
 meta_oob_elided UNDECIDED out_of_range P0-3
 eval_errors !UNDECIDED meta_oob P0-1

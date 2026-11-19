@@ -59,3 +59,6 @@ blocked_cross   after_blocked_wait         FAIL
 blocked_cross   no_wait                    FAIL
 cluster_remote  into_source                FAIL
 cluster_remote  elsewhere                  PASS
+assume_stop     holds                      FAIL
+assume_stop     fails                      FAIL
+assume_stop     pair_before                FAIL

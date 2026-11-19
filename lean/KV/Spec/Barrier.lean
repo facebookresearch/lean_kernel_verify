@@ -40,9 +40,10 @@ purpose, a wrong phase if not); expect_tx bytes with no load in a phase nobody w
 (transaction bytes pending after the last wait, e.g. CUTLASS producer_tail's trailing
 arrive_and_expect_tx), and expect_tx bytes on a slot nobody waits on.
 
-P0-4 is decided on the CTAs whose roles all ran to their end; an input with an
-out-of-bounds metadata load (P0-1) leaves it undecided (Check.lean), and so does a cluster
-whose barrier ledger does not converge (Ledger.lean, `unconverged`).
+P0-4 is decided on the CTAs whose roles all ran to their end; an input with a stopped
+role trace (an out-of-bounds metadata load, P0-1, or an assumption that does not hold)
+leaves it undecided (Check.lean), and so does a cluster whose barrier ledger does not
+converge (Ledger.lean, `unconverged`).
 -/
 import KV.Spec.Ledger
 

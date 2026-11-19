@@ -804,8 +804,8 @@ def analyze (r : Run) (Ls : Ledgers) : P2Out := Id.run do
   let stops := r.ctas.flatMap fun c => (c.roles.filter (·.stopped)).map fun t => (c.pid, t)
   match stops[0]? with
   | some (pid, t) =>
-    issues := #[{ loc := (t.events.back?.map (·.loc)).getD "", context := h.roleCtx pid t.role,
-                  msg := s!"not decided on this input: {stops.size} role trace(s) stop at an out-of-bounds metadata load (P0-1), so their later events are unknown; the lines of this spec that are not `not decided` lines are certain counterexamples" }] ++ issues
+    issues := #[{ loc := t.stopLoc, context := h.roleCtx pid t.role,
+                  msg := s!"not decided on this input: {stops.size} role trace(s) stop at {stopReasons (stops.map (·.2))}, so their later events are unknown; the lines of this spec that are not `not decided` lines are certain counterexamples" }] ++ issues
   | none => pure ()
   return { ok, issues, notes, certain, stores := nst, writes := nwr, pairs := npairs, undecided := nund,
            named := nnamed, inconsistent := incons, blocked := nblocked }

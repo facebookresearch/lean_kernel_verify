@@ -158,7 +158,8 @@ _CMPS = {
 def evaluate(facts, params, metadata=None, pid=(0, 0, 0), role=0):  # noqa: C901 (one case per KIR node and statement)
     """Trace of role `role` on one CTA: [("gload"|"gstore"|"gatomic", tensor, [offset]),
     ("work", {field: value}), ("overflow", node op), ("meta_oob", tensor, index),
-    ("assert", msg), (event, bar, idx[, parity]) for barrier events]. A metadata tensor
+    ("assert", msg), ("assume", msg) (the role stops there), (event, bar, idx[, parity])
+    for barrier events]. A metadata tensor
     read with several indices has contents {(i0, i1, ...): value}."""
     env, trace, metadata = dict(params), [], metadata or {}
 
@@ -250,6 +251,10 @@ def evaluate(facts, params, metadata=None, pid=(0, 0, 0), role=0):  # noqa: C901
             elif op == "assert":
                 if not ex(s["cond"]):
                     trace.append(("assert", s["msg"]))
+            elif op == "assume":  # false: the role stops (KIR change 16)
+                if not ex(s["cond"]):
+                    trace.append(("assume", s["msg"]))
+                    raise _Stop
             elif s["ev"] in ("gload", "gstore", "gatomic"):
                 offs = tex(s["offsets"])
                 if s["mask"] is not None:

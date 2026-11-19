@@ -26,9 +26,10 @@ violations and notes are P0-5's (MaskElision).
 Elements are identified by their element offset (sum of coordinate x stride), so two
 writes collide exactly when they hit the same memory.
 
-On an input with an out-of-bounds metadata load (P0-1) some role traces stop early; P0-3
-is then undecided (Check.lean) and only its certain counterexamples are listed (no holes:
-a stopped role might still write them).
+On an input with an out-of-bounds metadata load (P0-1) or an assumption that does not
+hold (KIR `assume`) some role traces stop early; P0-3 is then undecided (Check.lean) and
+only its certain counterexamples are listed (no holes: a stopped role might still write
+them).
 -/
 import Std.Data.HashSet
 import KV.Spec.Common
