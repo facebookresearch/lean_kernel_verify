@@ -69,6 +69,9 @@ from .slicing import SliceError, Slicer, terminator
 # budget; reaching it is a verdict error in Layer 2, never a silent pass.
 WHILE_FUEL = 1 << 16
 CLC_SCHEDULES = ("none", "round_robin", "greedy")
+MAX_PROTOCOL_INPUTS = (
+    4096  # KIR inputs one launch input may expand to (_with_protocols)
+)
 # Bytes per element of the tensormap `elem_type` values Triton's tensormap_create carries:
 # the PTX `tensormap.replace .elemtype` encoding (0 u8, 1 u16, 2 u32, 3 s32, 4 u64, 5 s64,
 # 6 f16, 7 f32, 8 f32.ftz, 9 f64, 10 bf16, 11 tf32, 12 tf32.ftz); 13-15 are the packed
@@ -1613,7 +1616,7 @@ def build_ptx(
                    tensors={n: {"elem_bytes": a["elem_bytes"], "float": a["dtype"].startswith(("float", "bfloat"))}
                             for n, a in snap0.items() if a["kind"] == "tensor"}, blocks=_desc_blocks(launches),
                    work={"fields": list(work), "mode": "gate", "per": per, "sites": sites},
-                   **({"p1": ["P1-2"]} if p1 else {}))  # fmt: skip
+                   **({"p1": ["P1-2"]} if p1 else {}), **_gsync_policy(case))  # fmt: skip
     facts = T.translate(text, fn.name, records, pol)
     if facts.refusals:
         raise KirError(facts.refusals[0]["msg"], kind=facts.refusals[0]["kind"])
@@ -1646,6 +1649,9 @@ def build_ptx(
                         "strides": [K.var(f"{name}.stride.{i}", 64) for i in range(rank)],
                         "role": ann.get("role", "output" if name in written else "input"),
                         "segments": ann.get("segments"), "metadata": name in metadata})  # fmt: skip
+        if name in facts.sync:  # kir.md change 18: a sync tensor
+            tensors[-1].update(role="workspace", metadata=False, segments=None,
+                               elem_bytes=facts.sync[name] // 8, sync={"width": facts.sync[name]})  # fmt: skip
         params += [{"name": f"{name}.{f}.{i}", "type": "i64"}
                    for i in range(rank) for f in ("shape", "stride")]  # fmt: skip
     tensors += _desc_tensors(facts.descs, annotations, written)
@@ -1654,13 +1660,24 @@ def build_ptx(
     if geometry is not None and facts.clc:
         raise KirError("CLC with a preferred cluster geometry (gap: which clusters a "
                        "try_cancel may cancel when the sizes mix is not modeled)")  # fmt: skip
+    for region, _rec in facts.protocols:  # proto.py: the outcome tables
+        name = f"__proto{region.k}"
+        tensors.append({"name": name, "kind": "global", "elem_bytes": 4,
+                        "shape": [K.var(f"{name}.shape.0", 64)], "strides": [K.var(f"{name}.stride.0", 64)],
+                        "segments": None, "role": "input", "metadata": True})  # fmt: skip
+        params += [
+            {"name": f"{name}.{f}.0", "type": "i64"} for f in ("shape", "stride")
+        ]
     doc = _document(dump, key, case, "ptx", facts.target, params, tensors, facts.barriers,
-                    roles, launches, written, {}, facts.clc, facts.cluster)  # fmt: skip
+                    roles, launches, written, {}, facts.clc, facts.cluster, sync=facts.sync,
+                    protocols=facts.protocols, block=tuple(facts.block))  # fmt: skip
     if geometry is not None:
         doc["case"]["name"] += geometry_suffix(geometry)
     if p1:
         doc["p1"] = facts.p1
         doc["cta_threads"] = facts.cta_threads
+    if facts.representative:  # kir.md change 18
+        doc["representative"] = list(facts.representative)
     return doc
 
 
@@ -1918,6 +1935,17 @@ def translate_nb(dump_path: Path, case: dict, jobs: int = 1) -> dict:
     return {**{t[0]: got[t[0]] for t in tasks}, **errors}
 
 
+def _gsync_policy(case: dict) -> dict:
+    """The PTX core's global-synchronization policy keys from the case (opt-in:
+    frontend_ttgir.md "Global synchronization"): `gsync`, `sync_tensors`, `claims`,
+    `relay_channels`, and `protocols` (proto.py)."""
+    out: dict = {"protocols": [dict(p) for p in case.get("protocols", ())]}
+    if case.get("gsync"):
+        out.update(gsync=True, sync_tensors=list(case.get("sync_tensors", ())),
+                   claims=case.get("claims"), relay_channels=list(case.get("relay_channels", ())))  # fmt: skip
+    return out
+
+
 def _desc_blocks(launches: list) -> dict:
     """The block of each host descriptor (its !tt.tensordesc type's, as build() checks),
     its KIR box: the core merges the hardware boxes Triton cuts a block into."""
@@ -2020,24 +2048,20 @@ def _input_name(inp: dict, launch: dict, key: str) -> str:
 
 def _document(dump: dict, key: str, case: dict, ir: str, target: str, params: list,
               tensors: list, barriers: list, roles: list, launches: list, written: set,
-              desc_bases: dict, uses_clc: bool, cluster: tuple = (1, 1, 1)) -> dict:  # fmt: skip
-    """The KIR document: the inputs of every launch (one per CLC schedule with CLC);
+              desc_bases: dict, uses_clc: bool, cluster: tuple = (1, 1, 1),
+              sync: dict | None = None, protocols: list | None = None,
+              block: tuple = ()) -> dict:  # fmt: skip
+    """The KIR document: the inputs of every launch (one per CLC schedule with CLC, one per
+    reachable outcome of the protocols' teams with protocol regions: _with_protocols);
     `cluster` the launches' cluster dims (the PTX translation's Facts.cluster)."""
     spec = dump["specs"][key]
     inputs = []
     for inp, launch in launches:
         base = _input(_input_name(inp, launch, key), inp, launch, params, tensors, spec,
                       case, written, desc_bases)  # fmt: skip
-        if uses_clc:
-            resident = dump["num_sms"] * max(
-                1, dump["target"]["max_shared_mem"] // max(1, spec["shared_bytes"])
-            )
-            inputs += [
-                _with_clc(base, sched, resident, tuple(cluster))
-                for sched in case.get("clc_schedules", CLC_SCHEDULES)
-            ]
-        else:
-            inputs.append(base)
+        if sync:
+            base.update(_capacity(dump, spec))
+        inputs += _expand(base, protocols, uses_clc, dump, spec, case, cluster, block)
 
     elision = case.get("elision_flags", [])
     unknown = sorted(set(elision) - set(inputs[0]["flags"]))
@@ -2087,6 +2111,26 @@ def _annotations(case: dict, input_names: list, key: str) -> dict:
     return sets[0]
 
 
+def _expand(base: dict, protocols, uses_clc: bool, dump: dict, spec: dict, case: dict,
+            cluster: tuple, block: tuple) -> list:  # fmt: skip
+    """The KIR inputs of one launch input: one per reachable outcome of the protocols' teams
+    (_with_protocols), else one per CLC schedule with CLC, else itself."""
+    if protocols and uses_clc:
+        raise KirError("protocol regions together with CLC (gap: the inputs would need both "
+                       "the outcome tables and the CLC schedules)")  # fmt: skip
+    if protocols:
+        return _with_protocols(base, protocols, case, block)
+    if uses_clc:
+        resident = dump["num_sms"] * max(
+            1, dump["target"]["max_shared_mem"] // max(1, spec["shared_bytes"])
+        )
+        return [
+            _with_clc(base, sched, resident, tuple(cluster))
+            for sched in case.get("clc_schedules", CLC_SCHEDULES)
+        ]
+    return [base]
+
+
 def _input(
     name: str,
     inp: dict,
@@ -2102,7 +2146,9 @@ def _input(
     values = {}
     for p in params:
         pname = p["name"]
-        if pname.startswith("__clc_"):
+        if pname.startswith(
+            ("__clc_", "__proto")
+        ):  # attached later (_with_clc, _with_protocols)
             continue
         if pname in snap:
             values[pname] = int(snap[pname]["value"])
@@ -2144,6 +2190,14 @@ def _input(
                 "its base tensor",
                 rec["base"],
             )
+        given = (
+            _given_contents(case, inp, t["name"], rec["shape"])
+            if t["metadata"]
+            else None
+        )
+        if given is not None:
+            metadata[t["name"]] = given
+            continue
         if t["metadata"]:
             if "values" not in rec:
                 raise KirError(
@@ -2176,7 +2230,7 @@ def _input(
                         "which the analyzed kernel writes"
                     )
             metadata[t["name"]] = rec["values"]
-    per_input = next((i for i in case["inputs"] if i["name"] == inp["name"]), {})
+    intended = _intended(case, inp, tensors)
     return {
         "name": name,
         "params": values,
@@ -2186,10 +2240,37 @@ def _input(
         # window sizes) are compiled into the KIR itself.
         "flags": {k: v for k, v in spec["constexprs"].items() if isinstance(v, bool)},
         "shapes": shapes,
-        "intended_writes": per_input.get(
-            "intended_writes", case.get("intended_writes", {})
-        ),
+        "intended_writes": intended,
     }
+
+
+def _given_contents(case: dict, inp: dict, tensor: str, shape: list):
+    """The case's `metadata_contents` of a metadata tensor of `shape` (an input's own, else the
+    case's), zero-padded to its elements, or None: the contents an earlier launch of the run
+    writes (the dump's CPU run skips it, so the recorded ones are stale), as that launch
+    computes them (trusted)."""
+    per = next((i for i in case["inputs"] if i["name"] == inp["name"]), {})
+    got = next((g for src in (per, case)
+                if (g := (src.get("metadata_contents") or {}).get(tensor)) is not None), None)  # fmt: skip
+    if got is None:
+        return None
+    numel = 1
+    for d in shape:
+        numel *= int(d)
+    if len(got) > numel:
+        raise KirError(f"input {inp['name']}: metadata_contents of {tensor} has {len(got)} "
+                       f"elements, the tensor {numel}", kind="error")  # fmt: skip
+    return [int(v) for v in got] + [0] * (numel - len(got))
+
+
+def _intended(case: dict, inp: dict, tensors: list) -> dict:
+    """The input's intended writes (its own, else the case's). An `unchecked` entry asks for no
+    check: one of a tensor that is no output of this KIR (a specialization or cluster geometry
+    that never writes it) is dropped."""
+    per = next((i for i in case["inputs"] if i["name"] == inp["name"]), {})
+    intended = per.get("intended_writes", case.get("intended_writes", {})) or {}
+    outputs = {t["name"] for t in tensors if t.get("role") == "output"}
+    return {t: v for t, v in intended.items() if v != "unchecked" or t in outputs}
 
 
 def _host_value(e: dict, values: dict, input_name: str) -> int:
@@ -2334,6 +2415,90 @@ def _with_clc(
         },
     )
     out["shapes"] = dict(inp["shapes"], __clc_schedule=[g, k], __clc_launched=[g])
+    return out
+
+
+def _capacity(dump: dict, spec: dict) -> dict:
+    """The co-resident capacity of a launch with sync tensors (kir.md change 18) when its
+    shared memory fits one CTA per SM (registers cannot lower that: a launchable kernel fits
+    one CTA): `num_sms` CTAs; otherwise none (P0-7 leaves a cross-CTA wait undecided)."""
+    smem = int(spec.get("shared_bytes") or 0)
+    if smem and dump["target"]["max_shared_mem"] // smem == 1:
+        return {"capacity": {"ctas": int(dump["num_sms"])}}
+    return {}
+
+
+def _with_protocols(inp: dict, protocols: list, case: dict, block: tuple) -> list:
+    """The inputs of one launch with protocol regions (frontend/ptx/proto.py): one per
+    reachable outcome vector of every group of every protocol (the product), named
+    `<input>@proto:<tensor>:<vector>`, the vector the CTAs' exits group by group (digits in
+    linear CTA order, groups by first CTA, separated by `-`). Each carries the table
+    `__proto<k>`: per CTA (linear) its exit and live-out values (-1: the CTA does not run the
+    region), and the groups as `sync_groups`. Refused: live-outs that are not one integer per
+    CTA, more than MAX_PROTOCOL_INPUTS inputs."""
+    from ..ptx import proto as PR
+
+    grid = tuple(inp["grid"]) + (1,) * (3 - len(inp["grid"]))
+    n = grid[0] * grid[1] * grid[2]
+    per_protocol = []
+    groups_all: list = []  # the groups synchronize through the region (Input.syncGroups)
+    for region, rec in protocols:
+        start = next((int(p.get("start", 0)) for p in case.get("protocols", ())
+                      if p.get("tensor") == region.tensor), 0)  # fmt: skip
+        try:
+            groups = PR.agents(rec, grid, inp["params"], inp["metadata"])
+            launch = {"grid": grid, "block": tuple(block) or (32, 1, 1), "warp": rec.w0}
+            outs = []
+            for g in sorted(groups, key=lambda g: g[0].cta):
+                ex = PR.explore(region, g, start, launch)
+                if ex.stuck:
+                    raise PR.ProtocolError(f"the protocol of {region.tensor} can hang by itself "
+                                           f"(group of CTAs {[a.cta for a in g]})")  # fmt: skip
+                if any(
+                    not isinstance(v, int)
+                    for vec in ex.outcomes
+                    for _e, vals in vec
+                    for v in vals
+                ):
+                    raise PR.ProtocolError(f"a live-out of the protocol region of {region.tensor} is "
+                                           "not one integer per CTA (lane-varying, a pointer or data)")  # fmt: skip
+                outs.append((g, sorted(ex.outcomes)))
+        except PR.ProtocolError as e:
+            raise KirError(f"input {inp['name']}: {e}") from e
+        cols = 1 + len(region.live_out)
+        vecs = []
+        for choice in itertools.product(*[o for _, o in outs]):
+            table = [-1] * (n * cols)
+            label = []
+            for (g, _), vec in zip(outs, choice):
+                for a, (exit_, vals) in zip(g, vec):
+                    table[a.cta * cols] = exit_
+                    for j, v in enumerate(vals, 1):
+                        table[a.cta * cols + j] = v if isinstance(v, int) else -1
+                label.append("".join(str(e) for e, _ in vec))
+            vecs.append((f"{region.tensor}:{'-'.join(label)}", table))
+        per_protocol.append((region.k, vecs))
+        groups_all += [[a.cta for a in g] for g, _ in outs]
+    total = 1
+    for _k, vecs in per_protocol:
+        total *= len(vecs)
+    if total > MAX_PROTOCOL_INPUTS:
+        raise KirError(f"input {inp['name']}: {total} outcome vectors of its protocol regions, more "
+                       f"than {MAX_PROTOCOL_INPUTS} KIR inputs")  # fmt: skip
+    out = []
+    for combo in itertools.product(*[v for _, v in per_protocol]):
+        x = {**inp, "name": inp["name"] + "".join(f"@proto:{lab}" for lab, _ in combo),
+             "sync_groups": groups_all}  # fmt: skip
+        x["metadata"] = dict(inp["metadata"])
+        x["params"] = dict(inp["params"])
+        x["shapes"] = dict(inp.get("shapes", {}))
+        for (k, _), (_, table) in zip(per_protocol, combo):
+            name = f"__proto{k}"
+            x["metadata"][name] = table
+            x["params"][f"{name}.shape.0"] = len(table)
+            x["params"][f"{name}.stride.0"] = 1
+            x["shapes"][name] = [len(table)]
+        out.append(x)
     return out
 
 

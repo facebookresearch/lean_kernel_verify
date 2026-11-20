@@ -51,8 +51,14 @@ import KV.Spec.MaskElision
 import KV.Spec.TmemReuse
 import KV.Spec.NamedBarriers
 import KV.Spec.StoreReuse
+import KV.Spec.Global
 
 namespace KV
+
+/-- The specs of a P0 KIR: the five P0 specs, then P0-7 if it has sync tensors (KIR change
+18). -/
+def specsOf (k : Kernel) : List SpecId :=
+  if k.tensors.any (·.sync.isSome) then SpecId.all ++ SpecId.global else SpecId.all
 
 def SpecId.Holds : SpecId → Run → Prop
   | .bounds, r => r.complete ∧ Bounds.Holds r
@@ -63,6 +69,7 @@ def SpecId.Holds : SpecId → Run → Prop
   | .namedBarriers, r => r.complete ∧ NamedBarriers.Holds r
   | .tmemReuse, r => r.complete ∧ TmemReuse.Holds r
   | .storeReuse, r => r.complete ∧ StoreReuse.Holds r
+  | .gwait, r => Global.Holds r = true
 
 instance : (s : SpecId) → (r : Run) → Decidable (s.Holds r)
   | .bounds, r => inferInstanceAs (Decidable (r.complete ∧ Bounds.Holds r))
@@ -73,6 +80,7 @@ instance : (s : SpecId) → (r : Run) → Decidable (s.Holds r)
   | .namedBarriers, r => inferInstanceAs (Decidable (r.complete ∧ NamedBarriers.Holds r))
   | .tmemReuse, r => inferInstanceAs (Decidable (r.complete ∧ TmemReuse.Holds r))
   | .storeReuse, r => inferInstanceAs (Decidable (r.complete ∧ StoreReuse.Holds r))
+  | .gwait, r => inferInstanceAs (Decidable (Global.Holds r = true))
 
 def RunHolds (s : SpecId) : Except EvalError Run → Prop
   | .ok r => s.Holds r
@@ -118,7 +126,7 @@ def Run.stops (r : Run) : Array RoleTrace :=
 def RoleTrace.assumeStop (t : RoleTrace) : Bool :=
   t.stopped && match t.why with
     | .assume .. => true
-    | .metaOob => false
+    | .metaOob | .blocked .. => false
 
 /-- Some role trace of `r` stopped at an `assume` that does not hold. -/
 def Run.assumeStopped (r : Run) : Bool := r.ctas.any (·.roles.any (·.assumeStop))
@@ -147,7 +155,7 @@ def SpecId.result (s : SpecId) (r : Run) (Ls : Ledgers) : SpecResult :=
   | .bounds =>
     let own := Bounds.issues r.certainPart
     { spec := s, holds := r.complete && decide (Bounds.Holds r),
-      issues := (if r.assumeStopped then un else #[]) ++ own, notes := Bounds.notes r,
+      issues := (if r.assumeStopped || r.hangs then un else #[]) ++ own, notes := Bounds.notes r,
       certain := !own.isEmpty }
   | .tripCount => p0 (r.complete && decide (TripCount.HoldsWith Ls)) (TripCount.issues r.host Ls) (TripCount.notes r.host Ls) (unconverged r.host Ls)
   | .coverage => p0 (r.complete && decide (Coverage.Holds r)) (Coverage.issues r.certainPart) (Coverage.notes r)
@@ -165,6 +173,9 @@ def SpecId.result (s : SpecId) (r : Run) (Ls : Ledgers) : SpecResult :=
   | .storeReuse =>
     let o := StoreReuse.analyze r r.ledgersP1
     { spec := s, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }
+  | .gwait =>
+    let o := Global.analyze r Ls
+    { spec := s, holds := r.complete && o.ok, issues := o.issues, notes := #[], certain := o.certain }
 
 structure Report where
   kernel : String
@@ -180,7 +191,7 @@ def runCase (k : Kernel) (i : Input) : Report :=
   match eval k i with
   | .error e =>
     { kernel := k.kernel, input := i, error := some e, summary := "",
-      results := SpecId.all.map fun s =>
+      results := (specsOf k).map fun s =>
         { spec := s, holds := false, issues := #[], notes := #[], certain := e.kind == .kernel } }
   | .ok r =>
     let events := r.ctas.foldl (fun n c => c.roles.foldl (fun n t => n + t.events.size) n) 0
@@ -188,11 +199,14 @@ def runCase (k : Kernel) (i : Input) : Report :=
     let Ls := r.ledgers
     { kernel := k.kernel, input := i, error := none,
       summary := s!"grid {pidStr r.host.grid}{clusterStr r.host}: {r.ctas.size} CTA(s) x {k.roles.length} role(s), {events} events" ++
-        (if stops.isEmpty then "" else s!"; {stops.size} role trace(s) stop at {stopReasons stops (detail := false)}, so {if r.assumeStopped then "P0-1" else "P0-2"}..P0-5 are not decided") ++
+        (if stops.isEmpty then ""
+         else if r.hangs then s!"; {stops.size} role trace(s) are blocked forever at a take of a tagged word, so P0-1..P0-5 are not decided"
+         else s!"; {stops.size} role trace(s) stop at {stopReasons stops (detail := false)}, so {if r.assumeStopped then "P0-1" else "P0-2"}..P0-5 are not decided") ++
         (match i.elisions with
          | [] => ""
-         | fs => s!"; elision flag(s) {", ".intercalate fs} set: the P0-1 and P0-3 checks of this input are reported under P0-5"),
-      results := SpecId.all.map (·.result r Ls) }
+         | fs => s!"; elision flag(s) {", ".intercalate fs} set: the P0-1 and P0-3 checks of this input are reported under P0-5") ++
+        (if r.host.hasSync then s!"; global sync: {Global.summary r}" else ""),
+      results := (specsOf k).map (·.result r Ls) }
 
 /-- The P1 specs a P1 KIR is decided for: those its `p1` names, else P1-1 iff it has a TMEM
 allocation (KIR change 10). -/

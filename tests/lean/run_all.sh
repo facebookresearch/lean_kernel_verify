@@ -31,6 +31,9 @@
 # 4. The same for every tests/lean/nb/*.kir.json fixture (P0-6 KIR, named barriers
 #    convergent; written by nb/make_fixtures.py) against nb/expected.txt (one P0-6 column),
 #    nb/expected_messages.txt and nb/report_checks.txt.
+# 5. The same for every tests/lean/gsync/*.kir.json fixture (global synchronization, kir.md
+#    change 18; written by gsync/make_fixtures.py) against gsync/expected.txt (P0-1..P0-5 and
+#    P0-7) and gsync/expected_messages.txt.
 #
 # Generated Lean files and outputs are kept in $LKV_TEST_OUT (default ${TMPDIR:-/tmp}/lkv_lean_tests_$USER).
 set -uo pipefail
@@ -224,6 +227,44 @@ for f in "$NB"/*.kir.json; do
       grep -qF -- "$line" "$OUT/nb_$n.out" || bad "nb/$n: report lacks: $line"
     fi
   done < <(grep -v '^#' "$NB/report_checks.txt")
+done
+
+# Global-synchronization fixtures (kir.md change 18; written by gsync/make_fixtures.py): the five
+# P0 verdicts, then P0-7, per input against gsync/expected.txt.
+GS="$T/gsync"
+for f in "$GS"/*.kir.json; do
+  n="$(basename "$f" .kir.json)"
+  nfix=$((nfix + 1))
+  python3 -I "$S/frontend/kir.py" "$f" || { bad "gsync/$n: invalid KIR"; continue; }
+  python3 -I "$S/frontend/emit_lean.py" "$f" -o "$OUT/gsync_$n.lean" || { bad "gsync/$n: emit_lean.py failed"; continue; }
+  "$S/scripts/run_lean_check.sh" "$OUT/gsync_$n.lean" >"$OUT/gsync_$n.out" 2>&1
+  status=$?
+  want="$(awk -v f="$n" 'BEGIN { split("1 2 3 4 5 7", l, " ") }
+    $1 == f { for (i = 3; i <= 8; i++) printf "VERDICT %s P0-%s %s\n", $2, l[i - 2], $i }' "$GS/expected.txt" | sort)"
+  got="$(grep '^VERDICT ' "$OUT/gsync_$n.out" | sort)"
+  if [[ -z "$want" ]]; then
+    bad "gsync/$n: no rows in gsync/expected.txt"
+    continue
+  fi
+  if [[ "$want" != "$got" ]]; then
+    bad "gsync/$n: verdicts differ from gsync/expected.txt (< expected, > got; output in $OUT/gsync_$n.out)"
+    diff <(echo "$want") <(echo "$got") | grep '^[<>]' | sed 's/^/    /'
+  fi
+  nverdicts=$((nverdicts + $(grep -c . <<<"$want")))
+  want_thm="$(awk -v f="$n" 'BEGIN { split("bounds tripCount coverage barrier maskElision gwait", s, " ") }
+    $1 == f { for (i = 3; i <= 8; i++) if ($i == "FAIL") printf "%s %s\n", s[i - 2], $2 }' "$GS/expected.txt" | sort)"
+  got_thm="$(sed -n 's/^ *KV\.Holds KV\.SpecId\.\([A-Za-z]*\) kernel input[0-9]*_\(.*\)$/\1 \2/p' "$OUT/gsync_$n.out" | sort)"
+  nerr="$(grep -c ': error' "$OUT/gsync_$n.out")"
+  if [[ "$want_thm" != "$got_thm" ]] || (( nerr != $(grep -c . <<<"$got_thm") )); then
+    bad "gsync/$n: refuted theorems differ from the expected FAILs, or other Lean errors ($nerr errors; see $OUT/gsync_$n.out)"
+  fi
+  if (( (status != 0) != ($(grep -c . <<<"$want_thm") > 0) )); then
+    bad "gsync/$n: lean exit status $status does not match the expected verdicts"
+  fi
+  while IFS=' ' read -r fx msg; do
+    [[ "$fx" == "$n" ]] || continue
+    grep -qF -- "$msg" "$OUT/gsync_$n.out" || bad "gsync/$n: report lacks: $msg"
+  done < <(grep -v '^#' "$GS/expected_messages.txt")
 done
 
 if (( failures )); then

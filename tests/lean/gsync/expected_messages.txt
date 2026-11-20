@@ -1,0 +1,11 @@
+# fixture, then a line its report must contain (run_all.sh, section 5).
+tagged tg.py:20: cta (1,0,0) role c: global wait never returns (hang): tag 2 on the tagged word mail[0]: no store of the launch carries it
+tagged role trace(s) are blocked forever at a take of a tagged word, so P0-1..P0-5 are not decided
+coresident cr.py:20: cta (0,0,0) role c: co-residency: 3 global wait(s) need stores of other CTAs of the launch (tag 1 on mail[1]), but the grid has 4 CTAs and only 2 can be resident at once
+coresident cr.py:20: cta (0,0,0) role c: not decided: 3 global wait(s) need stores of other CTAs of the launch (tag 1 on mail[1]), and the input gives no co-resident capacity
+barrier_cycle nb.py:20: cta (0,0,0) role b: global wait never returns (hang): tag 1 on the tagged word mail[0]: 1 store(s) of the launch carry it, none reached when no role instance can move
+claims the claim assignment is not an outcome of the fetch-adds: the 4 claims on ctr[0] read j x 1 for j = [0, 1, 2, 4]
+relay rl.py:22: cta (0,0,0) role c: relay ring: the value of slot 3 field 0, read at rl.py:21 before any write of it
+claims the representative claim order: CTA 0 reaches CTA 1 (tagged words, cluster or protocol region), but claims on ctr[0] 3 time(s) in turn 0 against turn 1
+claim_turns the representative claim order: CTA 1 reaches CTA 0 (tagged words, cluster or protocol region), but claims on ctr[0] 1 time(s) in turn 1 against turn 0
+stale st.py:23: cta (1,0,0) role w: tagged word mail[0]: the store of tag 2 carries data, not the integer this take's value is used as

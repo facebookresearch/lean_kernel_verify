@@ -1209,6 +1209,39 @@ class ProvenanceTest(unittest.TestCase):
                                   "=l,=r,l,0", 1, tied))  # fmt: skip
 
 
+class GlobalSyncInputTest(unittest.TestCase):
+    """KIR change 18 input fields of a launch: its co-resident capacity, the case's
+    metadata_contents and the intended writes of tensors a KIR does not write."""
+
+    def test_capacity_needs_one_cta_per_sm(self):
+        dump = {"num_sms": 6, "target": {"max_shared_mem": 232448}}
+        self.assertEqual(
+            to_kir._capacity(dump, {"shared_bytes": 200000}), {"capacity": {"ctas": 6}}
+        )
+        self.assertEqual(to_kir._capacity(dump, {"shared_bytes": 100000}), {})
+        self.assertEqual(to_kir._capacity(dump, {"shared_bytes": 0}), {})
+
+    def test_given_contents(self):
+        case = {"inputs": [{"name": "a", "metadata_contents": {"T": [1, 2]}}, {"name": "b"}],
+                "metadata_contents": {"T": [7]}}  # fmt: skip
+        self.assertEqual(
+            to_kir._given_contents(case, {"name": "a"}, "T", [4]), [1, 2, 0, 0]
+        )
+        self.assertEqual(to_kir._given_contents(case, {"name": "b"}, "T", [2]), [7, 0])
+        self.assertIsNone(to_kir._given_contents(case, {"name": "b"}, "U", [2]))
+        with self.assertRaisesRegex(to_kir.KirError, "has 2 elements, the tensor 1"):
+            to_kir._given_contents(case, {"name": "a"}, "T", [1])
+
+    def test_unchecked_writes_of_other_tensors_are_dropped(self):
+        case = {"inputs": [{"name": "a", "intended_writes": {"o": "unchecked", "w": "unchecked",
+                                                             "x": "all"}}]}  # fmt: skip
+        tensors = [{"name": "o", "role": "output"}, {"name": "w", "role": "input"}]
+        self.assertEqual(
+            to_kir._intended(case, {"name": "a"}, tensors),
+            {"o": "unchecked", "x": "all"},
+        )
+
+
 class EvaluateTest(unittest.TestCase):
     """kir_build.evaluate: host-side extents in the exact BitVec semantics of kir.md."""
 

@@ -6,8 +6,9 @@ P0 specs per input, on the P0-6 KIR of every variant (both families) the sixth P
 spec P0-6 "named barriers convergent" (section "P0-6" below), and on a P1 KIR the
 P1 specs it names: P1-1 "TMEM reuse ordered" (CuTe; section "P1-1" below) and P1-2
 "async store sources reuse ordered" (the PTX translation of TLX/Triton kernels;
-section "P1-2" below). This file is the reference for what each
-verdict means. The Lean definitions are the authority; each section names them.
+section "P1-2" below). On a P0 KIR with sync tensors (kir.md change 18) it also decides
+P0-7 "global waits reached, co-residency" (section "P0-7" below). This file is the
+reference for what each verdict means. The Lean definitions are the authority; each section names them.
 
 ## What a verdict covers
 
@@ -851,6 +852,60 @@ source: FAIL F1) and `assume_stop` (an `assume` that does not hold: undecided)
 (`tests/lean/p1_2/expected.txt`). The end-to-end TLX cases
 `tests/e2e/cases/store_reuse_{staging,rebuild}_tlx.json` run the same races through
 the real frontend.
+
+## P0-7 global waits reached, co-residency (`KV.Global.Holds`, kir.md change 18)
+
+Decided on a P0 KIR with sync tensors only (the PTX core's policy `gsync`, frontend_ptx.md
+"Global synchronization"), one theorem per input after P0-1..P0-5. The run is one launch of
+every CTA of the grid; every sync word starts at 0.
+
+Evaluation (lean/KV/Eval.lean). The roles of a CTA run in order, the roles that put relay
+slots first; a relay slot is written once per CTA (trusted, as the ring's handshake delivers
+it), so the order only decides that every `rget` sees the write: a read of a slot no role
+wrote is a limit of the model where its value is used. A take (`gwait`) reads the value half
+of the store of its tag, which another CTA may make: the launch is evaluated in passes
+(`evalSyncPasses`), each from the stores of the previous one (none in the first); a take
+whose store is not known stops its role, blocked, and so does a role that uses a relay slot
+its blocked putter never writes. A claim (`gclaim`) reads its turn among the CTAs that
+claimed on the word in the previous pass: the k-th claim of the j-th of n claiming CTAs (in
+linear order) reads `(k x n + j) x value`, the representative schedule in which the
+claiming CTAs claim in turn. The passes end at a fixed point (at most 256). Then
+`claimsFeasible` checks that the claims of each word read exactly `0, v, ..., (T - 1) v`
+(every claiming CTA claims until its turn runs past the work), and `claimTurnsFeasible` that
+the turns agree with the order the run imposes between CTAs, conservatively: where CTA s
+reaches CTA t (t takes a tag s stores, through any chain; the CTAs of a cluster or of an
+input's `sync_groups`, e.g. a protocol region's teams, reach each other), s claims on the word
+once, in an earlier turn; else the input is a limit of the model. Every spec of a KIR with
+claims may depend on which work a CTA claims, so `scripts/lkv.py` (`SCHEDULE_SPECS`) reports
+each PASS on it UNDECIDED (`PASS on one feasible schedule only`) and keeps a FAIL, which that
+schedule witnesses. Trusted: a tagged word's store of a tag is the one store of that tag, read by
+every take of the tag (two stores of one tag with different values are a limit); a take
+of tag 0 reads the start value.
+
+Statement (lean/KV/Spec/Global.lean). Optimistic progress: every role instance (CTA, role)
+runs as far as its waits allow when every store and arrival takes effect when its event is
+reached (an mbarrier wait passes once the arrivals reached on its slot cover its phase,
+the cluster ledger's `assumedPhase`; a named barrier's j-th sync once `j x count`
+arrivals are reached; a take once a store of its tag is), to the fixed point where no
+instance can move. P0-7 holds iff no take is
+blocked when no instance can move, and a take that needs a store of another CTA (outside
+its cluster) runs in a grid that fits the input's `capacity` (`ctas`, and `clusters` for a
+cluster launch): CUDA guarantees no dispatch order, so waiting CTAs could hold every slot
+while a CTA they wait for is never scheduled.
+FAIL: a take blocked forever (`global wait never returns (hang)`: no store of the launch
+carries its tag, or the stores that do are never reached), a cross-CTA take in a grid over
+the capacity. A run in which some roles are blocked and every stopped role is (`Run.hangs`)
+leaves P0-1..P0-5 undecided (`role trace(s) are blocked forever at a take of a tagged
+word`). UNDECIDED: a take not reached because an mbarrier or named-barrier wait blocks first
+(P0-2), a cross-CTA take without a `capacity`, and every verdict on a run whose cluster barrier
+ledger does not converge (the mbarrier waits' progress rests on it). Not checked: timeouts (a trap-on-timeout
+path is taken to be never taken), fairness between resident CTAs, writers outside the launch.
+
+Protocol outcomes (frontend_ptx.md, "Protocol regions"): an input `<input>@proto:<tensor>:<v>`
+is the launch on one reachable outcome vector v of the protocol's teams; the frontend explores
+every interleaving of the teams' accesses of the protocol word, so the inputs over all vectors
+cover every execution of the launch (a verdict of the launch is the worst over its inputs), and
+a FAIL on one of them is a certain violation for the executions with that outcome.
 
 ## Undecided specs: out-of-bounds metadata loads
 

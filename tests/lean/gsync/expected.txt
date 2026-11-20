@@ -1,0 +1,37 @@
+# Global-synchronization fixtures (kir.md change 18; written by make_fixtures.py): fixture,
+# input, then the verdicts of P0-1 P0-2 P0-3 P0-4 P0-5 P0-7 (run_all.sh, section 5). A FAIL
+# without a certain counterexample is undecided (an UNDECIDED line beside it).
+#
+# Tagged words: a take of the stored tag binds the value half (paired), a take of tag 0 returns
+# at once (tag0), a take of a tag no CTA stores hangs: P0-7 FAILs, P0-1..P0-5 are undecided
+# (unstored_tag).
+tagged                    paired           PASS PASS PASS PASS PASS PASS
+tagged                    tag0             PASS PASS PASS PASS PASS PASS
+tagged                    unstored_tag     FAIL FAIL FAIL FAIL FAIL FAIL
+# Co-residency: takes of other CTAs' stores on a grid that fits (capacity4), that does not
+# (capacity2: FAIL), without a capacity (undecided).
+coresident                capacity4        PASS PASS PASS PASS PASS PASS
+coresident                capacity2        PASS PASS PASS PASS PASS FAIL
+coresident                no_capacity      PASS PASS PASS PASS PASS FAIL
+# A named barrier keeps the store from the take (cycle: a hang, P0-7 FAILs); in the other
+# order (ordered) every take returns.
+barrier_cycle             cycle            PASS PASS PASS PASS PASS FAIL
+barrier_cycle             ordered          PASS PASS PASS PASS PASS PASS
+# Claims: two CTAs claim in turn until the cursor runs past the work (n4); a CTA that stops
+# after one claim skips values of the fetch-adds' chain: a limit of the model (stop_early); the
+# CTAs synchronize outside the model, so their turns need not alternate: a limit (grouped).
+claims                    n4               PASS PASS PASS PASS PASS PASS
+claims                    stop_early       FAIL FAIL FAIL FAIL FAIL FAIL
+claims                    grouped          FAIL FAIL FAIL FAIL FAIL FAIL
+# Claim turns: a take orders CTA 1's claim before CTA 0's, against the turns: a limit
+# (contradicted); the take orders them as the turns do (agreed).
+claim_turns               contradicted     FAIL FAIL FAIL FAIL FAIL FAIL
+claim_turns               agreed           PASS PASS PASS PASS PASS PASS
+# Relay slots: every slot read is written (written); slot 3 is never written and its value is
+# used: a limit of the model (unwritten).
+relay                     written          PASS PASS PASS PASS PASS PASS
+relay                     unwritten        FAIL FAIL FAIL FAIL FAIL FAIL
+# A chain of 200 takes between two CTAs: every take returns.
+pingpong                  long             PASS PASS PASS PASS PASS PASS
+# A take of a store that carries data unbinds its variable: its use is a limit of the model.
+stale                     data             FAIL FAIL FAIL FAIL FAIL FAIL

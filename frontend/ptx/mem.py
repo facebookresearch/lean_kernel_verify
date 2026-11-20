@@ -301,6 +301,13 @@ class Memory:
             bar = mn in ("bar.sync", "bar.arrive") or mn.startswith("bar.red.")
             if bar or mn.endswith(".aligned"):  # bar.*: barrier.*.aligned (ISA)
                 tr.aligned(mn)
+            st = tr.k.gsync
+            if st is not None and st.sync:  # gsev.py: named_bar events in P0
+                from . import gsev, tmem
+
+                if tr.k.p1 is None and not mn.startswith("bar.warp"):
+                    tmem._named_bar(tr, i, mn)
+                    gsev.mark_bar(tr)
             return  # no P0 event, as both legacy frontends (named_bar: P1, tmem.py)
         if mn == "call":
             return self._call(tr, i)
@@ -477,6 +484,15 @@ class Memory:
         self.tensors[name]["uses"].add(kind)
         tr.mem_event(kind, name, off, n)
 
+    def _gsync(self, tr: Translator, name: str, i=None) -> bool:
+        """Policy gsync: `name` is a sync tensor (its accesses are sync events), or i is a
+        census fetch-add site on it (gsev.State.need restarts the translation)."""
+        st = tr.k.gsync
+        if st is None:
+            return False
+        site = st.by_line.get(i.line) if i is not None else None
+        return name in st.sync or (site is not None and site["kind"] == "fetch")
+
     def _load(self, tr: Translator, i, mn: str) -> None:
         dst = i.operands[0]
         regs = list(dst[1]) if dst[0] == "vec" else [dst]
@@ -487,6 +503,8 @@ class Memory:
                 if r[0] == "reg":
                     tr.env[r[1]] = Data(f"{i.opcode} at {tr.loc(i)}")
             return
+        if any(self._gsync(tr, g[0]) for _c, g in arms):
+            tr.fail(i, f"a read of the sync tensor {arms[0][1][0]} outside a spin wait")
         vals = [self._under(tr, c, lambda g=g: self._load_values(tr, i, regs, bits, g, len(arms) == 1))
                 for c, g in arms]  # fmt: skip
         for k, r in enumerate(regs):
@@ -555,6 +573,16 @@ class Memory:
         if arms[0][1] is None:  # a generic store to shared memory: data
             self._shared_write(tr, i, i.operands[0], nbytes)
             return
+        if any(self._gsync(tr, g[0], i) for _c, g in arms):
+            if len(arms) > 1:
+                tr.fail(
+                    i,
+                    "a store to a sync word through a select of two tensors' addresses",
+                )
+            from . import gsev  # a store to a sync word (gsev.py)
+
+            gsev.store(tr, i, *arms[0][1][:2])
+            return
         for c, g in arms:
             self._under(tr, c, lambda g=g: self._event(tr, "gstore", *g))
 
@@ -581,6 +609,17 @@ class Memory:
         arms = (
             [(None, None)] if ".shared" in mn else self._global_arms(tr, i, op, nbytes)
         )
+        g0 = arms[0][1]
+        if g0 is not None and any(g and self._gsync(tr, g[0], i) for _c, g in arms):
+            if len(arms) > 1:
+                tr.fail(
+                    i,
+                    "an atomic on a sync word through a select of two tensors' addresses",
+                )
+            from . import gsev  # a claim (gsev.py)
+
+            gsev.atomic(tr, i, mn, g0[0], g0[1], ret)
+            return
         if arms[0][1] is None:
             self._shared_write(tr, i, op, nbytes)
         else:

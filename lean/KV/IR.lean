@@ -182,6 +182,28 @@ inductive Event where
   on slot s, where s is the slot of this role's last `wait` and that wait its k-th on s (KIR
   change 17). -/
   | handoff_get (chan : String) (var : String) (loc : Loc)
+  /-- A store of `value` (the word's width) to element `index` of sync tensor `tensor` (KIR
+  change 18). On a 64-bit word it carries a tag, its high half; `data`: its low half is data,
+  not the integer `value`'s (a take of the tag binds nothing). -/
+  | gsig (tensor : String) (index : Expr) (value : Expr) (data : Bool) (loc : Loc)
+  /-- A take (KIR change 18): a blocking spin until the 64-bit sync word at `index` carries tag
+  `tag` (w=32, its high half); `var` (with its width) binds the low half of the word's store of
+  that tag (Eval.lean `Host.puts`: a take whose store is not known stops its role, blocked). -/
+  | gwait (tensor : String) (index : Expr) (tag : Expr) (var : Option (String × Nat)) (loc : Loc)
+  /-- A claim (KIR change 18): a fetch-add of `value` on a work cursor whose old value the role
+  uses as a work index, bound to `var` of width `w`. The CTAs that claim on the word claim in
+  turn, in linear order: the k-th claim of the j-th of n claiming CTAs reads `(k x n + j) x
+  value` (Eval.lean `claimsFeasible` checks that the values form the chain a fetch-add hands
+  out). -/
+  | gclaim (tensor : String) (index value : Expr) (var : String) (w : Nat) (loc : Loc)
+  /-- A shared-memory relay (KIR change 18): the role stores `value` into field `field` of slot
+  `ord` of channel `chan` (a ring of slots in one shared array; each slot of a CTA is written
+  once). -/
+  | rput (chan : String) (ord : Expr) (field : Nat) (value : Expr) (loc : Loc)
+  /-- The role reads field `field` of slot `ord` of channel `chan`, which an earlier role of the
+  CTA (or this role, earlier) wrote, into variable `var` of width `w` (trusted: the ring's
+  handshake delivers slot `ord`'s write to this read). -/
+  | rget (chan : String) (ord : Expr) (field : Nat) (var : String) (w : Nat) (loc : Loc)
   deriving Repr, Inhabited
 
 inductive Stmt where
@@ -223,6 +245,9 @@ structure Tensor where
   metadata : Bool
   /-- TMA box extents (`desc` only; `[]` for `global`). -/
   box : List Nat
+  /-- A sync tensor's word width in bits (32 or 64; KIR change 18): every element is a sync
+  word, accessed only by sync events. `none`: a data tensor. -/
+  sync : Option Nat := none
   deriving Repr, Inhabited
 
 structure Barrier where
@@ -300,6 +325,12 @@ structure Input where
   intended_writes : List (String × Intended)
   /-- The case's `elision_flags`: host-selected flags that select a mask-elided fast path. -/
   elision_flags : List String
+  /-- Co-resident CTAs of the launch and, for a cluster launch, co-resident clusters (KIR
+  change 18, the occupancy model of the dump); `none`: unknown. -/
+  capacity : Option (Nat × Option Nat) := none
+  /-- Groups of CTAs (linear indices) that synchronize outside the model, e.g. through a
+  protocol region (KIR change 18): each reaches the others (`claimTurnsFeasible`). -/
+  syncGroups : List (List Nat) := []
   deriving Repr
 
 /-- The elision flags this input sets, e.g. `["FULL_TILES"]`: if any, the compiled variant

@@ -85,6 +85,10 @@ def kir_errors(facts) -> list:
                 "shape": [{"e": "const", "w": 64, "v": 4096}], "strides": [{"e": "const", "w": 64, "v": 1}],
                 "segments": None, "role": "output" if n in facts.written else "input",
                 "metadata": t["metadata"]} for n, t in facts.tensors.items()]  # fmt: skip
+    for t in tensors:  # policy gsync: sync tensors (kir.md change 18)
+        if t["name"] in facts.sync:
+            t.update(role="workspace", metadata=False, sync={"width": facts.sync[t["name"]]},
+                     elem_bytes=facts.sync[t["name"]] // 8)  # fmt: skip
     metadata = {n: [0] * 4096 for n, t in facts.tensors.items() if t["metadata"]}
     if facts.clc:  # what frontend/ttgir/to_kir.py declares for CLC (sync.py)
         c = lambda v, w=64: {"e": "const", "w": w, "v": v}  # noqa: E731
@@ -100,13 +104,15 @@ def kir_errors(facts) -> list:
            **({"tmem": facts.tmem} if facts.tmem else {}),  # a P1 pass's (tmem.py)
            **({"p1": facts.p1, "cta_threads": facts.cta_threads} if facts.p1 else {}),  # P1-2's
            **({"cluster": list(facts.cluster)} if facts.cluster != (1, 1, 1) else {}),
+           **({"representative": list(facts.representative)} if facts.representative else {}),
            "grid": [{"e": "const", "w": 32, "v": 1}] * 3,
            "params": [{"name": n, "type": f"i{w}"} for n, w in facts.params.items()],
            "tensors": tensors, "barriers": facts.barriers,
            "roles": [{k: r[k] for k in ("name", "warps", "threads_per_issue", "body")} for r in facts.roles],
            "case": {"name": "t", "inputs": [{"name": "i", "params": dict.fromkeys(facts.params, 1),
                                               "metadata": metadata,
-                                              "intended_writes": dict.fromkeys(facts.written, "unchecked")}]}}  # fmt: skip
+                                              "intended_writes": dict.fromkeys(
+                                                  (n for n in facts.written if n not in facts.sync), "unchecked")}]}}  # fmt: skip
     return kir.validate(obj)
 
 

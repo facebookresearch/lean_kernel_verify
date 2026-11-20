@@ -71,7 +71,8 @@ from typing import NoReturn, TYPE_CHECKING
 
 from . import cfg as C, expr as E, ops, parse, regions as R
 
-if TYPE_CHECKING:  # mem.py and tmem.py import this module
+if TYPE_CHECKING:  # mem.py, tmem.py and gsev.py import this module
+    from .gsev import State as GState
     from .mem import Memory
     from .tmem import P1
 
@@ -192,6 +193,12 @@ class Kernel:
     handoff_cands: dict = field(default_factory=dict)
     handoff_loads: dict = field(default_factory=dict)
     handoffs: dict | None = None
+    gsync: "GState | None" = (
+        None  # policy gsync: global synchronization events (gsev.py)
+    )
+    # policy protocols: proto.Region by index, and what the roles' translations recorded
+    protocols: dict = field(default_factory=dict)
+    protocol_records: dict = field(default_factory=dict)
 
 
 # An mbarrier event awaiting its array (mem.Memory.barriers): the KIR event (bar and idx
@@ -718,6 +725,11 @@ class Translator:
             elif isinstance(node, R.Wait):
                 self.cur = node.instr
                 self.k.mem.wait(self, node.instr)
+            elif isinstance(node, R.GSpin):
+                from . import gsev  # gsev.py imports this module
+
+                self.flush()
+                gsev.spin(self, node)
             elif node in (R.CONTINUE, R.BREAK):
                 self.flush()
                 self.end_iteration(node == R.BREAK)
@@ -1932,12 +1944,22 @@ class Translator:
     # ---------------------------------------------------------- instructions
     def execute(self, i, cls: str) -> None:
         mn = ops.mnemonic(i.opcode)
+        if mn == "lkv.outcome":  # a protocol region's outcome (proto.py)
+            from . import proto  # proto.py imports this module lazily
+
+            proto.outcome(self, i)
+            return
         if self.k.p1 is not None:  # P1 pass: TMEM, named-barrier, P1-2 events (tmem.py)
             self.k.p1.execute(self, i, mn)
         if C._is_fork(i):  # (cfg.py)
             self.forks += 1
         if cls == "event" and self._tracked():
             self._capture_writes(i, mn)
+        if self.k.gsync is not None:  # global synchronization (gsev.py)
+            from . import gsev
+
+            if gsev.hook(self, i, mn, cls):
+                return
         if cls == "drop":
             if mn == "ld.shared" and i.opcode.endswith(".b128"):  # a CLC response
                 self.k.mem.execute(self, i, mn)  # (sync.py)

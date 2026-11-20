@@ -360,6 +360,20 @@ class Unit(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "UNDECIDED, but proved"):
             lkv_py.parse_lean(LEAN_OUT + "UNDECIDED a P0-1\n", ONE_INPUT, 1)
 
+    def test_representative_schedule_pass_is_undecided(self):
+        # kir.md change 18: on the representative claim schedule every PASS is undecided (a
+        # spec may depend on which work a CTA claims); a FAIL stays, noted.
+        k = {**ONE_INPUT, "representative": ["claims"]}
+        (inp,) = lkv_py.parse_lean(LEAN_OUT, k, 1)
+        outcomes = {label: s["outcome"] for label, s in inp["specs"].items()}
+        self.assertEqual(outcomes, {"P0-1": "UNDECIDED", "P0-2": "UNDECIDED", "P0-3": "FAIL",
+                                    "P0-4": "UNDECIDED", "P0-5": "UNDECIDED"})  # fmt: skip
+        self.assertIn("PASS on one feasible schedule only",
+                      inp["specs"]["P0-1"]["counterexamples"][-1]["msg"])  # fmt: skip
+        self.assertIn(
+            "witnessed by a feasible schedule", inp["specs"]["P0-3"]["notes"][-1]["msg"]
+        )
+
     def report(self, text, status, **extra):
         """A report of two variants that both printed `text`."""
         inputs = lkv_py.parse_lean(text, ONE_INPUT, status)

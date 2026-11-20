@@ -150,6 +150,7 @@ SPECS = {
     "namedBarriers": "P0-6",
     "tmemReuse": "P1-1",
     "storeReuse": "P1-2",
+    "gwait": "P0-7",
 }
 EXPORT_MARK = "LKV_EXPORT.json"
 TITLES = {
@@ -161,6 +162,7 @@ TITLES = {
     "P0-6": "named barriers convergent",
     "P1-1": "TMEM reuse ordered",
     "P1-2": "async store sources reuse ordered",
+    "P0-7": "global waits reached, co-residency",
 }
 LABELS = ["P0-1", "P0-2", "P0-3", "P0-4", "P0-5"]
 # P1 specs: decided on the P1 KIR (`<kernel>__<digest>.p1.json`, `<spec>.p1.json`) and
@@ -169,15 +171,38 @@ LABELS = ["P0-1", "P0-2", "P0-3", "P0-4", "P0-5"]
 LABELS_P1 = ["P1-1", "P1-2"]
 # P0-6: decided on the P0-6 KIR (`.nb.json`) of every variant, reported with the P0 specs.
 LABELS_NB = ["P0-6"]
+# P0-7: decided on a P0 KIR with sync tensors (kir.md change 18), reported with the P0 specs
+# (their columns appear once a checked KIR has sync tensors: labels_p0).
+LABELS_GLOBAL = ["P0-7"]
+GLOBAL_ON: list = []
+# kir.md change 18: a KIR whose top-level `representative` names "claims" (the claiming CTAs
+# claim in turn) was evaluated on one feasible schedule: every spec may depend on which work
+# a CTA claims, so a PASS is UNDECIDED (a FAIL is witnessed by that schedule and stays a FAIL;
+# Eval.lean `claimTurnsFeasible` refuses a schedule the run's cross-CTA order may contradict).
+SCHEDULE_SPECS = {"claims": tuple(LABELS + LABELS_NB + LABELS_GLOBAL + LABELS_P1)}
+SCHEDULE_WHY = {"claims": "the claiming CTAs claim in turn"}
+
+
+def labels_p0(nb=False):
+    """The P0 columns: P0-1..P0-5, with `nb` P0-6, and P0-7 when a checked KIR has sync
+    tensors."""
+    return LABELS + (LABELS_NB if nb else []) + (LABELS_GLOBAL if GLOBAL_ON else [])
+
+
+def has_sync(k):
+    """The KIR has sync tensors (kir.md change 18): P0-7 applies."""
+    return any(t.get("sync") for t in k.get("tensors", []))
 
 
 def kir_labels(k):
     """The specs a KIR is decided for: its top-level "p1" (kir.md change 15), else P1-1
     for a P1 KIR with a "tmem" (change 10), P0-6 for a P0-6 KIR (change 14), else the P0
-    specs."""
+    specs, and P0-7 for one with sync tensors (change 18)."""
     if "p1" in k:
         return k["p1"]
-    return ["P1-1"] if "tmem" in k else LABELS_NB if "nbar" in k else LABELS
+    if "tmem" in k:
+        return ["P1-1"]
+    return LABELS_NB if "nbar" in k else LABELS + (LABELS_GLOBAL if has_sync(k) else [])
 
 
 # Outcomes of a verdict and of a run (module doc), and the run's exit status.
@@ -737,7 +762,27 @@ def parse_lean(text, k, status):
                     f"input {n} {label}: NOTES gives {s['note_count']} notes, the "
                     f"report lists {len(s['notes']) + s['notes_more']}"
                 )
+            _representative(k, label, s)
     return [inputs[n] for n in names]
+
+
+def _representative(k, label, s):
+    """SCHEDULE_SPECS: a PASS of a schedule-dependent spec on a representative schedule is
+    UNDECIDED; a FAIL stays, noted as witnessed by that schedule."""
+    rep = [
+        r for r in k.get("representative") or () if label in SCHEDULE_SPECS.get(r, ())
+    ]
+    if not rep:
+        return
+    sched = "; ".join(SCHEDULE_WHY[r] for r in rep)
+    if s["outcome"] == "PASS":
+        s["outcome"] = "UNDECIDED"
+        s["counterexamples"].append({"loc": "", "context": "representative schedule",
+                                     "msg": f"not decided: PASS on one feasible schedule only ({sched})"})  # fmt: skip
+    elif s["outcome"] == "FAIL":
+        s["notes"].append({"loc": "", "context": "representative schedule",
+                           "msg": f"the FAIL is witnessed by a feasible schedule ({sched})"})  # fmt: skip
+        s["note_count"] += 1
 
 
 def variant_name(path):
@@ -753,6 +798,11 @@ def check_kir(path, lean_dir, sources, timeout):
         flags=k.get("case", {}).get("inputs", [{}])[0].get("flags", {}),
         p1="tmem" in k or "p1" in k,
         nb="nbar" in k,
+        **(
+            {"global": True}
+            if has_sync(k) and not ("tmem" in k or "p1" in k or "nbar" in k)
+            else {}
+        ),
         input_names=[i.get("name") for i in k.get("case", {}).get("inputs", [])],
     )
     if entry["p1"]:
@@ -885,7 +935,7 @@ def unchecked(report, p1=False):
             "inputs": v.get("input_names", []),
             "why": f"{v['status']}: {v.get('error', '')}",
             "outcome": "ERROR",
-            "labels": (v.get("p1_specs") or ["P1-1"]) if p1 else LABELS,
+            "labels": (v.get("p1_specs") or ["P1-1"]) if p1 else labels_p0(),
         }
         for v in (report.get("variants_p1", []) if p1 else report["variants"])
         if v["status"] != "checked"
@@ -909,7 +959,7 @@ def unchecked(report, p1=False):
                 "inputs": x.get("inputs", []),
                 "why": f"{'P1 translation' if p1 else 'frontend'} {what}: {x['error']}",
                 "outcome": "ERROR" if err else "UNDECIDED",
-                "labels": x.get("specs", ["P1-1"]) if p1 else LABELS,
+                "labels": x.get("specs", ["P1-1"]) if p1 else labels_p0(),
             }
         )
     return out
@@ -919,7 +969,7 @@ def totals(variants, labels=None, no_verdicts=()):
     """Per spec, over (variant, input) runs: the outcomes (every spec of each input of a
     variant in `no_verdicts` has the variant's outcome), the INCONSISTENT verdicts among the
     ERROR ones, and the runs with notes."""
-    labels = labels or LABELS
+    labels = labels or labels_p0()
     t = {
         label: {**dict.fromkeys(OUTCOMES, 0), "INCONSISTENT": 0, "with_notes": 0}
         for label in labels
@@ -1133,7 +1183,7 @@ def md_summary(report):
 
 
 def md_per_input(variants, no_verdicts=(), labels=None):
-    labels = labels or LABELS
+    labels = labels or labels_p0()
     cells = defaultdict(lambda: defaultdict(list))  # (kernel, input) -> spec -> [s]
     for v, inp in runs_of(variants):
         for label, s in inp["specs"].items():
@@ -1201,7 +1251,7 @@ def md_findings(variants, kind, title, intro, labels=None, keep=None, level="###
     if not groups:
         return []
     out = [title, "", *intro, ""]
-    labels = labels or LABELS
+    labels = labels or labels_p0()
     for label in labels:
         mine = [(where, g) for (lb, where), g in groups.items() if lb == label]
         if mine and len(labels) > 1:
@@ -1610,10 +1660,10 @@ def markdown(report):
     for section in (
         md_env,
         md_summary,
-        lambda r: md_per_input(p0_variants(r), p0_unchecked(r), LABELS + LABELS_NB),
-        lambda r: md_fail(p0_variants(r), LABELS + LABELS_NB),
-        lambda r: md_errors(p0_variants(r), p0_unchecked(r), LABELS + LABELS_NB),
-        lambda r: md_gaps(p0_variants(r), p0_unchecked(r), LABELS + LABELS_NB),
+        lambda r: md_per_input(p0_variants(r), p0_unchecked(r), labels_p0(nb=True)),
+        lambda r: md_fail(p0_variants(r), labels_p0(nb=True)),
+        lambda r: md_errors(p0_variants(r), p0_unchecked(r), labels_p0(nb=True)),
+        lambda r: md_gaps(p0_variants(r), p0_unchecked(r), labels_p0(nb=True)),
         md_notes,
         md_variants,
         md_nb_sites,
@@ -1625,6 +1675,7 @@ def markdown(report):
 
 
 def write_report(report, out):
+    GLOBAL_ON[:] = [True] if any(v.get("global") for v in report["variants"]) else []
     report["variants_p1"] = [v for v in report["variants"] if v.get("p1")]
     report["variants_nb"] = [v for v in report["variants"] if v.get("nb")]
     report["variants"] = [
@@ -1636,7 +1687,7 @@ def write_report(report, out):
         report["loc_quality"] = dict(LOC_QUALITY)
     report["totals"] = totals(
         report["variants"] + report["variants_nb"],
-        LABELS + LABELS_NB,
+        labels_p0(nb=True),
         unchecked(report) + unchecked_nb(report),
     )
     report["totals_p1"] = totals(
@@ -1652,7 +1703,7 @@ def write_report(report, out):
             f"{label} {t[label]['PASS']} PASS / {t[label]['FAIL']} FAIL / "
             f"{t[label]['ERROR']} ERROR / {t[label]['UNDECIDED']} UNDECIDED "
             f"({t[label]['with_notes']} with notes)"
-            for label in LABELS + LABELS_NB
+            for label in labels_p0(nb=True)
         )
     )
     for label in LABELS_P1:

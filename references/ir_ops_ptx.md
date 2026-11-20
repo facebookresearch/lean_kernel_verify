@@ -190,6 +190,7 @@ load's cycle, whose transaction bytes P0-4 checks).
 | `tensormap.replace.*.shared`, `tensormap.cp_fenceproxy` | an in-kernel descriptor (`frontend_ptx.md`, "TMA descriptors") |
 | `tensormap.replace.*.global` | refused (a descriptor edited in global memory: its other fields are not known) |
 | `prefetch.tensormap`, commit/wait groups | drop (P1-2: `bulk_commit`, `bulk_wait`, below) |
+| `cp.async.bulk.prefetch.tensor.<d>d.L2.global` | drop (a tile prefetched into L2: no effect on any spec) |
 
 Descriptors, coordinates and footprints: `frontend_ptx.md`, "TMA descriptors". PTX lists
 coordinates innermost first. A footprint is exactly the elements the copy moves: element
@@ -369,11 +370,15 @@ descriptors"),
 handoff channel, `frontend_ptx.md`, "Handoffs"), `mma.sync` (register MMA), `createpolicy` (an L2 policy only
 `.L2::cache_hint` operands take), `fence.*`, `membar`, `tcgen05.fence`,
 `griddepcontrol`, `setmaxnreg` (no consistency check across a warpgroup: real kernels
-run it at different points per warp), `prefetch`, `nanosleep` (a scheduling hint), `bar.warp.sync`, the commit/wait
+run it at different points per warp), `prefetch`, `cp.async.bulk.prefetch.tensor.*`, `nanosleep` (a scheduling hint), `bar.warp.sync`, the commit/wait
 groups of `cp.async` and `cp.async.bulk`, `st.param` and `st.param::func` (call
 staging), `trap` (the run is evaluated as if it were not reached: an unguarded trap ends
 its block, which goes on at the other side of the conditional branch that reached it,
 `frontend_ptx.md`, "Control flow"), `call vprintf` and calls of libdevice (`__nv_*`).
+
+`lkv.outcome` is synthetic, not PTX: the outcome of a protocol region the frontend cut out
+of the kernel (policy protocols, `frontend_ptx.md`, "Protocol regions"), a read of its
+outcome table `__proto<k>`.
 
 Refuse (a gap naming the instruction): `try_wait`/`test_wait` outside a wait loop, relaxed
 arrives, `mbarrier.inval` outside a private synchronous cycle,

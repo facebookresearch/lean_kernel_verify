@@ -24,4 +24,5 @@ ENV_OUT="$("$S/scripts/build_lean.sh")"
 get() { sed -n "s/^$1=//p" <<<"$ENV_OUT"; }
 LEAN="$(get LEAN)"
 DYNLIB="$(get KV_DYNLIB)"
-LEAN_PATH="$(get LEAN_PATH)" exec "$LEAN" --load-dynlib="$DYNLIB" "$@"
+# -DmaxErrors=0: every refuted theorem is reported (Lean stops after 100 errors by default)
+LEAN_PATH="$(get LEAN_PATH)" exec "$LEAN" -DmaxErrors=0 --load-dynlib="$DYNLIB" "$@"

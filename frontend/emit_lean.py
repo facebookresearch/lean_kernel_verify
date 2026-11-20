@@ -46,6 +46,7 @@ SPECS = (
 SPECS_P1 = (("tmemReuse", "P1_1"), ("storeReuse", "P1_2"))
 P1_LABELS = {"P1_1": "P1-1", "P1_2": "P1-2"}
 SPECS_NB = (("namedBarriers", "P0_6"),)
+SPECS_GLOBAL = (("gwait", "P0_7"),)  # a KIR with sync tensors (KIR change 18)
 KEYWORD_CTORS = {"let", "for", "while", "if"}
 
 
@@ -255,6 +256,24 @@ def event(s):
         return ctor(ev, lstr(s["chan"]), expr(s["value"]), loc)
     if ev == "handoff_get":
         return ctor(ev, lstr(s["chan"]), lstr(s["var"]), loc)
+    if ev == "gsig":
+        return ctor(ev, lstr(s["tensor"]), expr(s["index"]), expr(s["value"]),
+                    lbool(s.get("data_lo", False)), loc)  # fmt: skip
+    if ev == "gwait":
+        var = f"(some ({lstr(s['var'])}, {s['w']}))" if "var" in s else "none"
+        return ctor(
+            ev, lstr(s["tensor"]), expr(s["index"]), expr(s["target"]), var, loc
+        )
+    if ev == "gclaim":
+        return ctor(ev, lstr(s["tensor"]), expr(s["index"]), expr(s["value"]),
+                    lstr(s["var"]), str(s["w"]), loc)  # fmt: skip
+    if ev == "rput":
+        return ctor(
+            ev, lstr(s["chan"]), expr(s["ord"]), str(s["field"]), expr(s["value"]), loc
+        )
+    if ev == "rget":
+        return ctor(ev, lstr(s["chan"]), expr(s["ord"]), str(s["field"]), lstr(s["var"]),
+                    str(s["w"]), loc)  # fmt: skip
     raise AssertionError(ev)
 
 
@@ -343,7 +362,9 @@ def tensor(t):
         f"      shape := {llist(map(expr, t['shape']))},\n"
         f"      strides := {llist(map(expr, t['strides']))},\n"
         f"      segments := {seg_l}, role := .{t['role']}, metadata := {lbool(t['metadata'])},\n"
-        f"      box := {llist(map(str, t.get('box', [])))} }}"
+        f"      box := {llist(map(str, t.get('box', [])))}"
+        + (f", sync := some {t['sync']['width']}" if "sync" in t else "")
+        + " }"
     )
 
 
@@ -449,8 +470,17 @@ def emit(k, src_name):
             ),
             f"  intended_writes := {iw}",
             f"  elision_flags := {elision}",
-            "",
         ]
+        if "capacity" in inp:  # KIR change 18
+            c = inp["capacity"]
+            cl = f"some {c['clusters']}" if "clusters" in c else "none"
+            out.append(f"  capacity := some ({c['ctas']}, {cl})")
+        if inp.get("sync_groups"):  # KIR change 18
+            out.append(
+                "  syncGroups := "
+                + llist(llist(map(str, g)) for g in inp["sync_groups"])
+            )
+        out.append("")
     nb = "nbar" in k
     run = "KV.runP1" if p1 else "KV.runNb" if nb else "KV.runCase"
     out += [f"#eval {run} kernel {name}" for name in inputs]
@@ -462,6 +492,7 @@ def emit(k, src_name):
             else SPECS_NB
             if nb
             else SPECS
+            + (SPECS_GLOBAL if any("sync" in t for t in k["tensors"]) else ())
         )
         for spec, label in specs:
             out.append(

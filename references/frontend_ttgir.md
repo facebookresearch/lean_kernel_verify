@@ -120,6 +120,25 @@ the patches below do not answer, an error of Triton or of the frontend.
   specialization sets one of them the P0-1 and P0-3 checks are P0-5's (`kir.md`,
   `specs.md`).
 
+### Global synchronization
+
+Opt-in case keys for kernels that synchronize CTAs through global memory (the PTX
+translation only; `frontend_ptx.md`, "Global synchronization"; kir.md change 18, P0-7):
+
+* `gsync: true` turns spin waits on tagged words, stores to sync words and (with `claims:
+  "representative"`) work-cursor claims into sync events; `sync_tensors` adds sync tensors
+  the census does not find; `relay_channels: [{"symbol", "start", "slots", "stride",
+  "name"?}]` declares shared-memory claim rings.
+* `protocols: [{"tensor", "start"?}]` names the words of small atomic team protocols (proto.py):
+  each input becomes one input per reachable outcome of the teams
+  (`<input>@proto:<tensor>:<vector>`).
+* `metadata_contents: {tensor: [int]}` (case or input) gives the contents of a metadata
+  tensor that an earlier launch of the run writes (the dump's CPU run skips that launch, so
+  its recorded contents are stale; trusted).
+* A launch with sync tensors whose shared memory fits one CTA per SM gets
+  the input `capacity` `{"ctas": num_sms}`; otherwise none (P0-7 leaves a cross-CTA take
+  undecided).
+
 ## Environment
 
 Variant selection (e.g. a kernel's load-balancing or autotune-set switch) and

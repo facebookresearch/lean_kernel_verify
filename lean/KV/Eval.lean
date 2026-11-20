@@ -174,6 +174,12 @@ structure BarrierInfo where
   num : Nat
   deriving Inhabited
 
+/-- A sync word: element offset `e` of sync tensor number `t` (KIR change 18). -/
+structure Word where
+  t : Nat
+  e : Int
+  deriving BEq, Hashable, Inhabited, Repr
+
 structure Host where
   kernel : Kernel
   input : Input
@@ -185,6 +191,18 @@ structure Host where
   tensorIdx : Std.HashMap String Nat
   barriers : Array BarrierInfo
   barIdx : Std.HashMap String Nat
+  /-- KIR change 18: the tagged words' stores of the previous pass (`evalSyncPasses`): (word,
+  tag) -> the value half (`none`: data). -/
+  puts : Std.HashMap (Word × Int) (Option Int) := {}
+  /-- KIR change 18: per claimed word, the CTAs that claimed on it in the previous pass (linear
+  index -> claimer index) and their count. -/
+  claimOrder : Std.HashMap Word (Std.HashMap Nat Nat × Nat) := {}
+
+/-- The kernel has sync tensors (global synchronization events, KIR change 18). -/
+def Host.hasSync (h : Host) : Bool := h.tensors.any (·.decl.sync.isSome)
+
+/-- Bit width of sync tensor `t`'s words (32 if it is not one). -/
+def Host.syncWidth (h : Host) (t : Nat) : Nat := ((h.tensors[t]?.bind (·.decl.sync)).getD 32)
 
 /-! ## Traces -/
 
@@ -271,6 +289,14 @@ inductive Ev where
   /-- A `handoff_get` of channel `chan`: the value the putter recorded at its `k`-th arrive on
   slot `s`, the getter's last wait being its `k`-th on `s` (counting from 0). -/
   | handoff (chan : String) (s : Slot) (k : Nat)
+  /-- A sync event on element `index` of sync tensor `t`, outside the tensor (a P0-1
+  violation); the role stops here. -/
+  | syncOob (t : Nat) (index : Int)
+  /-- KIR change 18: a store of `v` to sync word `w` (on a 64-bit word its high half is a tag),
+  a take of tag `tag` of `w`, a claim adding `add` to `w`. -/
+  | gsig (w : Word) (v : Int)
+  | gwait (w : Word) (tag : Int)
+  | gclaim (w : Word) (add : Int)
 
 structure TEvent where
   ev : Ev
@@ -284,12 +310,16 @@ false on the input (KIR change 16; no event), with the assumption and its loc. -
 inductive StopWhy where
   | metaOob
   | assume (msg : String) (loc : Loc)
+  /-- A take of a tagged word at `loc` whose tag no store of the previous pass carries (KIR
+  change 18): blocked there, forever unless a later pass knows the store (`Run.hangs`). -/
+  | blocked (loc : Loc)
   deriving Inhabited, BEq
 
 /-- The reason, as the summary lines print it. -/
 def StopWhy.text : StopWhy → String
   | .metaOob => "an out-of-bounds metadata load"
   | .assume msg _ => s!"a model assumption that does not hold ({msg})"
+  | .blocked _ => "a take of a tagged word that no store carries (blocked)"
 
 /-- The reason, as the `not decided` lines print it. -/
 def StopWhy.detail : StopWhy → String
@@ -303,12 +333,19 @@ structure RoleTrace where
   stopped : Bool
   /-- Why it stopped (meaningful only if `stopped`). -/
   why : StopWhy := .metaOob
+  /-- KIR change 18: the role's claims (word, the old value read, the add), its stores of
+  tagged words (word, tag, value half; `none`: data) and the words it claimed on; `blocked`:
+  it stopped at a take (`stopped` too). -/
+  claimed : Array (Word × Int × Int) := #[]
+  puts : Array (Word × Int × Option Int) := #[]
+  claimWords : Array Word := #[]
+  blocked : Bool := false
 
-/-- Where a stopped trace stopped: the `assume`'s loc, else its last event's (the
-`metaOob` event). -/
+/-- Where a stopped trace stopped: the `assume`'s or the blocked take's loc, else its last
+event's (the `metaOob` event). -/
 def RoleTrace.stopLoc (t : RoleTrace) : Loc :=
   match t.why with
-  | .assume _ loc => loc
+  | .assume _ loc | .blocked loc => loc
   | .metaOob => (t.events.back?.map (·.loc)).getD ""
 
 /-- The distinct reasons the stopped traces `ts` stopped, in order (`detail`: the `not
@@ -335,6 +372,12 @@ structure Run where
 /-- Every role of every CTA ran to its end (no trace stopped: an out-of-bounds metadata
 load, an assumption that does not hold). -/
 def Run.complete (r : Run) : Bool := r.ctas.all (·.complete)
+
+/-- KIR change 18: some role is blocked at a take of a tag that no store of the run carries,
+and every role that stopped is blocked so: the run hangs there, which P0-7 decides; the other
+specs are not decided. -/
+def Run.hangs (r : Run) : Bool :=
+  !r.complete && r.ctas.all (·.roles.all fun t => !t.stopped || t.blocked)
 
 /-- Who must act on an evaluation error (references/specs.md, "Evaluation errors"):
 `kernel`, a certain error of the kernel or its host on the input (every spec FAILs);
@@ -363,6 +406,8 @@ structure EvalError where
   stop : Bool := false
   why : StopWhy := .metaOob
   kind : ErrKind := .unexpected
+  /-- Raised by a take whose store is not known (KIR change 18; `stop` too). -/
+  blocked : Bool := false
 
 /-! ## Evaluation monad -/
 
@@ -374,6 +419,8 @@ structure Ctx where
   rank : Nat := 0
   /-- `false` for host-side Exprs (grid, shapes, strides, barrier sizes). -/
   device : Bool
+  /-- Linear index of the CTA (x fastest). -/
+  cta : Nat := 0
 
 /-- The handoff records of a CTA (KIR change 17): (channel, slot key, k) -> the channel's
 value at its putter role's k-th `arrive` on the slot (counting from 0). -/
@@ -391,8 +438,26 @@ structure St where
   waited : Std.HashMap (Nat × Nat × Nat) Nat := {}
   lastWait : Option Slot := none
   records : Handoffs := {}
+  /-- KIR change 18: claims made so far per word (the role instance's claim number), the
+  role's claims, tagged stores and claimed words (`RoleTrace`), and the CTA's relay slots
+  (carried from role to role, `evalCta`). -/
+  claims : Std.HashMap Word Nat := {}
+  claimed : Array (Word × Int × Int) := #[]
+  puts : Array (Word × Int × Option Int) := #[]
+  claimWords : Array Word := #[]
+  relay : Std.HashMap (String × Int × Nat) Int := {}
+  /-- Variables of `rget`s of slots no role wrote, or of takes whose store is data: reading one
+  is a model limit, with its message. -/
+  poison : Std.HashMap String String := {}
 
 abbrev M := ReaderT Ctx (EStateM EvalError St)
+
+/-- KIR change 18: the relay map's marker that a role putting channel `chan` is blocked at a
+take (`evalCta`); no real slot has field 2^20. -/
+def blockedKey (chan : String) : String × Int × Nat := (chan, -1, 1048576)
+
+/-- The poison of a relay value its blocked putter never writes. -/
+def blockedPrefix : String := "relay (blocked putter) "
 
 def throwAt {α : Type} (loc : Loc) (msg : String) : M α :=
   throw { msg, loc, context := "" }
@@ -437,15 +502,36 @@ def loadMeta (loc : Loc) (name : String) (idx : List Int) : M Int := do
   | some v => if off ≥ 0 then pure v else throwAt loc s!"load {name}{idx.toList}: negative offset {off}"
   | none => throwAt loc s!"load {name}{idx.toList}: offset {off}, but the input gives {t.contents.size} values"
 
+/-- The sync word at element offset `off` of sync tensor `name`. An offset outside the tensor
+records a `syncOob` event and stops the role (`EvalError.stop`). -/
+def wordOf (loc : Loc) (name : String) (off : Int) : M Word := do
+  let (ti, t) ← tensorOf loc name
+  unless t.decl.sync.isSome do throwAt loc s!"sync access to {name}, which is not a sync tensor"
+  let inside := match t.span with
+    | some (lo, hi) => if t.exact then t.isElem off else lo ≤ off && off ≤ hi
+    | none => false
+  unless inside do
+    emit loc (.syncOob ti off)
+    throw { msg := s!"sync access {name}[{off}] outside the tensor", loc, context := "", stop := true }
+  pure { t := ti, e := off }
+
 /-! ## Expressions -/
 
 mutual
 def evalExpr (loc : Loc) : Expr → M Val
   | .const v w => pure ⟨w, BitVec.ofInt w v⟩
   | .var x w => do
-    match (← get).env[x]? with
+    let st ← get
+    match st.env[x]? with
     | some v => if v.w = w then pure v else throwAt loc s!"variable {x} is i{v.w}, used as i{w}"
-    | none => throwAt loc s!"unbound variable {x}"
+    | none =>
+      match st.poison[x]? with
+      | some why =>
+        if why.startsWith blockedPrefix then  -- its putter is blocked: so is this role
+          throw { msg := why, loc, context := "", stop := true, why := .blocked loc, blocked := true,
+                  kind := .limit }
+        throwK loc .limit why
+      | none => throwAt loc s!"unbound variable {x}"
   | .pid a w => do
     let c ← read
     unless c.device do throwAt loc "pid in a host-side expression"
@@ -760,6 +846,75 @@ def execEvent : Event → M Unit
     | none =>
       let bar := (((← read).host.barriers[s.bar]?).map (·.decl.name)).getD "?"
       throwK loc .limit s!"handoff {chan}: its putter role recorded no value at its arrive {k + 1} on {bar}[{s.idx}], which this role's wait {k + 1} on that slot pairs with (KIR change 17)"
+  | .gsig tensor idx v data loc => do
+    let w ← wordOf loc tensor (← evalInt loc idx)
+    let x ← evalInt loc v
+    emit loc (.gsig w x)
+    -- a store of a 64-bit word is a tagged store (tag: its high half)
+    if (← read).host.syncWidth w.t == 64 then
+      let u := ((BitVec.ofInt 64 x).toNat : Int)
+      modify fun st => { st with puts := st.puts.push (w, u / 2 ^ 32, if data then none else some (u % 2 ^ 32)) }
+  | .gwait tensor idx tag var loc => do
+    let w ← wordOf loc tensor (← evalInt loc idx)
+    let t := ((BitVec.ofInt 32 (← evalInt loc tag)).toNat : Int)
+    emit loc (.gwait w t)
+    -- the word starts at 0, whose tag is 0: a take of tag 0 reads it, unless a store of the
+    -- tag with another value half exists (which of the two it reads depends on the schedule)
+    let start : Option (Option Int) := if t == 0 then some (some 0) else none
+    let known := match (← read).host.puts[(w, t)]?, start with
+      | some p, some s0 => if p == s0 then some p else none
+      | some p, none => some p
+      | none, s0 => s0
+    if ((← read).host.puts[(w, t)]?).isSome && start.isSome && known.isNone then
+      throwK loc .limit s!"tagged word {tensor}[{w.e}]: its start value and a store both carry tag {t}, with different values"
+    match known, var with
+    | some (some v), some (x, wd) => modify fun st => { st with env := st.env.insert x ⟨wd, BitVec.ofInt wd v⟩ }
+    | some none, some (x, _) =>
+      let why := s!"tagged word {tensor}[{w.e}]: the store of tag {t} carries data, not the integer this take's value is used as"
+      modify fun st => { st with env := st.env.erase x, poison := st.poison.insert x why }
+    | some _, none => pure ()
+    | none, _ =>
+      throw { msg := s!"take of tag {t} of {tensor}[{w.e}]: no store of it is known (blocked)", loc, context := "",
+              stop := true, why := .blocked loc, blocked := true, kind := .limit }
+  | .gclaim tensor idx v var wd loc => do
+    let w ← wordOf loc tensor (← evalInt loc idx)
+    let add ← evalInt loc v
+    -- the claimers are the CTAs that claimed on the word in the previous pass, in linear order
+    -- (0 of 1 before a pass knows this CTA's turn)
+    let c ← read
+    let (i, g) : Int × Int := match c.host.claimOrder[w]? with
+      | some (m, n) => match m[c.cta]? with
+        | some k => (k, n)
+        | none => (0, 1)
+      | none => (0, 1)
+    let st ← get
+    let k := st.claims.getD w 0
+    let old := ((BitVec.ofInt wd (((k : Int) * g + i) * add)).toNat : Int)
+    set { st with claims := st.claims.insert w (k + 1), claimed := st.claimed.push (w, old, add),
+                  claimWords := if st.claimWords.contains w then st.claimWords else st.claimWords.push w,
+                  env := st.env.insert var ⟨wd, BitVec.ofInt wd old⟩ }
+    emit loc (.gclaim w add)
+  | .rput chan ord field v loc => do
+    let o ← evalInt loc ord
+    let x ← evalInt loc v
+    let st ← get
+    match st.relay[(chan, o, field)]? with
+    | some y =>
+      if y != x then
+        throwK loc .limit s!"relay {chan}: slot {o} field {field} written twice with different values ({y}, {x}): not one write per slot"
+    | none => set { st with relay := st.relay.insert (chan, o, field) x }
+  | .rget chan ord field var wd loc => do
+    let o ← evalInt loc ord
+    let st ← get
+    match st.relay[(chan, o, field)]? with
+    | some x => set { st with env := st.env.insert var ⟨wd, BitVec.ofInt wd x⟩, poison := st.poison.erase var }
+    | none =>
+      -- unwritten: an error only where the value is used (a speculated load's is not); a
+      -- putter of the channel blocked at a take never writes it: the use blocks this role too
+      let why := if st.relay.contains (blockedKey chan) then
+          s!"{blockedPrefix}{chan}: slot {o} field {field}, read at {loc}, is one its putter role, blocked at a take, never writes"
+        else s!"relay {chan}: the value of slot {o} field {field}, read at {loc} before any write of it by a role of the CTA that puts relay slots, or earlier in this role, is used"
+      set { st with env := st.env.erase var, poison := st.poison.insert var why }
 
 def setVar (x : String) (v : Val) : M Unit :=
   modify fun s => { s with env := s.env.insert x v }
@@ -808,10 +963,14 @@ end
 
 def pidStr (p : Nat × Nat × Nat) : String := s!"({p.1},{p.2.1},{p.2.2})"
 
+/-- The relay slots of a CTA (KIR change 18): (channel, slot, field) -> value. -/
+abbrev Relay := Std.HashMap (String × Int × Nat) Int
+
 def runM {α : Type} (h : Host) (pid : Nat × Nat × Nat) (role : Role) (device : Bool) (act : M α)
-    (rank : Nat := 0) (records : Handoffs := {}) : EStateM.Result EvalError St α :=
-  (act.run { host := h, pid, role, device, rank }).run
-    { env := h.params, trace := #[], work := #[], records }
+    (rank : Nat := 0) (records : Handoffs := {}) (cta : Nat := 0) (relay : Relay := {}) :
+    EStateM.Result EvalError St α :=
+  (act.run { host := h, pid, role, device, rank, cta }).run
+    { env := h.params, trace := #[], work := #[], records, relay }
 
 /-- Values of host-side Exprs (params only). -/
 def hostInts (h : Host) (es : List Expr) : Except EvalError (Array Int) :=
@@ -820,15 +979,19 @@ def hostInts (h : Host) (es : List Expr) : Except EvalError (Array Int) :=
   | .ok vs _ => .ok (vs.map Val.int).toArray
   | .error e _ => .error { e with context := "host" }
 
-/-- Trace of role `ri` of CTA `pid`, run with the CTA's handoff records `records`, and the
-records after it; a role that stops (a `metaOob` event, an `assume` that does not hold)
-keeps the events up to it and the reason. -/
+/-- Trace of role `ri` of CTA `pid` (linear index `cta`), run with the CTA's handoff records
+`records` and relay slots `relay`, and those after it; a role that stops (a `metaOob` event,
+an `assume` that does not hold, a blocked take) keeps the events up to it and the reason. -/
 def runRole (h : Host) (pid : Nat × Nat × Nat) (ri : Nat) (role : Role) (rank : Nat := 0)
-    (records : Handoffs := {}) : Except EvalError (RoleTrace × Handoffs) :=
-  match runM h pid role true (execBlock role.body) rank records with
-  | .ok () s => .ok ({ role := ri, events := s.trace, stopped := false }, s.records)
+    (records : Handoffs := {}) (cta : Nat := 0) (relay : Relay := {}) :
+    Except EvalError (RoleTrace × Handoffs × Relay) :=
+  let trace (s : St) (stopped : Bool) (why : StopWhy) (blocked : Bool) : RoleTrace :=
+    { role := ri, events := s.trace, stopped, why, claimed := s.claimed, puts := s.puts,
+      claimWords := s.claimWords, blocked }
+  match runM h pid role true (execBlock role.body) rank records cta relay with
+  | .ok () s => .ok (trace s false .metaOob false, s.records, s.relay)
   | .error e s =>
-    if e.stop then .ok ({ role := ri, events := s.trace, stopped := true, why := e.why }, s.records)
+    if e.stop then .ok (trace s true e.why e.blocked, s.records, s.relay)
     else .error { e with context := s!"cta {pidStr pid} role {role.name}" }
 
 def lookup {α : Type} (xs : List (String × α)) (k : String) : Option α :=
@@ -1075,28 +1238,218 @@ def checkHandoffs (k : Kernel) (r : Run) (putters : Std.HashMap String (List Nat
         unless ordered do
           fail s!"a putter's next put of the channel ({(P.events[n]?.map (·.loc)).getD ""}) follows no wait that pairs with an arrive of the reading role after this read"
 
-/-- Evaluate every role of every CTA of `k` on `inp` (CTAs in x-fastest order; in each, the
-roles that put handoff channels first, `handoffPlan`). -/
-def eval (k : Kernel) (inp : Input) : Except EvalError Run := do
-  let h ← setupHost k inp
-  let (putters, order) ← handoffPlan k
-  let roles := k.roles.toArray
+/-! ## Relay slots, tagged words and claims (KIR change 18)
+
+The roles of a CTA run in order (`roleOrder`), the CTA's relay slots carried from role to role:
+a slot is written once per CTA (trusted), so the order only decides that every get sees it. A
+take (`Event.gwait`) reads the value half of the store of its tag, which another CTA makes:
+`evalSyncPasses` evaluates the launch in passes, each from the stores of the previous one
+(`Host.puts`; none in the first); a take whose store is not known stops its role, blocked. A
+claim reads its turn among the CTAs that claimed on the word in the previous pass
+(`Host.claimOrder`). The passes end when a pass knows the stores and claimers it started from
+(a fixed point): then every take of a role that ran on read the store of its tag, and a role
+still blocked waits for a tag no CTA of the launch stores in this run (P0-7's hang,
+`Run.hangs`). Trusted, as the relay slots: a tagged word's store of a tag is the one store of
+that tag, read by every take of the tag. -/
+
+/-- The relay channels whose slots statements `ss` get (`get`) or put. -/
+partial def relayChans (get : Bool) (ss : List Stmt) : List String :=
+  ss.foldl (fun acc s => acc ++ match s with
+    | .event (.rput chan ..) => if get then [] else [chan]
+    | .event (.rget chan ..) => if get then [chan] else []
+    | .«for» _ _ _ _ body _ => relayChans get body
+    | .«while» _ body _ _ => relayChans get body
+    | .«if» _ t e _ => relayChans get t ++ relayChans get e
+    | _ => []) []
+
+/-- The order the roles of a CTA run in: the handoff plan's (`handoffPlan`: handoff putters
+first), the roles that put relay slots moved before the others; malformed if that breaks the
+plan. -/
+def roleOrder (k : Kernel) (putters : Std.HashMap String (List Nat)) (order : List Nat) :
+    Except EvalError (List Nat) := do
+  let relayPut (ri : Nat) : Bool := !(relayChans false ((k.roles[ri]?.map (·.body)).getD [])).isEmpty
+  let out := order.filter relayPut ++ order.filter (!relayPut ·)
+  let isPutter (ri : Nat) : Bool := putters.toList.any (·.2.contains ri)
+  if out.dropWhile isPutter |>.any isPutter then
+    hostErr "a role that puts handoff channels after a role that puts relay slots"
+  pure out
+
+/-- Every CTA of the grid (x-fastest order), each CTA's roles in `order`. -/
+def evalAll (h : Host) (order : List Nat) : Except EvalError (Array CtaTrace) := do
+  let roles := h.kernel.roles.toArray
   let (gx, gy, gz) := h.grid
   let mut ctas := Array.emptyWithCapacity (gx * gy * gz)
   for z in [0:gz] do
     for y in [0:gy] do
       for x in [0:gx] do
         let rank := h.rankOf (x, y, z)
+        let cta := x + gx * (y + gy * z)
         let mut traces := Array.replicate roles.size ({ role := 0, events := #[], stopped := false } : RoleTrace)
         let mut records : Handoffs := {}
+        let mut relay : Relay := {}
         for ri in order do
           if let some role := roles[ri]? then
-            let (t, rs) ← runRole h (x, y, z) ri role rank records
+            let (t, rs, rl) ← runRole h (x, y, z) ri role rank records cta relay
             traces := traces.set! ri t
             records := rs
+            -- a putter blocked at a take never writes its later slots
+            relay := if t.blocked then (relayChans false role.body).foldl (fun m c => m.insert (blockedKey c) 1) rl
+              else rl
         ctas := ctas.push { pid := (x, y, z), roles := traces, rank }
-  let r : Run := { host := h, ctas }
+  pure ctas
+
+/-- The tagged stores of a run: (word, tag) -> value half; two stores of one tag with
+different values are a model limit. -/
+def putsOf (h : Host) (ctas : Array CtaTrace) : Except EvalError (Std.HashMap (Word × Int) (Option Int)) := do
+  let mut m : Std.HashMap (Word × Int) (Option Int) := {}
+  for c in ctas do
+    for t in c.roles do
+      for (w, tag, v) in t.puts do
+        match m[(w, tag)]? with
+        | some v0 =>
+          if v0 != v then
+            let name := (h.tensors[w.t]?.map (·.decl.name)).getD "?"
+            throw { msg := s!"tagged word {name}[{w.e}]: tag {tag} stored with two values ({v0}, {v})",
+                    loc := "", context := "run", kind := .limit }
+        | none => m := m.insert (w, tag) v
+  return m
+
+/-- The claimers of a run: per word, the CTAs that claimed on it, in linear order. -/
+def claimOrderOf (ctas : Array CtaTrace) : Std.HashMap Word (Std.HashMap Nat Nat × Nat) := Id.run do
+  let mut by_ : Std.HashMap Word (Array Nat) := {}
+  for (c, ci) in ctas.zipIdx do
+    for t in c.roles do
+      for w in t.claimWords do
+        let xs := by_.getD w #[]
+        if !xs.contains ci then by_ := by_.insert w (xs.push ci)
+  let mut out := {}
+  for (w, xs) in by_.toList do
+    out := out.insert w (xs.zipIdx.foldl (init := {}) (fun m (ci, k) => m.insert ci k), xs.size)
+  return out
+
+def samePuts (a b : Std.HashMap (Word × Int) (Option Int)) : Bool :=
+  a.size == b.size && a.toList.all fun (k, v) => b[k]? == some v
+
+def sameOrder (a b : Std.HashMap Word (Std.HashMap Nat Nat × Nat)) : Bool :=
+  a.size == b.size && a.toList.all fun (w, (m, n)) => match b[w]? with
+    | some (m', n') => n == n' && m.size == m'.size && m.toList.all fun (k, v) => m'[k]? == some v
+    | none => false
+
+/-- The passes of a run with sync tensors (module section above). -/
+def evalSyncPasses (h : Host) (order : List Nat) (maxPasses : Nat := 256) : Except EvalError Run := do
+  let mut h := h
+  for _ in [0:maxPasses] do
+    let ctas ← evalAll h order
+    let puts ← putsOf h ctas
+    let claims := claimOrderOf ctas
+    if samePuts puts h.puts && sameOrder claims h.claimOrder then return { host := h, ctas }
+    h := { h with puts, claimOrder := claims }
+  throw { msg := s!"tagged words and claims: no pass of {maxPasses} starts from the stores and claimers it ends with",
+          loc := "", context := "run", kind := .limit }
+
+/-- The claim assignment is an outcome of the fetch-adds iff, per word, the old values its
+claims read are exactly `0, v, …, (T - 1) v` (T claims of `v`): every claiming CTA claims until
+its turn runs past the work, so no value is skipped. Why not, else `none`. -/
+def claimsFeasible (r : Run) : Option String := Id.run do
+  let mut byWord : Std.HashMap Word (Array (Int × Int)) := {}
+  let mut order : Array Word := #[]
+  for c in r.ctas do
+    for t in c.roles do
+      for (w, old, add) in t.claimed do
+        if !byWord.contains w then order := order.push w
+        byWord := byWord.insert w ((byWord.getD w #[]).push (old, add))
+  for w in order do
+    let xs := byWord.getD w #[]
+    let name := s!"{(r.host.tensors[w.t]?.map (·.decl.name)).getD "?"}[{w.e}]"
+    let v := (xs[0]?.map (·.2)).getD 1
+    if v == 0 || xs.any (·.2 != v) then return some s!"the claims on {name} add different or zero amounts"
+    let m : Int := 2 ^ r.host.syncWidth w.t
+    let ds := xs.map fun (o, _) => o % m
+    if ds.any (· % v != 0) then return some s!"a claim on {name} reads a value off the chain j x {v}"
+    let ks := (ds.map (· / v)).qsort (· < ·)
+    for (k, j) in ks.zipIdx do
+      if k != (j : Int) then
+        return some s!"the {xs.size} claims on {name} read j x {v} for j = {(ks.toList.take 6)}…, not 0..{xs.size - 1} (a CTA stops claiming before its turn runs past the work)"
+  return none
+
+/-- The CTAs each CTA of `r` reaches (KIR change 18): t takes a tag a store of s carries,
+through any chain of CTAs; the CTAs of one cluster, and of one `Input.syncGroups` group, reach
+each other. -/
+def reaches (r : Run) : Array (Array Bool) := Id.run do
+  let n := r.ctas.size
+  let mut storers : Std.HashMap (Word × Int) (Array Nat) := {}
+  for (c, ci) in r.ctas.zipIdx do
+    for t in c.roles do
+      for (w, tag, _) in t.puts do
+        let xs := storers.getD (w, tag) #[]
+        unless xs.contains ci do storers := storers.insert (w, tag) (xs.push ci)
+  let mut succ : Array (Array Nat) := Array.replicate n #[]
+  for (c, ci) in r.ctas.zipIdx do
+    for t in c.roles do
+      for e in t.events do
+        if let .gwait w tag := e.ev then
+          for s in storers.getD (w, tag) #[] do
+            unless s == ci || succ[s]!.contains ci do succ := succ.modify s (·.push ci)
+  let mut groups : List (List Nat) := r.host.input.syncGroups
+  if r.host.csize > 1 then
+    let mut byCluster : Std.HashMap (Nat × Nat × Nat) (List Nat) := {}
+    for (c, ci) in r.ctas.zipIdx do
+      let k := r.host.clusterOf c.pid
+      byCluster := byCluster.insert k (ci :: byCluster.getD k [])
+    groups := groups ++ byCluster.toList.map (·.2)
+  for g in groups do
+    for a in g do
+      for b in g do
+        if a != b && a < n && b < n && !succ[a]!.contains b then succ := succ.modify a (·.push b)
+  let mut out := #[]
+  for s in [0:n] do
+    let mut seen := Array.replicate n false
+    let mut stack := succ[s]!
+    while !stack.isEmpty do
+      let x := stack.back!
+      stack := stack.pop
+      unless seen[x]! do
+        seen := seen.set! x true
+        stack := stack ++ succ[x]!
+    out := out.push seen
+  return out
+
+/-- The representative claim order (`Event.gclaim`: in each round the claiming CTAs claim in
+linear turn order) is consistent with the order the run's synchronization imposes between
+CTAs, conservatively: where CTA s reaches CTA t (`reaches`), every claim of s on a word comes
+before every claim of t on it, i.e. s claims on it once, in an earlier turn. Why not, else
+`none`. -/
+def claimTurnsFeasible (r : Run) : Option String := Id.run do
+  if r.host.claimOrder.isEmpty then return none
+  let mut count : Std.HashMap (Word × Nat) Nat := {}
+  for (c, ci) in r.ctas.zipIdx do
+    for t in c.roles do
+      for (w, _, _) in t.claimed do
+        count := count.insert (w, ci) (count.getD (w, ci) 0 + 1)
+  let reach := reaches r
+  for (w, (turn, _)) in r.host.claimOrder.toList do
+    let name := s!"{(r.host.tensors[w.t]?.map (·.decl.name)).getD "?"}[{w.e}]"
+    for (s, ts) in turn.toList do
+      for (t, tt) in turn.toList do
+        if s != t && (reach[s]?.bind (·[t]?)).getD false then
+          let ks := count.getD (w, s) 0
+          if ks > 1 || ts ≥ tt then
+            return some s!"CTA {s} reaches CTA {t} (tagged words, cluster or protocol region), but claims on {name} {ks} time(s) in turn {ts} against turn {tt}: the turns may contradict that order"
+  return none
+
+/-- Evaluate every role of every CTA of `k` on `inp` (`evalAll`; a kernel with sync tensors in
+passes, `evalSyncPasses`). -/
+def eval (k : Kernel) (inp : Input) : Except EvalError Run := do
+  let h ← setupHost k inp
+  let (putters, order) ← handoffPlan k
+  let order ← roleOrder k putters order
+  let r : Run ← if h.hasSync then evalSyncPasses h order else pure { host := h, ctas := ← evalAll h order }
   unless putters.isEmpty do checkHandoffs k r putters
+  if let some why := claimsFeasible r then
+    throw { msg := s!"the claim assignment is not an outcome of the fetch-adds: {why}",
+            loc := "", context := "run", kind := .limit }
+  if let some why := claimTurnsFeasible r then
+    throw { msg := s!"the representative claim order: {why}", loc := "", context := "run", kind := .limit }
   pure r
 
 end KV

@@ -9,7 +9,8 @@ description:
   P0-1 bounds and address wrap, P0-2 role trip counts (hangs), P0-3 output
   coverage exactly once, P0-4 mbarrier protocol (parity, expect_tx bytes),
   P0-5 mask elision on host-selected fast paths and P0-6 named barriers
-  convergent, plus, reported apart, P1-1 TMEM reuse ordering (CuTe) and P1-2
+  convergent, P0-7 global waits reached (opt-in, CTAs that synchronize through
+  global memory), plus, reported apart, P1-1 TMEM reuse ordering (CuTe) and P1-2
   async store sources reuse ordering (TLX/Triton: a TMA store source or
   tensormap rewritten too early). For
   checking a kernel revision or a fix for hangs, out-of-bounds or wrapped
@@ -189,6 +190,7 @@ wrapper rule out, and opt-in modes nobody uses.
 | 4   | mbarrier protocol            | a parity other than 0/1; a stale repeated parity; a first wait that synchronizes with phase 0 on a TMA slot (parity 1 on the fresh barrier, unless a late join moves it); in a waited phase, expect_tx bytes != landing bytes; TMA bytes landing in a phase or on a slot nobody waits on; a load not covered by an earlier expect_tx of its role (in its phase, or at all); transaction bytes that cannot be attributed to a phase | laps; expect_tx bytes pending in a phase nobody waits for, or on a slot nobody waits on                                              |
 | 5   | Mask-elision soundness       | an elided input (it sets one of the case's `elision_flags`) violates P0-1 or P0-3 on the variant the host selected; those findings are reported under P0-5 instead                                                                                                                                                                                                                                                                 | the P0-1/P0-3 notes of an elided input                                                                                               |
 | 6   | Named barriers convergent    | (decided on the P0-6 KIR, `.nb.json`, made from every variant's PTX whatever the translation; `references/specs.md` "P0-6") a named barrier (`bar.sync`/`bar.arrive`/`bar.red`) reached under a condition its participants may not share: thread-index values that differ (F1), a loop whose exit differs, e.g. a spin loop on a strong load (F2); a count no warps meet, ids or counts that differ between the warps that meet, a sync that waits forever in the pairing (F3); UNDECIDED where uniformity or the pairing is not decided (arrive-based pairings rest on the warp-ahead reading) | none                                                                                                                                 |
+| 7   | Global waits reached         | (opt-in, case `gsync`: kernels whose CTAs synchronize through global memory; `references/specs.md` "P0-7") a take of a tagged word that waits forever (no store of the launch carries its tag, or the stores are never reached), or a take of another CTA's store in a grid over the co-resident capacity; UNDECIDED without a capacity | none |
 
 ### P1-1 TMEM reuse ordered (CuTe only; `references/specs.md`, "P1-1")
 
@@ -314,6 +316,15 @@ A verdict depends on exactly these items (`design.md`, "Trust base"):
    arriving in lockstep, as P0 takes the threads of one role; the frontend's write set
    for a channel (every other shared write that may touch its bytes is refused, or
    assumed to miss them where its offsets have no static bounds: a KIR `assume`).
+10. **P0-7 only** (kir.md change 18): the optimistic progress of `specs.md` "P0-7"; a
+    tagged word's store of a tag being the one store every take of that tag reads (not
+    overwritten before them); relay slots written once per slot and CTA and delivered to
+    their reads by the ring's handshake; the representative claim schedule (the claiming
+    CTAs claim in turn; checked to be an outcome of the fetch-adds and, conservatively, to
+    agree with the order tagged words, clusters and protocol teams impose between CTAs; a
+    PASS on it is reported UNDECIDED, a FAIL is witnessed by it); the occupancy model behind
+    `capacity`; and for protocol regions the single-transaction warp accesses of proto.py's
+    automata.
 
 The case file decides what is checked: its inputs, and annotations that name
 segments, work items, intended regions and elision flags. Review them like code.
@@ -428,7 +439,7 @@ table says when to read each):
 ## Tests
 
 ```bash
-$S/tests/lean/run_all.sh                    # Layer 2: positive/negative controls per spec (tests/lean/p1: P1-1, p1_2: P1-2, nb: P0-6)
+$S/tests/lean/run_all.sh                    # Layer 2: positive/negative controls per spec (tests/lean/p1: P1-1, p1_2: P1-2, nb: P0-6, gsync: P0-7)
 python3 -I $S/tests/e2e/test_e2e.py         # lkv.py end to end, ~2 min (frontends + Lean, no GPU)
 python3 -I $S/tests/cute/test_core.py       # CuTe translation, pure Python
 python3 -I $S/tests/ptx/test_translate.py   # PTX translation, pure Python (and tests/ptx/test_*.py)

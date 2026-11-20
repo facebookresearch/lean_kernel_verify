@@ -268,8 +268,10 @@ def lower_switches(fn) -> dict:
     return out
 
 
-def build(fn):
-    """The shape-checked CFG of a parsed function; CfgError outside the shape."""
+def build(fn, check_exits=True):
+    """The shape-checked CFG of a parsed function; CfgError outside the shape. With
+    `check_exits` False the loops' exits are not checked (proto.py finds its regions on
+    that CFG, then the rewritten function is built again with the check)."""
     blocks, alias, cur = {}, {}, None
     for x in fn.body:
         if isinstance(x, parse.Label):
@@ -319,7 +321,7 @@ def build(fn):
                     f"{cfg.where(s)} enters a cycle other than through its header"
                 )
             cfg.loops.setdefault(s, set()).update(_natural_loop(blocks, s, b))
-    _check_shape(cfg)
+    _check_shape(cfg, check_exits)
     return cfg
 
 
@@ -405,9 +407,9 @@ def _natural_loop(blocks, header, latch):
     return body
 
 
-def _check_shape(cfg):
+def _check_shape(cfg, check_exits=True):
     name = cfg.fn.name
-    for h, body in cfg.loops.items():
+    for h, body in cfg.loops.items() if check_exits else ():
         exits = sorted(
             {(u, s) for u in body for s in cfg.blocks[u].succs if s not in body}
         )

@@ -1,0 +1,224 @@
+{
+ "kir_version": 1,
+ "kernel": "tagged",
+ "source": "tests/lean/gsync/tagged",
+ "ir": "ptx",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "TAG",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "mail",
+   "kind": "global",
+   "elem_bytes": 8,
+   "shape": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "workspace",
+   "metadata": false,
+   "sync": {
+    "width": 64
+   }
+  },
+  {
+   "name": "out",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "const",
+     "v": 4,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "workspace",
+   "metadata": false
+  }
+ ],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "p",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "pid",
+       "axis": 0,
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 0,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "gsig",
+       "loc": "tg.py:10",
+       "tensor": "mail",
+       "index": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "value": {
+        "e": "const",
+        "v": 4294967298,
+        "w": 64
+       }
+      }
+     ],
+     "else": [],
+     "loc": "k.py:1"
+    }
+   ]
+  },
+  {
+   "name": "c",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "pid",
+       "axis": 0,
+       "w": 32
+      },
+      "b": {
+       "e": "const",
+       "v": 1,
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "gwait",
+       "loc": "tg.py:20",
+       "tensor": "mail",
+       "index": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "target": {
+        "e": "var",
+        "name": "TAG",
+        "w": 32
+       },
+       "var": "v",
+       "w": 32
+      },
+      {
+       "op": "event",
+       "ev": "gstore",
+       "loc": "tg.py:21",
+       "tensor": "out",
+       "offsets": {
+        "t": "splat",
+        "a": {
+         "e": "var",
+         "name": "v",
+         "w": 32
+        },
+        "shape": [
+         1
+        ],
+        "w": 32
+       },
+       "mask": null
+      }
+     ],
+     "else": [],
+     "loc": "k.py:1"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "tagged",
+  "inputs": [
+   {
+    "name": "paired",
+    "params": {
+     "TAG": 1
+    },
+    "capacity": {
+     "ctas": 2
+    }
+   },
+   {
+    "name": "unstored_tag",
+    "params": {
+     "TAG": 2
+    },
+    "capacity": {
+     "ctas": 2
+    }
+   },
+   {
+    "name": "tag0",
+    "params": {
+     "TAG": 0
+    },
+    "capacity": {
+     "ctas": 2
+    }
+   }
+  ]
+ }
+}

@@ -115,6 +115,8 @@ def oobIssues (h : Host) (e : TEvent) : Array String :=
   match e.ev with
   | .metaOob t idx shape =>
     #[s!"load {h.tensorName t}{idx.toList} outside the metadata tensor (shape {shape.toList}): an out-of-bounds global read; the role's later events depend on the value read, so its evaluation stops here and the other specs are not decided on this input"]
+  | .syncOob t idx =>
+    #[s!"sync access {h.tensorName t}[{idx}] outside the sync tensor (shape {h.tensors[t]!.shape.toList}): an out-of-bounds global access; the role's evaluation stops here and the other specs are not decided on this input"]
   | _ => #[]
 
 /-- Why `EventsOk r` fails (empty iff it holds). -/

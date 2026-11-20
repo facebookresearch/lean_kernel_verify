@@ -81,6 +81,18 @@ class Wait:
 
 
 @dataclass
+class GSpin:
+    """A spin wait on global memory (policy gsync, gsev.py): the natural loop at `header`
+    that the census classifies as a wait (`site`), exiting to `exit`; translated as gwait
+    events instead of a loop."""
+
+    header: str
+    exit: str
+    site: dict
+    blocks: frozenset
+
+
+@dataclass
 class Tree:
     body: list
     live_in: dict  # block -> frozenset of registers
@@ -91,9 +103,11 @@ class RegionError(Exception):
     """Control flow the region builder cannot structure: refuse the role."""
 
 
-def build(cfg, role):
-    """The region tree of `role` (a cfg.Role) of the shape-checked `cfg`."""
+def build(cfg, role, spins=None):
+    """The region tree of `role` (a cfg.Role) of the shape-checked `cfg`; `spins` (policy
+    gsync): census wait sites by their loop header's first PTX line, whose loops are GSpin."""
     g = _Graph(cfg, role)
+    g.spins = spins or {}
     body = _Scope(g, None).seq(role.entry, EXIT)
     defs = {
         h: frozenset(r for b in blk for r in g.writes(b)) for h, blk in g.loops.items()
@@ -259,6 +273,10 @@ class _Scope:
         wait = _wait(g, h)
         if wait is not None:
             return wait
+        ins = g.instrs(h)
+        site = g.spins.get(ins[0].line) if ins and g.spins else None
+        if site is not None:
+            return GSpin(h, g.exit[h], site, g.loops[h])
         return Loop(h, _Scope(g, h).seq(h, EXIT), g.exit[h], g.loops[h])
 
 

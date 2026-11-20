@@ -740,6 +740,90 @@ is the control flow, the named barriers and the values that decide them.
   geometry) in up to `--jobs` forked processes, one KIR each (`to_kir --jobs`, which
   `lkv.py run` passes; the results and files are the same in any order).
 
+## Global synchronization (policy `gsync`, gsev.py)
+
+With the policy key `gsync` set to `True` (the TTGIR case key `gsync: true`), synchronization
+through global memory becomes KIR events (kir.md change 18) instead of Data at a root. A
+variant with no sync construct translates as without it, and so does every variant when the
+key is off.
+
+- *Sync tensors.* Seeded from gsync.py's census of the entry (spin waits, fetch-adds whose old
+  value is used) through the parameter table, then grown by translating again
+  (`gsev.Restart`) when a sync site or a tensor the variant reads as metadata and writes
+  appears; the case may add `sync_tensors`. Every access of a sync tensor is a sync event; such
+  a tensor is never metadata, and any other load of it (outside a spin) is refused.
+- *Tagged words.* A spin loop of one block whose strong 64-bit loads of sync words feed only
+  comparisons of their high halves (`mov.b64 {v, t}, d; setp.ne t, T`; tl.inline_asm spins
+  such as `ld.relaxed.gpu.global.b64` / `@p bra`) for equality with targets that no load reads,
+  and whose exit condition is true exactly when every loaded word carries its target (checked
+  on all 2^n truth assignments of those comparisons), is a take of each word (gsev.py
+  `tag_spin`): one `gwait` per word, binding the value half to a variable when every thread
+  that runs the spin takes the same word and tag (else one per thread, the value half Data).
+  After the loop a register the header computes from a loaded word holds its value on the last
+  trip (the tag the target, the value half the variable; anything else that reads the word is
+  Data). A trap-on-timeout exit sets `timeout` (taken to be never taken); other spin shapes
+  are refused. A store to a sync word is a `gsig`; one whose value is Data but whose inline asm
+  block packs it from an integer tag (`mov.b64 d, {data, tag}`) is a `gsig` of `tag << 32`
+  with `data_lo` (fp32 partials).
+- *Claims* (case `claims: "representative"`): a fetch-add whose old value the census
+  classifies as a claim (it indexes memory or bounds a loop) is a `gclaim`, its old value a
+  fresh variable; the KIR's top level then says `representative: ["claims"]`. Any other
+  atomic on a sync word is refused, and so is a claim without the case key.
+- *Relay channels* (case `relay_channels: [{symbol, start, slots, stride, name?}]`): a shared
+  array region (`symbol` a regex of the shared symbol, from byte `start`) of `slots` slots of
+  `stride` bytes, written once per slot and CTA (a claim ring): a st.shared to slot k is an
+  `rput`, an ld.shared an `rget`. The slot is the constant one, or X for an offset
+  `stride x (X mod slots)` (also C's `%` by a power of two, `X - ((X + bias) & -slots)`).
+- *Other events*: `named_bar` for bar.sync / bar.arrive / barrier.sync in the P0 KIR (P0-7's
+  progress).
+- *Roles*: a sync event issued by part of a role's warps splits the role (as the P1 pass
+  does), except a store right after a named barrier of the whole role with nothing but lets
+  emitted since: the barrier already orders the other warps' earlier accesses.
+
+### Protocol regions
+
+Case `protocols: [{"tensor": T, "start": s?}]` (policy `protocols`, frontend/ptx/proto.py): T's
+word is a small atomic protocol of a fixed group of CTAs (a team join: registrations by fetch-
+add, polls, a timeout that sets an abort bit by CAS). Before the CFG shape check (proto.py works
+on `cfg.build(check_exits=False)`), the accesses of T (any global access whose address may come
+from T's pointer parameter) must lie in one region of one role: the blocks from the first access
+(the start of its inline asm block) to the last, plus the pure blocks entered only from them at
+which a register the region computed is live (the decision where to go on); entered only at its
+start; holding only integer computation, `shfl.sync.idx`, nanosleep, branches and the word's
+accesses, each an atomic or a strong (.relaxed/.acquire/.release/.volatile) load or store of
+scope gpu or sys, at one address register the region does not write. Exits: the region's edges
+out (through trampoline blocks). The region is cut out: `lkv.outcome %r, k, 0, <live-ins>`
+(a synthetic instruction, ops.py) reads the CTA's exit from the metadata table `__proto<k>`
+(row: the CTA's linear index; column j > 0: live-out j) and branches to that exit; the rewritten
+function passes the shape check. The translation records at it the live-in registers' values
+and the conditions of the uniform branches around it (closed expressions: params, CTA index,
+metadata loads), refuses it inside a loop, under a thread-varying condition, or in a role of
+several warps, and issues the word's footprint (a `gatomic` by lane 0: P0-1). T is then no
+sync tensor.
+
+Per input, the family's assembly evaluates the record per CTA (proto.py `agents`: the CTAs that
+reach the region, grouped by their word) and explores each group (`explore`): every CTA runs the
+region as an automaton of one warp (32 lanes; exact integer semantics; branches must be uniform
+over the warp; an atomic is executed by one lane, a store by lanes storing one value, a load by
+lanes of one address read one value, trusted: one transaction), and every interleaving of the
+group's accesses of the word is explored from its start value (`start`, default 0: the value the
+launch begins with, which the case asserts). Sound and complete for the word: the accesses are
+morally strong with each other (same GPU, scope gpu or wider), so the PTX memory model's
+SC-per-location axiom makes them an interleaving consistent with program order, each read
+returning the latest write (aligned 32/64-bit accesses are single-copy atomic); timing is not
+modeled (a nanosleep or a poll count is just computation): any CTA may be delayed by any amount,
+so every timeout outcome is among the interleavings; nothing else reads or writes the word
+(checked: one region, KIR v1 tensors do not alias). States are the word and each agent's
+position and live registers, up to the permutation of agents with the same start (symmetry); an
+outcome is a terminal state: per agent its exit and live-out values, expanded over the
+permutations. Refused (the input is not built): more than `MAX_STATES` (3e6) states, an agent
+that runs 1e5 instructions without an access, a cycle through distinct states (fair termination
+is not decided), a state in which every agent only repeats an access that changes nothing (the
+protocol hangs by itself). The inputs are the product over groups and protocols of the reachable
+outcome vectors, named `<input>@proto:<tensor>:<vector>`, the vector each group's exits (digits
+in linear CTA order, groups by first CTA, separated by `-`): the report shows which outcome
+fails.
+
 ## Refusals
 
 A construct the frontend cannot translate exactly stops its variant with a message naming

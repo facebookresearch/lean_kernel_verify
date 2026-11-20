@@ -166,6 +166,18 @@ follow items 1 to 3, 6 and 8.
     with no value recorded, or putters that recorded different values, are limits
     too. IR.lean's `Event` gained `handoff_put` and `handoff_get`, `Role` the field
     `group`.
+18. **Global synchronization.** A `global` tensor with `"sync": {"width": 32 | 64}` is a
+    *sync tensor* (`elem_bytes` = width / 8, role `workspace`, not metadata): its elements
+    are sync words, which only the sync events name. `gsig` stores a value to a word; on a
+    64-bit word the value's high half is a *tag* (`data_lo`: its low half is data). `gwait`
+    is a *take*: a spin until a 64-bit word carries the tag `target`, binding its low half
+    to `var`. `gclaim` is a claim of a work item from a cursor word (a fetch-add whose old
+    value the role uses). `rput` / `rget` write and read field `field` of slot `ord` of a
+    shared-memory relay channel `chan` (one write per slot and CTA). A KIR with sync
+    tensors may carry `named_bar` events without a top-level `tmem`; inputs may give
+    `capacity` and `sync_groups`, the top level `representative`. Decided by P0-7
+    (specs.md); IR.lean's `Event` gained the five events, `Tensor` the field `sync`,
+    `Input` the fields `capacity` and `syncGroups`.
 
 ## Top level
 
@@ -198,6 +210,9 @@ follow items 1 to 3, 6 and 8.
   Layer 2 ignores them and `emit_lean` does not emit them.
 - `params`: scalar kernel arguments (runtime ints). Values come from
   `case.inputs`.
+- `representative` (optional, change 18): `["claims"]` when the KIR's claims take the
+  representative schedule (the claiming CTAs claim in turn, specs.md "P0-7"); required
+  with `gclaim` events. `scripts/lkv.py` reports every PASS of such a KIR UNDECIDED.
 - `cluster` (optional, change 11): the thread-block cluster dims, three
   positive ints (default `[1, 1, 1]`, no clusters). Consecutive CTAs form a
   cluster: CTA `(x, y, z)` is in cluster `(x / cx, y / cy, z / cz)` with rank
@@ -224,6 +239,8 @@ follow items 1 to 3, 6 and 8.
   - `metadata = true`: an integer tensor whose contents the kernel reads to
     steer control flow or addresses (cu_seqlens, tile tables). Its contents are
     given per input.
+  - `sync` (optional, change 18): `{"width": 32 | 64}`, a sync tensor: every
+    element is a sync word that starts at 0 and only the sync events access.
   - `segments`: how the row dimension `dim` splits into logical segments, e.g.
     `{"dim": 0, "offsets": "cu_seqlens_k", "per": "batch"}`: segment z is rows
     `[offsets[z], offsets[z+1])` of the 1-D metadata tensor `offsets`, and z is
@@ -360,6 +377,11 @@ Tagged by `"ev"`; all carry `loc`.
 | `tmap_write` (P1-2)            | `base` (global buffer), `addr` (Expr: byte offset), `warp` (w=32 Expr): the 128-byte tensormap written by every lane of `warp` in one warp-synchronizing instruction (`tensormap.cp_fenceproxy`)                                                                                                                                                                                                                                                                                 |
 | `handoff_put`                  | `chan` (string), `value` (w=32 Expr): the role's new value of handoff channel `chan` (change 17) |
 | `handoff_get`                  | `chan` (string), `var` (string, bound at w=32): the value of `chan` at the putter's arrive that this role's last wait pairs with (change 17) |
+| `gsig`                         | `tensor` (a sync tensor), `index` (w=32/64 Expr: element offset), `value` (the word's width), `data_lo` (optional bool, 64-bit words): a store of `value` to the word (change 18) |
+| `gwait`                        | `tensor` (a 64-bit sync tensor), `index`, `target` (w=32), optional `var` and `w` (32) together: a take, which returns once the word's tag is `target` and binds `var` to the value half of that tag's store (change 18) |
+| `gclaim`                       | `tensor`, `index`, `value` (the add), `var` and `w` (the word's width): a claim, `var` its old value (change 18) |
+| `rput`                         | `chan` (string), `ord` (w=32/64 Expr: the slot), `field` (int >= 0), `value` (Expr): the role writes field `field` of slot `ord` of relay channel `chan` (change 18) |
+| `rget`                         | `chan`, `ord`, `field`, `var`, `w` (1, 32 or 64): `var` := that field of the slot, written by an earlier role of the CTA or earlier in this role (change 18) |
 
 ## Inputs
 
@@ -389,6 +411,12 @@ Tagged by `"ev"`; all carry `loc`.
   of it and reports their violations and notes in their place. The case file
   names them (the frontends check that they are flags of the variant); nothing
   infers them from the IR.
+- `capacity` (optional, change 18): `{"ctas": int, "clusters": int (optional)}`, how
+  many CTAs (and clusters) of the launch can be resident at once (the occupancy of the
+  variant on the target). P0-7 needs it when a take needs a store of another CTA.
+- `sync_groups` (optional, change 18): lists of linear CTA indices that synchronize outside
+  the model (the teams of a protocol region): the claims' turns must agree with it
+  (specs.md "P0-7", `claimTurnsFeasible`).
 - `intended_writes` names, per output tensor, the region P0-3 expects to be
   covered exactly once: `all_rows_of_segments` (every row of every segment, all
   columns), `all`, an explicit list of row ranges, or `unchecked` (explicit

@@ -525,6 +525,12 @@ _ROWS = [
         ["bra", "brx.idx", "ret"],
     ),
     (
+        "event",
+        "synthetic, not PTX: the outcome of a protocol region the frontend cut out of the "
+        "kernel (proto.py; policy protocols): a read of its outcome table",
+        ["lkv.outcome"],
+    ),
+    (
         "drop",
         "argument staging of a call (ISA: st, .param state space, also spelled "
         ".param::func): only calls of __assertfail, vprintf and libdevice are accepted, "
@@ -549,8 +555,10 @@ _FAMILIES = [
     ),
     (
         "drop",
-        "no effect on any spec (ISA: griddepcontrol, setmaxnreg, prefetch, nanosleep)",
-        ["griddepcontrol", "setmaxnreg", "prefetch", "nanosleep"],
+        "no effect on any spec (ISA: griddepcontrol, setmaxnreg, prefetch, nanosleep; "
+        "cp.async.bulk.prefetch.tensor: a tensor tile prefetched into L2)",
+        ["griddepcontrol", "setmaxnreg", "prefetch", "nanosleep"]
+        + [f"cp.async.bulk.prefetch.tensor.{d}d.L2.global" for d in range(1, 6)],
     ),
     (
         "drop",

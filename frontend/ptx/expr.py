@@ -748,6 +748,17 @@ def subst(e, mapping: dict, cache: dict | None = None):
 _DATA_NODES: dict = {}
 
 
+def subst_node(e, node, by):
+    """e with every occurrence of the subexpression `node` replaced by `by`."""
+    if e == node:
+        return by
+    kids = children(e)
+    if not kids:
+        return e
+    new = [subst_node(x, node, by) for x in kids]
+    return e if all(x is y for x, y in zip(new, kids)) else rebuild(e, new)
+
+
 def has_data_nodes(e) -> bool:
     """e contains a metadata load or a thread table (per-thread data, not arithmetic)."""
     r = _DATA_NODES.get(e)

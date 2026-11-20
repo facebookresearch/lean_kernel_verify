@@ -35,6 +35,7 @@ numerics, performance, CUDA C++ kernels, or race and deadlock freedom in general
 | P0-4 mbarrier protocol              | a parity other than 0 or 1 or a stale one, expect_tx bytes that differ from the TMA bytes landing in a waited phase, TMA bytes landing where nobody waits                  |
 | P0-5 mask-elision soundness         | an input on a host-selected mask-free fast path that violates P0-1 or P0-3                                                                                                 |
 | P0-6 named barriers convergent      | a named-barrier instance (`bar.sync`, `bar.arrive`) that the warps its count names do not all reach with one count, or a wait on one that never ends (from the PTX)       |
+| P0-7 global waits reached (opt-in)  | a take of a tagged global word that waits forever, or a take of another CTA's store on a grid over the co-resident capacity (CTAs that synchronize through global memory) |
 | P1-1 TMEM reuse ordered (CuTe only) | two tcgen05 ld/st/cp/mma accesses of different roles to a common TMEM cell, one of them a write, that the kernel's barriers and waits do not order                         |
 | P1-2 async store sources reuse ordered (TLX/Triton, PTX translation) | a write to the shared memory or the tensormap a TMA or bulk store may still read (before a `cp.async.bulk.wait_group{.read}` of its issuing thread completed its group: `.read` covers both) that the kernel's barriers and waits do not order after that read |
 

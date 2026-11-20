@@ -30,6 +30,102 @@ def fixture(name):
         return json.load(f)
 
 
+# Global-synchronization fixtures (tests/lean/gsync, references/kir.md change 18)
+def gs(name):
+    with open(os.path.join(HERE, "gsync", f"{name}.kir.json")) as f:
+        return json.load(f)
+
+
+def gs_ev(k, ev):  # the first `ev` event of any role
+    return next(e for r in k["roles"] if (e := first_ev(r["body"], ev)) is not None)
+
+
+GSYNC_MUTATIONS = [
+    (
+        "tagged",
+        "a store to a data tensor (KIR change 18)",
+        lambda k: gs_ev(k, "gsig").update(tensor="out"),
+        "'out' is not a sync tensor",
+    ),
+    (
+        "tagged",
+        "a data event on a sync tensor",
+        lambda k: gs_ev(k, "gstore").update(tensor="mail"),
+        "'mail' is a sync tensor: only sync events access it",
+    ),
+    (
+        "tagged",
+        "a tag of width 64",
+        lambda k: gs_ev(k, "gwait").update(target=c(1, 64)),
+        "a tag has w=32",
+    ),
+    (
+        "tagged",
+        "a take binding a var without its width",
+        lambda k: gs_ev(k, "gwait").pop("w"),
+        "a wait binds 'var' and 'w' together",
+    ),
+    (
+        "tagged",
+        "a sync tensor of width 16",
+        lambda k: k["tensors"][0].update(sync={"width": 16}, elem_bytes=2),
+        'expected {"width": 32 | 64}',
+    ),
+    (
+        "tagged",
+        "a negative co-resident capacity",
+        lambda k: k["case"]["inputs"][0].update(capacity={"ctas": -1}),
+        "capacity.ctas",
+    ),
+    (
+        "tagged",
+        "sync groups that are not lists of CTA indices",
+        lambda k: k["case"]["inputs"][0].update(sync_groups=[0, 1]),
+        "expected lists of non-negative ints (CTA indices)",
+    ),
+    (
+        "claims",
+        "claims without the representative schedule",
+        lambda k: k.pop("representative"),
+        "a KIR with gclaim events names 'claims'",
+    ),
+    (
+        "claims",
+        "a representative schedule other than claims",
+        lambda k: k.update(representative="claims"),
+        "expected a list of 'claims'",
+    ),
+    (
+        "claims",
+        "a claim bound at another width than its word's",
+        lambda k: gs_ev(k, "gclaim").update(w=64),
+        "must be the sync word's width 32",
+    ),
+    (
+        "claims",
+        "a data value half on a 32-bit word",
+        lambda k: k["roles"][0]["body"].append(
+            {
+                "op": "event",
+                "ev": "gsig",
+                "loc": "x:1",
+                "tensor": "ctr",
+                "index": c(0, 32),
+                "value": c(0, 32),
+                "data_lo": True,
+            }
+        ),  # fmt: skip
+        "only on a 64-bit sync word",
+    ),
+    (
+        "relay",
+        "a relay read of width 16",
+        lambda k: gs_ev(k, "rget").update(w=16),
+        "must be 1, 32 or 64",
+    ),
+]
+
+
 # P1 KIR fixtures (tests/lean/p1, references/kir.md change 10)
 def p1(name):
     with open(os.path.join(HERE, "p1", f"{name}.kir.json")) as f:
@@ -860,6 +956,16 @@ def main():
             print(
                 f"kir_negative: NOT REJECTED as expected: nb/{name}: {what}: want {expect!r}, got {errors}"
             )
+    for name, what, mutate, expect in GSYNC_MUTATIONS:
+        k = copy.deepcopy(gs(name))
+        assert not kir.validate(k), f"gsync/{name} must be valid before mutation"
+        mutate(k)
+        errors = kir.validate(k)
+        if not any(expect in e for e in errors):
+            failed += 1
+            print(
+                f"kir_negative: NOT REJECTED as expected: gsync/{name}: {what}: want {expect!r}, got {errors}"
+            )
     for name, what, mutate in ACCEPTED:
         k = copy.deepcopy(fixture(name))
         mutate(k)
@@ -878,8 +984,9 @@ def main():
                 f"kir_negative: NOT REJECTED as expected: {name}: {what}: want {expect!r}, got {errors}"
             )
     nmut = (
-        len(MUTATIONS) + len(P1_MUTATIONS) + len(P1_2_MUTATIONS) + len(NB_MUTATIONS) + 1
-    )
+        len(MUTATIONS) + len(P1_MUTATIONS) + len(P1_2_MUTATIONS) + len(NB_MUTATIONS)
+        + len(GSYNC_MUTATIONS) + 1
+    )  # fmt: skip
     print(
         f"kir_negative: {nmut + len(ACCEPTED) - failed}/{nmut + len(ACCEPTED)} as expected"
         f" ({nmut} invalid KIR variants rejected with the expected error, {len(ACCEPTED)} valid ones accepted)"

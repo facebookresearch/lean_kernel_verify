@@ -101,6 +101,18 @@ Rules of kir.md beyond its field tables, which lean/KV relies on:
   `handoff_get` {"chan": string, "var": string, bound at w=32 like a `let`}. The roles
   that put a channel are one role or parts of one (the same role "group", an optional
   string); a role that puts a channel reads none; every read channel has a putter.
+* Global synchronization (kir.md, change 18): a `global` tensor with "sync" {"width": 32|64}
+  is a sync tensor: elem_bytes = width / 8, role "workspace", not metadata; only the sync events
+  `gsig`, `gwait` and `gclaim` name it (no data event), and those name only sync tensors. Their
+  `index` is a w=32 or w=64 Expr (an element offset). `gsig` stores `value` (the word's width;
+  "data_lo": on a 64-bit word, its low half is data); `gwait` on a 64-bit word waits until the
+  word's tag (its high half) is `target` (w=32) and may bind "var" with "w" 32 (together) to its
+  low half; `gclaim` binds "var" (with "w" the word's width) to its claim. `rput` {chan, ord,
+  field, value} and `rget` {chan, ord, field, var, w} are a relay slot's write and read. A KIR
+  with sync tensors may carry `named_bar` events without a top-level "tmem". Inputs may give
+  "capacity" {"ctas": int, "clusters": int (optional)} and "sync_groups" (lists of linear CTA
+  indices that synchronize outside the model). A KIR with `gclaim` events has a top-level
+  "representative" list naming "claims".
 """
 
 import json
@@ -180,7 +192,13 @@ EVENT_FIELDS = {
     "tmap_write": ({"base", "addr", "warp"}, set()),
     "handoff_put": ({"chan", "value"}, set()),
     "handoff_get": ({"chan", "var"}, set()),
+    "gsig": ({"tensor", "index", "value"}, {"data_lo"}),
+    "gwait": ({"tensor", "index", "target"}, {"timeout", "var", "w"}),
+    "gclaim": ({"tensor", "index", "value", "var", "w"}, set()),
+    "rput": ({"chan", "ord", "field", "value"}, set()),
+    "rget": ({"chan", "ord", "field", "var", "w"}, set()),
 }
+SYNC_EVENTS = ("gsig", "gwait", "gclaim")
 P1_EVENTS = ("tmem", "tmem_wait", "named_bar")
 NB_EVENTS = ("named_bar", "nb_open", "nb_rep")
 NB_KINDS = ("lane", "cond", "loop", "operand", "dispatch")
@@ -206,6 +224,7 @@ TOP_FIELDS = {
     "case",
 }
 TOP_OPTIONAL = {"target", "compiler", "tmem", "cluster", "nbar", "p1", "cta_threads"}
+TOP_OPTIONAL |= {"representative"}  # change 18: the claims' representative schedule
 CLUSTER_FIELDS = ("cta", "cta_mask")
 TENSOR_FIELDS = {
     "name",
@@ -218,7 +237,8 @@ TENSOR_FIELDS = {
     "metadata",
 }
 INPUT_REQUIRED = {"name", "params"}
-INPUT_OPTIONAL = {"grid", "metadata", "flags", "shapes", "intended_writes"}
+INPUT_OPTIONAL = {"grid", "metadata", "flags", "shapes", "intended_writes", "capacity",
+                  "sync_groups"}  # fmt: skip
 
 
 def is_int(x):
@@ -251,6 +271,7 @@ class _Checker:
         self.p1_events = 0  # tmem, tmem_wait and named_bar events seen
         self.tmem_events = 0  # tmem and tmem_wait events seen (P1-1)
         self.p1_2_events = 0  # P1-2 events seen
+        self.named_bars = 0  # named_bar events seen
         self.role_warps = None  # warps of the role being checked
         self.role_tpi = None  # threads_per_issue of the role being checked
         self.cluster_size = 1  # CTAs per cluster
@@ -258,6 +279,7 @@ class _Checker:
         self.nbar = False  # a P0-6 KIR (top-level "nbar")
         self.role_index = None  # index of the role being checked
         self.handoffs = []  # (role index, put?, channel, path) of each handoff event
+        self.claims = 0  # gclaim events seen
 
     def err(self, path, msg):
         self.errors.append(f"{path}: {msg}")
@@ -635,6 +657,11 @@ class _Checker:
             t = self.tensors.get(s["tensor"]) if isinstance(s["tensor"], str) else None
             if t is None or t.get("kind") != "global":
                 self.err(f"{path}.tensor", f"{s['tensor']!r} is not a global tensor")
+            elif "sync" in t:
+                self.err(
+                    f"{path}.tensor",
+                    f"{s['tensor']!r} is a sync tensor: only sync events access it",
+                )
             off = self.texpr(f"{path}.offsets", s["offsets"], scope)
             if s["mask"] is not None:
                 m = self.texpr(f"{path}.mask", s["mask"], scope)
@@ -648,6 +675,19 @@ class _Checker:
             self.p1_event(path, ev, s, scope)
         elif ev in ("handoff_put", "handoff_get"):
             self.handoff_event(path, ev, s, scope)
+        elif ev in SYNC_EVENTS:
+            self.sync_event(path, ev, s, scope)
+        elif ev in ("rput", "rget"):
+            self.string(f"{path}.chan", s["chan"])
+            if self.expr(f"{path}.ord", s["ord"], scope) not in (32, 64, None):
+                self.err(f"{path}.ord", "must have w=32 or 64")
+            self.int_field(f"{path}.field", s["field"], 0)
+            if ev == "rput":
+                self.expr(f"{path}.value", s["value"], scope)
+            elif s["w"] not in (1, 32, 64):
+                self.err(f"{path}.w", "must be 1, 32 or 64")
+            else:
+                self.bind(f"{path}.var", s["var"], s["w"], scope)
         elif ev == "work":
             if isinstance(s["fields"], dict) and s["fields"]:
                 for k, v in s["fields"].items():
@@ -687,6 +727,46 @@ class _Checker:
                 self.err(path, f"handoff channel '{chan}' is put by no role")
             elif ri in put_roles:
                 self.err(path, "a role that puts a handoff channel reads one")
+
+    def sync_event(self, path, ev, s, scope):
+        """gsig / gwait / gclaim (kir.md, change 18)."""
+        t = self.tensors.get(s["tensor"]) if isinstance(s["tensor"], str) else None
+        width = (
+            t["sync"].get("width")
+            if t is not None and isinstance(t.get("sync"), dict)
+            else None
+        )
+        if width is None:
+            self.err(f"{path}.tensor", f"{s['tensor']!r} is not a sync tensor")
+        if self.expr(f"{path}.index", s["index"], scope) not in (32, 64, None):
+            self.err(f"{path}.index", "a sync word index must have w=32 or w=64")
+        if ev != "gwait" and self.expr(f"{path}.value", s["value"], scope) not in (
+            width,
+            None,
+        ):
+            self.err(f"{path}.value", f"must have the sync word's width {width}")
+        if ev == "gsig" and "data_lo" in s:
+            self.bool_field(f"{path}.data_lo", s["data_lo"])
+            if width != 64:
+                self.err(f"{path}.data_lo", "only on a 64-bit sync word")
+        if ev == "gwait":
+            if width not in (64, None):
+                self.err(f"{path}.tensor", "a wait needs a 64-bit (tagged) sync word")
+            if self.expr(f"{path}.target", s["target"], scope) not in (32, None):
+                self.err(f"{path}.target", "a tag has w=32")
+            if "timeout" in s:
+                self.bool_field(f"{path}.timeout", s["timeout"])
+            if ("var" in s) != ("w" in s):
+                self.err(path, "a wait binds 'var' and 'w' together")
+            elif "var" in s:
+                if s["w"] != 32:
+                    self.err(f"{path}.w", "a tagged word's value half has w=32")
+                self.bind(f"{path}.var", s["var"], s["w"], scope)
+        if ev == "gclaim":
+            self.claims += 1
+            if s["w"] != width:
+                self.err(f"{path}.w", f"must be the sync word's width {width}")
+            self.bind(f"{path}.var", s["var"], s["w"], scope)
 
     def _check_cluster_fields(self, path: str, ev: str, s: dict, scope: dict) -> None:
         """`cta` / `cta_mask` (w=32 Exprs) and tma_load's `leader` (kir.md, change 11)."""
@@ -861,7 +941,9 @@ class _Checker:
     def p1_event(self, path, ev, s, scope):
         """tmem / tmem_wait / named_bar events of a P1 KIR (kir.md, change 10)."""
         self.p1_events += 1
-        if ev != "named_bar":
+        if ev == "named_bar":
+            self.named_bars += 1
+        else:
             self.tmem_events += 1
         if ev == "tmem_wait":
             self.bool_field(f"{path}.ld", s["ld"])
@@ -974,6 +1056,10 @@ class _Checker:
             if t is None:
                 return
         elif t is None:
+            if self.p1_events == self.named_bars and any(
+                "sync" in x for x in self.tensors.values()
+            ):
+                return  # named barriers of a KIR with sync tensors (change 18)
             if self.p1_events:
                 self.err(
                     "$",
@@ -1125,11 +1211,18 @@ class _Checker:
                     f"no work event defines field '{seg['per']}'",
                 )
         self.tmem_top(k)
+        rep = k.get("representative", [])
+        if not isinstance(rep, list) or any(r != "claims" for r in rep):
+            self.err("$.representative", "expected a list of 'claims'")
+        elif self.claims and "claims" not in rep:
+            self.err("$.representative", "a KIR with gclaim events names 'claims'")
         self.case(k["case"])
 
     def tensor(self, path, t, host):
         is_desc = isinstance(t, dict) and t.get("kind") == "desc"
-        if not self.keys(path, t, TENSOR_FIELDS | ({"box"} if is_desc else set())):
+        if not self.keys(
+            path, t, TENSOR_FIELDS | ({"box"} if is_desc else set()), {"sync"}
+        ):
             return
         self.string(f"{path}.name", t["name"])
         if t["kind"] not in TENSOR_KINDS:
@@ -1152,6 +1245,23 @@ class _Checker:
         self.bool_field(f"{path}.metadata", t["metadata"])
         if t["metadata"] is True and t["kind"] != "global":
             self.err(f"{path}.metadata", "metadata tensors must be global")
+        if "sync" in t:  # change 18
+            sy = t["sync"]
+            if not (
+                isinstance(sy, dict)
+                and set(sy) == {"width"}
+                and sy["width"] in (32, 64)
+            ):
+                self.err(f"{path}.sync", 'expected {"width": 32 | 64}')
+            elif t["elem_bytes"] != sy["width"] // 8:
+                self.err(
+                    f"{path}.elem_bytes", "a sync tensor's elem_bytes is its width / 8"
+                )
+            if (t["kind"], t["metadata"], t["role"]) != ("global", False, "workspace"):
+                self.err(
+                    f"{path}.sync",
+                    "a sync tensor is global, not metadata, with role 'workspace'",
+                )
         if is_desc:
             box = t["box"]
             if not (
@@ -1267,6 +1377,19 @@ class _Checker:
                     )
         else:
             self.err(f"{path}.shapes", "expected an object")
+        c = inp.get("capacity", {"ctas": 0})
+        if self.keys(f"{path}.capacity", c, {"ctas"}, {"clusters"}):
+            for f in ("ctas", "clusters"):
+                if f in c:
+                    self.int_field(f"{path}.capacity.{f}", c[f], 0)
+        groups = inp.get("sync_groups", [])
+        if not isinstance(groups, list) or not all(
+            isinstance(g, list) and all(is_int(x) and x >= 0 for x in g) for g in groups
+        ):
+            self.err(
+                f"{path}.sync_groups",
+                "expected lists of non-negative ints (CTA indices)",
+            )
         iw = inp.get("intended_writes", {})
         if not isinstance(iw, dict):
             self.err(f"{path}.intended_writes", "expected an object")

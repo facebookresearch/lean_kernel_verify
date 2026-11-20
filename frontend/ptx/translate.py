@@ -67,6 +67,17 @@ Policy (a dict; `policy()` fills the family defaults):
     tensors         {tensor: {"elem_bytes"}} of the tensors the pointer params name
                     (CuTe: optionally the first launch's "shape" and "strides", which
                     pick the base of a descriptor over an aliased tensor, tma.py)
+    gsync           True (opt-in): the global-synchronization events of gsev.py (kir.md change
+                    18: sync tensors, gsig/gwait/gclaim, relay slots, named_bar events),
+                    Facts.sync; a kernel with no sync tensor translates as without it
+    sync_tensors    [tensor] (policy gsync): tensors the case declares sync tensors
+    claims          "representative" (policy gsync): a claim's old value is the value the
+                    CTAs claiming in turn read (gsev.py)
+    relay_channels  [{symbol, start, slots, stride, name?}] (policy gsync): shared-memory
+                    relay channels (gsev.py)
+    protocols       [{"tensor", "start"?}]: protocol regions on the tensors' words, cut out
+                    before the CFG shape check and read per CTA from `__proto<k>`
+                    (proto.py; frontend_ptx.md "Protocol regions"); no sync tensors
     p1              True or ["P1-1"]: the P1 pass of P1-1 (CuTe only, tmem.py): the roles
                     also carry the tmem, tmem_wait and named_bar events of P1-1, a role
                     whose warps issue an mbarrier wait, arrive or commit only in part is
@@ -139,10 +150,13 @@ from . import (  # noqa: E402
     bulk,
     cfg as C,
     cluster,
+    gsev,
+    gsync,
     interp,
     mem as M,
     ops,
     parse,
+    proto,
     regions as R,
     sync,
     tma,
@@ -191,7 +205,12 @@ class Facts:
     tmem: dict | None = None
     p1: list = field(default_factory=list)
     cta_threads: int = 0
+    sync: dict = field(default_factory=dict)  # policy gsync: {sync tensor: word bits}
     refusals: list = field(default_factory=list)
+    # "claims" when the KIR leans on a representative schedule (gsev.py)
+    representative: list = field(default_factory=list)
+    # policy protocols: [(proto.Region, proto.Record)] of the regions the roles reached
+    protocols: list = field(default_factory=list)
 
 
 class _Handoffs(Exception):
@@ -205,12 +224,12 @@ class _Handoffs(Exception):
 
 def translate(ptx_text: str, entry: str, launch_records: list, pol: dict) -> Facts:
     facts = Facts(entry)
+    run = _translate_gsync if pol.get("gsync") is True else _translate
     try:
-        _refused(facts, _translate, facts, ptx_text, entry, launch_records, pol)
+        _refused(facts, run, facts, ptx_text, entry, launch_records, pol)
     except _Handoffs as h:
         facts = Facts(entry)
-        _refused(facts, _translate, facts, ptx_text, entry, launch_records, pol,
-                 h.channels)  # fmt: skip
+        _refused(facts, run, facts, ptx_text, entry, launch_records, pol, h.channels)
         if facts.refusals:  # the first refusal, and why the channels did not carry it
             kind = "error" if facts.refusals[0]["kind"] == "error" else h.first.kind
             facts.refusals = [{"kind": kind, "msg": f"{h.first} (translated again "
@@ -234,6 +253,45 @@ def _refused(facts, fn, *args) -> None:
         facts.refusals.append({"kind": "gap", "msg": str(e)})
     except Exception as e:  # a PtxSyntaxError, bad inputs or a bug: refused, not raised
         facts.refusals.append({"kind": "error", "msg": f"{type(e).__name__}: {e}"})
+
+
+def _translate_gsync(facts, ptx_text, entry, records, pol, handoffs=None) -> None:
+    """_translate with the global-synchronization events (policy gsync): again with more
+    sync tensors while a translation finds some (gsev.Restart, or a tensor the variant
+    reads as metadata and writes), at most 8 times."""
+    sync = set(pol.get("sync_tensors") or ())
+    confined = {
+        p["tensor"] for p in pol.get("protocols") or ()
+    }  # proto.py: no sync words
+    try:
+        sites = gsync.function_census(
+            parse.parse(ptx_text), entry, gsync.HELPERS, pol.get("src_root", "")
+        )["sites"]
+        sync |= gsev.seed(sites, pol.get("params") or [], pol.get("tensors") or {})
+    except Exception:  # noqa: BLE001 - the seed only saves restarts
+        pass
+    sync -= confined
+    for _ in range(8):
+        f = Facts(entry)
+        try:
+            _translate(f, ptx_text, entry, records, {**pol, "_sync": sync}, handoffs)
+        except gsev.Restart as r:
+            if r.names & confined:
+                raise interp.Unsupported("protocol", entry, f"the protocol tensors "
+                                         f"{sorted(r.names & confined)} would be sync tensors")  # fmt: skip
+            sync |= r.names
+            continue
+        meta_written = {n for n, t in f.tensors.items() if t["metadata"]} & set(
+            f.written
+        )
+        if meta_written - sync:
+            sync |= meta_written
+            continue
+        facts.__dict__.update(f.__dict__)
+        return
+    raise interp.Unsupported(
+        "gsync", entry, f"the sync tensors do not settle ({sorted(sync)})", "error"
+    )
 
 
 def _channels(cands: dict, loads: dict) -> dict:
@@ -268,6 +326,20 @@ def _translate(facts, ptx_text, entry, records, pol, handoffs=None) -> None:
     extern = {v.name for v in module.vars + fn.vars if v.space == "shared" and v.extern}
     p1 = tmem.P1(specs, extern) if specs else None  # interp.Kernel.p1
     switches = C.lower_switches(fn)
+    regions = []
+    # work anchors by instruction (the rewrite below keeps the other instructions' objects)
+    work_sites = _sites(fn, (pol.get("work") or {}).get("sites", ()))
+    if pol.get(
+        "protocols"
+    ):  # protocol regions cut out before the shape check (proto.py)
+        cfg0 = C.build(fn, check_exits=False)
+        roles0, _ = C.roles(cfg0, pol["family"])
+        try:
+            regions = proto.find(fn, cfg0, roles0, [p["tensor"] for p in pol["protocols"]],
+                                 pol["params"])  # fmt: skip
+        except proto.ProtocolError as e:
+            raise interp.Unsupported("protocol", fn.name, str(e)) from None
+        fn = proto.rewrite(fn, regions)
     cfg = C.build(fn)
     roles, dispatch = C.roles(cfg, pol["family"])
     locs, srclocs = _locs(fn, pol)
@@ -291,13 +363,20 @@ def _translate(facts, ptx_text, entry, records, pol, handoffs=None) -> None:
     work = pol.get("work") or {}
     k = interp.Kernel(fn, mem, locs, facts.block, facts.cluster, pol["max_iters"],
                  split=pol["roles"] == "warps", vectorize=bool(pol.get("vectorize")),
-                 work=_sites(fn, work.get("sites", ())),
+                 work=work_sites,
                  work_fields=tuple(work.get("fields", ())), work_mode=work.get("mode", "gate"),
                  work_per=dict(work.get("per", {})),
                  srclocs=srclocs, p1=p1, switches=switches,
                  captures={} if dispatch is not None else None,
                  gate_at=dispatch.gate if dispatch is not None else None,
                  handoffs=handoffs)  # fmt: skip
+    k.protocols = {r.k: r for r in regions}
+    spins = None
+    if pol.get("gsync") is True:
+        k.gsync = gsev.State(fn, pol.get("_sync") or set())
+        k.gsync.claims = pol.get("claims") == "representative"
+        k.gsync.channels = list(pol.get("relay_channels") or ())
+        spins = k.gsync.spins if k.gsync.sync or k.gsync.spins else None
     translators, first = [], None
     for role in roles:
         warps = role.warps or tuple(range(facts.block[0] // 32))
@@ -306,7 +385,7 @@ def _translate(facts, ptx_text, entry, records, pol, handoffs=None) -> None:
                 raise interp.Unsupported(
                     "role", role.name, f"warps {warps} are not contiguous"
                 )
-            tree = R.build(cfg, role)
+            tree = R.build(cfg, role, spins)
             got = _role(k, tree, role.name, warps[0], len(warps), pol, role.gate)
         except interp.DataRoot as e:
             if handoffs is not None:
@@ -314,6 +393,8 @@ def _translate(facts, ptx_text, entry, records, pol, handoffs=None) -> None:
             # the later roles' stores may put a handoff channel that carries the value
             first = first or e
             continue
+        except gsev.Restart:  # more sync tensors: translated again (_translate_gsync)
+            raise
         except Exception:
             if first is not None:  # the first refusal, as without handoffs
                 raise first from None
@@ -332,6 +413,9 @@ def _translate(facts, ptx_text, entry, records, pol, handoffs=None) -> None:
     facts.barriers = mem.barriers(translators)
     interp.check_capture_barriers(k, mem.arrays)
     facts.clc = sync.finish(translators)
+    facts.protocols = [
+        (r, k.protocol_records[r.k]) for r in regions if r.k in k.protocol_records
+    ]
     facts.tmem = p1.top(translators) if p1 is not None else None
     if p1 is not None and p1.bulk is not None and bulk.finish(p1.bulk, translators):
         facts.p1 = ["P1-1", "P1-2"] if facts.tmem is not None else ["P1-2"]
@@ -374,6 +458,15 @@ def _translate(facts, ptx_text, entry, records, pol, handoffs=None) -> None:
         ]
     )
     facts.params = dict(sorted(mem.used_params.items()))
+    if k.gsync is not None:
+        facts.representative = sorted(k.gsync.used)
+        facts.sync = {n: mem.tensors[n]["elem_bytes"] * 8 for n in sorted(k.gsync.sync)
+                      if n in mem.tensors}  # fmt: skip
+        for n in facts.sync:
+            t = facts.tensors.setdefault(
+                n, {"uses": [], "elem_bytes": mem.tensors[n]["elem_bytes"]}
+            )
+            t["metadata"] = False
 
 
 def _role(k, tree, name, w0, nw, pol, gate=None) -> list:
@@ -393,7 +486,7 @@ def _role(k, tree, name, w0, nw, pol, gate=None) -> list:
         except interp.SplitWarps as s:
             todo = s.groups + todo
             continue
-        except interp.Unsupported:
+        except (interp.Unsupported, gsev.Restart):
             raise
         except Exception as e:  # a bug of the core (an ExprError, ...): refused there
             tr.fail(tr.cur, f"{type(e).__name__}: {e}", "error")
@@ -540,6 +633,7 @@ def _sites(fn, sites) -> dict:
 
 _ADDR_OPS = ("add", "sub", "mul", "shl")  # wraps are P0-1 violations on address paths
 _MEM_EVENTS = ("gload", "gstore", "gatomic")
+_SYNC_EVENTS = ("gsig", "gwait", "gclaim")
 
 
 def _kind(node):
@@ -622,6 +716,8 @@ def mark_addr(kir: dict) -> None:
             seeds.append(s["offsets"])  # the TExpr arithmetic and the Exprs it splats
         if s["op"] == "event" and s["ev"] in ("tma_load", "tma_store", "tma_reduce"):
             seeds += s["coords"]
+        if s["op"] == "event" and s["ev"] in _SYNC_EVENTS:  # a sync word's index
+            seeds.append(s["index"])
         roots = [v for k, v in s.items() if isinstance(v, dict) and "e" in v] + s.get(
             "coords", []
         )

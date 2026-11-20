@@ -1,0 +1,274 @@
+{
+ "kir_version": 1,
+ "kernel": "claim_turns",
+ "source": "tests/lean/gsync/claim_turns",
+ "ir": "ptx",
+ "grid": [
+  {
+   "e": "const",
+   "v": 2,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "ORDER",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "ctr",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "workspace",
+   "metadata": false,
+   "sync": {
+    "width": 32
+   }
+  },
+  {
+   "name": "mail",
+   "kind": "global",
+   "elem_bytes": 8,
+   "shape": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "workspace",
+   "metadata": false,
+   "sync": {
+    "width": 64
+   }
+  },
+  {
+   "name": "out",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "const",
+     "v": 2,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "output",
+   "metadata": false
+  }
+ ],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "w",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "if",
+     "cond": {
+      "e": "cmp",
+      "o": "eq",
+      "a": {
+       "e": "pid",
+       "axis": 0,
+       "w": 32
+      },
+      "b": {
+       "e": "var",
+       "name": "ORDER",
+       "w": 32
+      },
+      "w": 1
+     },
+     "then": [
+      {
+       "op": "event",
+       "ev": "gclaim",
+       "loc": "ct.py:10",
+       "tensor": "ctr",
+       "index": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "value": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "var": "k",
+       "w": 32
+      },
+      {
+       "op": "event",
+       "ev": "gsig",
+       "loc": "ct.py:11",
+       "tensor": "mail",
+       "index": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "value": {
+        "e": "const",
+        "v": 4294967296,
+        "w": 64
+       }
+      },
+      {
+       "op": "event",
+       "ev": "gstore",
+       "loc": "ct.py:12",
+       "tensor": "out",
+       "offsets": {
+        "t": "splat",
+        "a": {
+         "e": "var",
+         "name": "k",
+         "w": 32
+        },
+        "shape": [
+         1
+        ],
+        "w": 32
+       },
+       "mask": null
+      }
+     ],
+     "else": [
+      {
+       "op": "event",
+       "ev": "gwait",
+       "loc": "ct.py:20",
+       "tensor": "mail",
+       "index": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "target": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "gclaim",
+       "loc": "ct.py:21",
+       "tensor": "ctr",
+       "index": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "value": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "var": "k",
+       "w": 32
+      },
+      {
+       "op": "event",
+       "ev": "gstore",
+       "loc": "ct.py:22",
+       "tensor": "out",
+       "offsets": {
+        "t": "splat",
+        "a": {
+         "e": "var",
+         "name": "k",
+         "w": 32
+        },
+        "shape": [
+         1
+        ],
+        "w": 32
+       },
+       "mask": null
+      }
+     ],
+     "loc": "k.py:1"
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "claim_turns",
+  "inputs": [
+   {
+    "name": "contradicted",
+    "params": {
+     "ORDER": 1
+    },
+    "intended_writes": {
+     "out": "all"
+    },
+    "capacity": {
+     "ctas": 2
+    }
+   },
+   {
+    "name": "agreed",
+    "params": {
+     "ORDER": 0
+    },
+    "intended_writes": {
+     "out": "all"
+    },
+    "capacity": {
+     "ctas": 2
+    }
+   }
+  ]
+ },
+ "representative": [
+  "claims"
+ ]
+}

@@ -1,0 +1,259 @@
+{
+ "kir_version": 1,
+ "kernel": "relay",
+ "source": "tests/lean/gsync/relay",
+ "ir": "ptx",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "OFF",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "ctr",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "workspace",
+   "metadata": false,
+   "sync": {
+    "width": 32
+   }
+  },
+  {
+   "name": "out",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "const",
+     "v": 4,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "output",
+   "metadata": false
+  }
+ ],
+ "barriers": [],
+ "roles": [
+  {
+   "name": "p",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "j",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "const",
+      "v": 3,
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "loc": "rl.py:10",
+     "body": [
+      {
+       "op": "event",
+       "ev": "gclaim",
+       "loc": "rl.py:11",
+       "tensor": "ctr",
+       "index": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "value": {
+        "e": "const",
+        "v": 1,
+        "w": 32
+       },
+       "var": "k",
+       "w": 32
+      },
+      {
+       "op": "event",
+       "ev": "rput",
+       "loc": "rl.py:12",
+       "chan": "ring",
+       "ord": {
+        "e": "var",
+        "name": "j",
+        "w": 32
+       },
+       "field": 0,
+       "value": {
+        "e": "var",
+        "name": "k",
+        "w": 32
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "c",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "j",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "const",
+      "v": 3,
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "loc": "rl.py:20",
+     "body": [
+      {
+       "op": "event",
+       "ev": "rget",
+       "loc": "rl.py:21",
+       "chan": "ring",
+       "ord": {
+        "e": "bin",
+        "o": "add",
+        "a": {
+         "e": "var",
+         "name": "j",
+         "w": 32
+        },
+        "b": {
+         "e": "var",
+         "name": "OFF",
+         "w": 32
+        },
+        "w": 32
+       },
+       "field": 0,
+       "var": "v",
+       "w": 32
+      },
+      {
+       "op": "event",
+       "ev": "gstore",
+       "loc": "rl.py:22",
+       "tensor": "out",
+       "offsets": {
+        "t": "splat",
+        "a": {
+         "e": "var",
+         "name": "v",
+         "w": 32
+        },
+        "shape": [
+         1
+        ],
+        "w": 32
+       },
+       "mask": null
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "case": {
+  "name": "relay",
+  "inputs": [
+   {
+    "name": "written",
+    "params": {
+     "OFF": 0
+    },
+    "intended_writes": {
+     "out": [
+      [
+       0,
+       3
+      ]
+     ]
+    },
+    "capacity": {
+     "ctas": 1
+    }
+   },
+   {
+    "name": "unwritten",
+    "params": {
+     "OFF": 1
+    },
+    "intended_writes": {
+     "out": [
+      [
+       0,
+       3
+      ]
+     ]
+    },
+    "capacity": {
+     "ctas": 1
+    }
+   }
+  ]
+ },
+ "representative": [
+  "claims"
+ ]
+}
