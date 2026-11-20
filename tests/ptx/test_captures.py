@@ -25,8 +25,9 @@ unless the arithmetic may wrap at its width; one through a strength-reduced loop
 offset keeps the capture under a KIR assume; one under elect.sync covers every lane that
 may be elected; a TMA landing through a packed sub-byte descriptor may touch any byte.
 Each arm of an if (on a uniform value or per warp) counts the default's fork barriers
-from the If. The op table's shared-memory writers are all covered: each is one of
-interp.CAPTURE_WRITERS and reaches a capture hook through the dispatch of its class.
+from the If. The op table's shared-memory writers are all covered: each has a kind of
+interp.SHARED_WRITERS and reaches a capture hook through the dispatch of its class and a
+P1-2 rule (bulk.py).
 """
 
 import re
@@ -45,6 +46,7 @@ if __package__ in (None, ""):
     __package__ = "lkv_root.tests.ptx"  # noqa: A001
 
 from ...frontend.ptx import (  # noqa: E402
+    bulk,
     cluster,
     expr as E,
     interp,
@@ -181,24 +183,45 @@ def tma(at: int) -> str:
 def reaches_a_hook(mn: str, cls: str) -> bool:
     """mn, an op-table row of class cls, reaches _capture_store or _capture_clobber at a
     shared address through the dispatch Translator.execute takes for its class (event:
-    _capture_writes, drop: _shared_drop)."""
+    _capture_write, drop: _shared_drop)."""
     hits = []
     smem = E.var("%s:global_smem", 32)
     tma_ = SimpleNamespace(staging_store=lambda *a: None, close_staging=lambda *a: None)
     mem = SimpleNamespace(address=lambda *a: smem, execute=lambda *a: None, tma=tma_)
     stub = SimpleNamespace(k=SimpleNamespace(mem=mem, captures={}), uniform=lambda v: v,
-                           operand=lambda *a: E.const(16, 32),
+                           copy_size=lambda *a: 16,
                            _footprint=lambda *a: ("global_smem", 0, 16),
                            _capture_clobber=lambda *a, **kw: hits.append(mn),
                            _capture_store=lambda *a: hits.append(mn),
                            _handoff_store=lambda *a: None, _tracked=lambda: True)  # fmt: skip
     tr = cast(interp.Translator, stub)  # only the attributes the two dispatchers read
+    stub._capture_write = lambda i, mn, **kw: interp.Translator._capture_write(
+        tr, i, mn, **kw
+    )
     i = SimpleNamespace(opcode=mn + ".b32", operands=(("mem", None),) * 3)
     with mock.patch.object(cluster, "_address", lambda *a: smem):
         if cls == "event":
-            interp.Translator._capture_writes(tr, i, mn)
+            interp.Translator._capture_write(tr, i, mn)
         elif cls == "drop":
             interp.Translator._shared_drop(tr, i, mn)
+    return bool(hits)
+
+
+def reaches_p1_2(mn: str) -> bool:
+    """mn, an op-table row, reaches a P1-2 rule of shared writes (bulk.py: _write,
+    landing, fixed, _stmatrix) through bulk.execute."""
+    hits = []
+    smem = E.var("%s:global_smem", 32)
+    stub = SimpleNamespace(k=SimpleNamespace(mem=SimpleNamespace(address=lambda *a: smem)),
+                           copy_size=lambda *a: 16)  # fmt: skip
+    i = SimpleNamespace(opcode=mn + ".b32",
+                        operands=(("mem", None), ("mem", None), ("imm", 16)))  # fmt: skip
+
+    def hit(*_a, **_kw) -> None:
+        hits.append(mn)
+
+    with mock.patch.multiple(bulk, _write=hit, landing=hit, fixed=hit, _stmatrix=hit):
+        bulk.execute(bulk.State(), cast(interp.Translator, stub), i, mn)
     return bool(hits)
 
 
@@ -340,45 +363,41 @@ class Captures(unittest.TestCase):
         x = E.var("c", 32)
         b = E.bin("lshr", E.bin("ashr", x, E.const(31, 32)), E.const(30, 32))
         pow2 = E.bin("sub", x, E.bin("and", E.bin("add", x, b), E.const(-4, 32)))
-        self.assertEqual(interp._capture_iv(pow2), (-3, 3))
+        self.assertEqual(interp.bounds(pow2), (-3, 3))
         h = E.trunc(E.bin("lshr", E.bin("mul", E.ext(x, 64, True), E.const(715827883, 64)),
                           E.const(32, 64)), 32)  # fmt: skip
         q = E.bin("add", h, E.bin("lshr", h, E.const(31, 32)))
         magic = E.bin("sub", x, E.bin("mul", q, E.const(6, 32)))
-        self.assertEqual(interp._capture_iv(magic), (-5, 5))
-        self.assertIsNone(interp._capture_iv(E.bin("add", x, E.const(4, 32))))
+        self.assertEqual(interp.bounds(magic), (-5, 5))
+        self.assertIsNone(interp.bounds(E.bin("add", x, E.const(4, 32))))
         # no bounds where the operation may wrap at its width (a sum of two selects of
         # 0x7FFFFFF0 or 0, plus 64, is 32 if both are taken), nor from a multiplier
         # that is no mul.hi.s32 operand (2^52 / 6 rounded up, shifted right by 20)
         big, z = E.const(0x7FFFFFF0, 32), E.const(0, 32)
         p, r = (E.cmp("ne", E.var(v, 32), z) for v in ("p", "r"))
         two = E.bin("add", E.select(p, big, z), E.select(r, big, z))
-        self.assertIsNone(interp._capture_iv(E.bin("add", two, E.const(64, 32))))
+        self.assertIsNone(interp.bounds(E.bin("add", two, E.const(64, 32))))
         h20 = E.bin("ashr", E.trunc(E.bin("lshr", E.bin("mul", E.ext(x, 64, True),
                     E.const(-(-(1 << 52) // 6), 64)), E.const(32, 64)), 32), E.const(20, 32))  # fmt: skip
         q20 = E.bin("add", h20, E.bin("lshr", h20, E.const(31, 32)))
         self.assertIsNone(
-            interp._capture_iv(E.bin("sub", x, E.bin("mul", q20, E.const(6, 32))))
+            interp.bounds(E.bin("sub", x, E.bin("mul", q20, E.const(6, 32))))
         )
         # a mask keeps only the bits x can have: (x in [0, 1]) & 126 is 0
         bit = E.bin("lshr", E.bin("urem", E.pid(0), E.const(4, 32)), E.const(1, 32))
-        self.assertEqual(
-            interp._capture_iv(E.bin("and", bit, E.const(126, 32))), (0, 0)
-        )
+        self.assertEqual(interp.bounds(E.bin("and", bit, E.const(126, 32))), (0, 0))
 
     def test_zero_extension_of_a_negative_value(self):
         # x in [-1, 6] at 16 bits: its zero extension is 0..6 or 65535, its sign extension
         # -1..6, so a footprint 4 * zext(x) reaches 262140
         x = E.bin("sub", E.bin("and", E.var("n", 16), E.const(7, 16)), E.const(1, 16))
-        self.assertEqual(interp._capture_iv(x), (-1, 6))
+        self.assertEqual(interp.bounds(x), (-1, 6))
         z = E.ext(x, 32, False)
-        self.assertEqual(interp._capture_iv(z), (0, 65535))
+        self.assertEqual(interp.bounds(z), (0, 65535))
+        self.assertEqual(interp.bounds(E.bin("mul", z, E.const(4, 32))), (0, 262140))
+        self.assertEqual(interp.bounds(E.ext(x, 32, True)), (-1, 6))
         self.assertEqual(
-            interp._capture_iv(E.bin("mul", z, E.const(4, 32))), (0, 262140)
-        )
-        self.assertEqual(interp._capture_iv(E.ext(x, 32, True)), (-1, 6))
-        self.assertEqual(
-            interp._capture_iv(E.ext(E.bin("and", x, E.const(7, 16)), 32, False)),
+            interp.bounds(E.ext(E.bin("and", x, E.const(7, 16)), 32, False)),
             (0, 7),
         )
 
@@ -387,9 +406,9 @@ class Captures(unittest.TestCase):
         # 4 * sext(p) reaches -4
         p = E.cmp("slt", E.var("n", 32), E.const(4, 32))
         s = E.ext(p, 32, True)
-        self.assertEqual(interp._capture_iv(s), (-1, 0))
-        self.assertEqual(interp._capture_iv(E.ext(p, 32, False)), (0, 1))
-        self.assertEqual(interp._capture_iv(E.bin("mul", s, E.const(4, 32))), (-4, 0))
+        self.assertEqual(interp.bounds(s), (-1, 0))
+        self.assertEqual(interp.bounds(E.ext(p, 32, False)), (0, 1))
+        self.assertEqual(interp.bounds(E.bin("mul", s, E.const(4, 32))), (-4, 0))
 
     def test_strength_reduced_offset_is_assumed(self):
         # an offset carried through a loop (no static bounds): the capture stays known
@@ -462,10 +481,11 @@ class Captures(unittest.TestCase):
         self.assertEqual(run(after=tma(0)).refusals, [])
 
     def test_op_table_writers_covered(self):
-        # every op-table row (or prefix family) that may write shared memory is one of
-        # CAPTURE_WRITERS, and reaches a capture hook through the dispatch execute() takes
-        # for its class, but TMA tensor loads (tma.py reports their landings) and the
-        # mbarrier objects (their arrays, check_capture_barriers)
+        # every op-table row (or prefix family) that may write shared memory has a kind of
+        # interp.SHARED_WRITERS, and reaches a capture hook through the dispatch execute()
+        # takes for its class, but TMA tensor loads (tma.py reports their landings) and the
+        # mbarrier objects (their arrays, check_capture_barriers), and a P1-2 rule of
+        # bulk.execute, but the kinds P1-2 reads elsewhere (bulk.ELSEWHERE)
         reads = re.compile(
             r"ld\.|cvta\.|mapa\.|(cp|cp\.reduce)\.async\.bulk(\.tensor\.\dd)?\.global\.shared"
             r"|cp\.reduce\.async\.bulk\.tensor\.\dd\.global\.shared|tensormap\.cp_fenceproxy"
@@ -474,20 +494,21 @@ class Captures(unittest.TestCase):
         )  # fmt: skip
         maybe = re.compile(r"shared|^stmatrix|^(st|atom|red)(\.|$)|^mbarrier\.|^tcgen05\."
                            r"(alloc|commit)|^clusterlaunchcontrol|^tensormap\.replace")  # fmt: skip
-        elsewhere = re.compile(r"cp\.async\.bulk\.tensor\.\dd\.shared|tcgen05\.commit"
-                               r"|mbarrier\.(init|arrive|expect_tx|complete_tx)")  # fmt: skip
-        writers = [re.compile(p) for p in interp.CAPTURE_WRITERS]
         rows = [(k, cls) for k, (cls, _r) in ops.TABLE.items()]
         rows += [(k, cls) for cls, _r, keys in ops._FAMILIES for k in keys]
         rows = [(k, cls) for k, cls in rows
                 if cls != "refuse" and maybe.search(k) and not reads.match(k)]  # fmt: skip
+        self.assertEqual([k for k, _c in rows if interp.shared_write(k) is None], [])
         self.assertEqual(
-            [k for k, _c in rows if not any(w.match(k) for w in writers)], []
-        )
-        self.assertEqual(
-            [k for k, c in rows if not elsewhere.match(k) and not reaches_a_hook(k, c)],
+            [k for k, c in rows if interp.shared_write(k) not in ("tma.load", "mbarrier")
+             and not reaches_a_hook(k, c)],
             [],
-        )
+        )  # fmt: skip
+        self.assertEqual(
+            [k for k, _c in rows
+             if interp.shared_write(k) not in bulk.ELSEWHERE and not reaches_p1_2(k)],
+            [],
+        )  # fmt: skip
 
 
 if __name__ == "__main__":

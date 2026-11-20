@@ -34,7 +34,6 @@ and segment_dims.
 """
 
 import math
-import re
 import struct
 import sys
 import unittest
@@ -49,7 +48,7 @@ if __package__ in (None, ""):
     __package__ = "lkv_root.tests.ptx"  # noqa: A001
 
 from ...frontend import kir  # noqa: E402
-from ...frontend.ptx import interp, ops, tma, translate as T  # noqa: E402
+from ...frontend.ptx import interp, tma, translate as T  # noqa: E402
 
 SRC = "/src"
 _DECL = {
@@ -1120,7 +1119,7 @@ class InKernel(unittest.TestCase):
     def test_other_shared_writes_close_the_buffer(self):
         # a generic st/atom/red reaching the buffer through cvta.shared (its rank word:
         # 16 = rank 2 - 1), or an atom/red.shared, closes it, as a st.shared does; one
-        # of static bytes outside it does not; any write of tma.SHARED_WRITES closes it;
+        # of static bytes outside it does not; any write of tma.CLOSE_ALL closes it;
         # so does a st.shared, stmatrix or atom/red.shared under a data predicate (which
         # skips the instruction's execution)
         zero = "    st.shared.b32 [%r42], %r43;\n"
@@ -1187,18 +1186,13 @@ class InKernel(unittest.TestCase):
             self.assertEqual(run(body, KP, tensors=KT, cluster=(2, 1, 1)).refusals, [])
 
     def test_every_shared_writer_closes_the_buffer(self):
-        # every op-table row that writes shared memory (interp.CAPTURE_WRITERS) closes the
-        # open buffers: by tma.SHARED_WRITES (whatever its bytes), as a write whose bytes
-        # are compared with them (st.shared, generic st/atom/red, atom/red.shared), or as
-        # the buffer's own tensormap.replace
-        writers = [re.compile(p) for p in interp.CAPTURE_WRITERS]
-        compared = re.compile(r"st(\.shared)?$|(atom|red)(\.shared)?\."
-                              r"(add|and|cas|dec|exch|inc|max|min|or|xor)$"
-                              r"|tensormap\.replace\.\w+\.shared$")  # fmt: skip
-        missing = [k for k, (cls, _r) in ops.TABLE.items()
-                   if cls != "refuse" and any(w.match(k) for w in writers)
-                   and not k.startswith(tma.SHARED_WRITES) and not compared.match(k)]  # fmt: skip
-        self.assertEqual(missing, [])
+        # every kind of shared-memory write (interp.SHARED_WRITERS) closes the open
+        # buffers: by tma.CLOSE_ALL (whatever its bytes), as a write whose bytes are
+        # compared with them (st.shared, generic st/atom/red, atom/red.shared), or as the
+        # buffer's own tensormap.replace
+        kinds = {k for _p, k in interp.SHARED_WRITERS}
+        self.assertEqual(kinds - tma.CLOSE_ALL,
+                         {"st.shared", "generic", "atom.shared", "tensormap.replace"})  # fmt: skip
 
     def test_zeroed_through_a_register_known_zero(self):
         # LLVM zeroes the buffer with a register an earlier loop's body sets to 0, read

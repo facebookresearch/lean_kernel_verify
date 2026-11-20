@@ -7,7 +7,8 @@
 the copy instructions and their KIR events.
 
     PREFIXES                          the event mnemonics mem.Memory.execute routes here
-    SHARED_WRITES                     the other shared-memory writes (staging buffers)
+    CLOSE_ALL                         the shared-memory writes that close every staging
+                                      buffer
     Tma(mem, records)                 one per kernel variant (mem.Memory.tma); mem.py and
         symbol(name, w)               interp.py route here the address of a descriptor
         cvta_param(tr, i)             parameter, cvta.param, every st.shared (a tensormap
@@ -59,7 +60,7 @@ Descriptors.
     shared memory by the role closes the open buffers it may overlap (a later replace
     or cp_fenceproxy of one is refused): a st.shared, or a generic st/atom/red at a %S:
     (or %s:) address, the same bytes, unless its bytes are static and outside them; a
-    write of SHARED_WRITES closes them all. The zeroing, the replaces and the
+    write of a kind in CLOSE_ALL closes them all. The zeroing, the replaces and the
     cp_fenceproxy must be in one KIR statement list (masked branches only: a uniform
     branch or loop between them could skip one), with at least one issuing thread each.
     A TMA instruction whose descriptor address is the very address expression a
@@ -149,16 +150,14 @@ from . import bulk, cluster, expr as E, launch, ops
 from .interp import _any_elected, Data, Translator
 
 PREFIXES = ("cp.async.bulk", "cp.reduce.async.bulk", "tensormap.")  # mem.py routes here
-# The writes of shared memory but st.shared, generic st/atom/red and tensormap.replace,
-# each closing every open staging buffer of its role (mem.Memory.execute, interp.py):
-# stmatrix, cp.async, TMA and bulk copies and bulk reduces into shared memory, mbarrier
-# objects (a tcgen05.commit arrives on one), tcgen05.alloc's address, a CLC response,
-# st.async/red.async.
-SHARED_WRITES = (
-    "stmatrix", "cp.async.ca", "cp.async.cg", "cp.async.bulk.shared", "mbarrier.",
-    "tcgen05.alloc", "tcgen05.commit", "clusterlaunchcontrol.try_cancel",
-    "st.async.shared::cluster", "red.async.shared::cluster", "cp.reduce.async.bulk.shared",
-) + tuple(f"cp.async.bulk.tensor.{d}d.shared" for d in range(1, 6))  # fmt: skip
+# The kinds of shared-memory writes (interp.shared_write) that close every open staging
+# buffer of their role (mem.Memory.execute, interp.py), all but st.shared, the generic
+# st/atom/red and atom/red.shared (compared with the buffers' bytes) and tensormap.replace
+# (a buffer's own): stmatrix, cp.async, TMA and bulk copies and bulk reduces into shared
+# memory, mbarrier objects (a tcgen05.commit arrives on one), tcgen05.alloc's address, a
+# CLC response, st.async/red.async.
+CLOSE_ALL = frozenset({"stmatrix", "cp.async", "bulk.load", "bulk.cluster", "st.async",
+                       "tma.load", "clc", "tcgen05.alloc", "mbarrier.inval", "mbarrier"})  # fmt: skip
 # The compilers whose TMA / bulk issuing (module doc) was measured on hardware: CuTe DSL
 # 4.4.2's embedded nvPTXCompiler, DSL 4.6.1's, Triton's ptxas-blackwell (CUDA 13.3), CUDA
 # 13.0 and 12.8 ptxas (12.8 on sm_100a only: it cannot target sm_103a).
@@ -261,8 +260,9 @@ class Tma:
         self.blocks = pol.get("blocks") or {}  # TTGIR descriptor -> block (_messages)
         self.groups: dict = {}  # id(first message) -> its block's group (_message)
         self.later: dict = {}  # id(later message) -> id(first message of its block)
-        self.pos: dict | None = None  # id(instr) -> (its basic block's instrs, index)
-        self.block_of: dict | None = None  # id(instr) -> its block (_kept_in_loops)
+        self.pos: dict | None = (
+            None  # id(instr) -> (its basic block, its instrs, index)
+        )
         # the block sets of the function's natural loops that hold a
         # tensormap.cp_fenceproxy (_kept_in_loops)
         self.fence_loops: list | None = None
@@ -334,23 +334,23 @@ class Tma:
         tr.capture_landing(
             i, cluster._address(tr, i.operands[0]), nb, "cta_mask" in extra
         )
-        if tr.k.p1 is not None and tr.k.p1.bulk is not None:  # P1-2: its landing
+        if (p12 := bulk.of(tr)) is not None:  # P1-2: its landing
             if "cta_mask" in extra:
                 tr.fail(
                     i,
                     "P1-2: a multicast TMA load (it writes other CTAs' shared memory)",
                 )
-            bulk.landing(tr.k.p1.bulk, tr, i, i.operands[0], _hw_bytes(tr, i, d))
+            bulk.landing(p12, tr, i, i.operands[0], _hw_bytes(tr, i, d))
         lanes = self._lanes(tr, i, "TMA load") or _one_thread(tr)
-        nb = len(tr.barriers)
+        uses = len(tr.barriers)  # (_landed_on)
         if d.kind == "kernel":
             self._kernel_load(tr, i, d, coords, (sym, off, extra), lanes)
-            return self._landed_on(tr, i, nb)
+            return self._landed_on(tr, i, uses)
         if d.msg is not None and not self._message(tr, i, d, d.msg, coords, (sym, off)):
             return  # a later message of a block: its first stands for it
         tr.barrier_event("tma_load", sym, off, "thread", lanes=lanes, desc=d.name,
                          coords=coords, **extra)  # fmt: skip
-        self._landed_on(tr, i, nb)
+        self._landed_on(tr, i, uses)
         d.uses.add("tma_load")
         if self.footprint:
             self._footprint(tr, i, "gload", d, coords, None)
@@ -362,9 +362,9 @@ class Tma:
         ops_ = i.operands
         d = self._desc(tr, i, ops_[0])
         coords = self._coords(tr, i, d, ops_[0])
-        if tr.k.p1 is not None and tr.k.p1.bulk is not None:  # P1-2: the store's source
+        if (p12 := bulk.of(tr)) is not None:  # P1-2: the store's source
             tmap = tr.operand_value(ops_[0][1], 64) if d.kind == "kernel" else None
-            bulk.store(tr.k.p1.bulk, tr, i, "tensor_reduce" if reduce else "tensor",
+            bulk.store(p12, tr, i, "tensor_reduce" if reduce else "tensor",
                        ops_[1], _hw_bytes(tr, i, d), tmap)  # fmt: skip
         if d.packed and ("reduce" if reduce else "store") not in _PACKED[d.packed][1]:
             tr.require(E.const(0, 1), f"TMA {'reduce' if reduce else 'store'} through "
@@ -505,10 +505,7 @@ class Tma:
         """The (up to n) later messages of the block whose first is i: the next ones of i's
         opcode and descriptor operand in its basic block, before any other event
         instruction."""
-        if self.pos is None:
-            self.pos = {id(x): (b.instrs, k) for b in self.mem.cfg.blocks.values()
-                        for k, x in enumerate(b.instrs)}  # fmt: skip
-        instrs, k = self.pos[id(i)]
+        _b, instrs, k = self._pos(i)
         t = 1 if "mbarrier" in i.opcode else 0  # its [descriptor, {coords}] operand
         out = []
         for j in instrs[k + 1 :]:
@@ -632,10 +629,6 @@ class Tma:
         ):
             return False
         cfg = self.mem.cfg
-        if self.block_of is None:
-            self.block_of = {
-                id(j): b for b, blk in cfg.blocks.items() for j in blk.instrs
-            }
         if self.fence_loops is None:  # once per function
             self.fence_loops = [
                 blocks
@@ -646,8 +639,17 @@ class Tma:
                     for j in cfg.blocks[b].instrs
                 )
             ]
-        bi, bw = self.block_of.get(id(i)), self.block_of.get(id(got[2]))
+        bi, bw = ((self._pos(x) or (None,))[0] for x in (i, got[2]))
         return not any(bi in blocks and bw not in blocks for blocks in self.fence_loops)
+
+    def _pos(self, i):
+        """(basic block, its instructions, index there) of instruction i, or None (the
+        map built once per kernel)."""
+        if self.pos is None:
+            blocks = self.mem.cfg.blocks.items()
+            self.pos = {id(x): (b, blk.instrs, k) for b, blk in blocks
+                        for k, x in enumerate(blk.instrs)}  # fmt: skip
+        return self.pos.get(id(i))
 
     def _host(self, tr: Translator, i, ptx: str) -> Desc:
         d = self.host.get(ptx)
@@ -860,8 +862,8 @@ class Tma:
                        "descriptor edited in place are not known)")  # fmt: skip
         _key, st = self._stage(tr, i, i.operands[0], f"tensormap.replace.{what}")
         self._active(tr, i, f"tensormap.replace.{what}")
-        if tr.k.p1 is not None and tr.k.p1.bulk is not None:  # P1-2: not an event
-            bulk.fixed(tr.k.p1.bulk, tr, self.mem.address(tr, i.operands[0]), 128,
+        if (p12 := bulk.of(tr)) is not None:  # P1-2: not an event
+            bulk.fixed(p12, tr, self.mem.address(tr, i.operands[0]), 128,
                        "a tensormap staging buffer (tensormap.replace)")  # fmt: skip
         dim = None
         if len(i.operands) == 3:
@@ -896,8 +898,8 @@ class Tma:
             tr.fail(
                 i, "tensormap.cp_fenceproxy to an address that varies across the role"
             )
-        if tr.k.p1 is not None and tr.k.p1.bulk is not None:  # P1-2: a tensormap write
-            bulk.tmap(tr.k.p1.bulk, tr, i, dst)
+        if (p12 := bulk.of(tr)) is not None:  # P1-2: a tensormap write
+            bulk.tmap(p12, tr, i, dst)
         name = f"tmap_{key[0]}_{key[1]}_line{i.line}"
         self._dyn(tr)["descs"][dst] = (
             self._kernel_desc(tr, i, name, st.fields),
@@ -966,13 +968,15 @@ class Tma:
             tr.fail(i, "bulk copy global operand is a shared-memory address", "error")
         name, off, _n = g
         eb = self.mem.tensors[name]["elem_bytes"]
-        n = tr.uniform(tr.as_int(tr.operand(i, size_k, 32), "the bulk copy size"))
-        if n is None or not E.is_const(n) or n[2] <= 0 or n[2] % eb:
+        n = tr.copy_size(i, size_k)
+        if n is None:
+            tr.as_int(tr.operand(i, size_k, 32), "the bulk copy size")
+        if n is None or n % eb:
             tr.fail(
                 i,
                 f"bulk copy of a size that is not a constant number of {eb}-byte elements",
             )
-        return name, off, n[2] // eb, eb
+        return name, off, n // eb, eb
 
     def _bulk_load(self, tr: Translator, i) -> None:
         """cp.async.bulk.shared(::cluster).global.mbarrier::complete_tx::bytes [dst], [src],
@@ -994,12 +998,9 @@ class Tma:
     def _landed_on(tr: Translator, i, nb: int) -> None:
         """P1-2: the mbarrier use of the one tma_load emitted for the load at i since the
         role had `nb` uses, for its landing's events (bulk.landed_on)."""
-        if (
-            tr.k.p1 is not None
-            and tr.k.p1.bulk is not None
-            and len(tr.barriers) == nb + 1
-        ):
-            bulk.landed_on(tr.k.p1.bulk, i, tr.barriers[-1])
+        p12 = bulk.of(tr)
+        if p12 is not None and len(tr.barriers) == nb + 1:
+            bulk.landed_on(p12, i, tr.barriers[-1])
 
     def _bulk_out(self, tr: Translator, i, kind: str) -> None:
         """cp.async.bulk.global.shared::cta.bulk_group / cp.reduce.async.bulk.global.

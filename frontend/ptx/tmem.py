@@ -9,9 +9,8 @@ so that the P1 KIR is the P0 KIR plus `tmem`, `tmem_wait` and `named_bar` events
 top-level `tmem` (references/kir.md change 10); for TLX/Triton (specs ["P1-2"]) the P1-2
 events of bulk.py and `named_bar` (change 15).
 
-    P1(specs, extern)               per-kernel state (the P1 specs; the .extern shared
-                                    symbols, bulk.State); translate.py hands it to
-                                    interp.Kernel.p1 when the policy asks for P1 ("p1")
+    P1(specs)                       per-kernel state (the P1 specs); translate.py hands it
+                                    to interp.Kernel.p1 when the policy asks for P1 ("p1")
       .execute(tr, i, mn)           before the P0 rule of an instruction (interp.py): adds
                                     its P1 event, if any; the P0 rule still runs
       .issued(tr, ev, var, act)     an mbarrier event about to be issued (interp._issue)
@@ -80,7 +79,6 @@ role of several warps; R10 a role whose cp/mma and commits are not all issued al
 earlier cp/mma.
 """
 
-import math
 import re
 import weakref
 from dataclasses import dataclass, field
@@ -109,12 +107,12 @@ class _Role:
 
 
 class P1:
-    def __init__(self, specs=("P1-1",), extern=()):
+    def __init__(self, specs=("P1-1",)):
         self.specs = tuple(specs)  # the P1 specs whose events the pass adds
         self._roles: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
         self._index: dict = {}  # id(instr) -> its index in fn.instructions() (site)
         # P1-2 (bulk.py): bulk stores, groups and writes of shared memory and tensormaps
-        self.bulk = bulk.State(extern) if "P1-2" in self.specs else None
+        self.bulk = bulk.State() if "P1-2" in self.specs else None
 
     def _role(self, tr: interp.Translator) -> _Role:
         r = self._roles.get(tr)
@@ -129,9 +127,9 @@ class P1:
             bulk.execute(self.bulk, tr, i, mn, maybe)
         if maybe:
             return
+        if mn in _NAMED_BARS or mn.startswith(("bar.red.", "barrier.red.")):
+            return _named_bar(tr, i, mn)
         if "P1-1" not in self.specs:
-            if mn in _NAMED_BARS or mn.startswith(("bar.red.", "barrier.red.")):
-                _named_bar(tr, i, mn)
             return
         if mn.startswith(("tcgen05.ld.", "tcgen05.st.")):
             self._ld_st(tr, i, mn)
@@ -145,8 +143,6 @@ class P1:
             self._mma(tr, i, mn)
         elif mn.startswith("tcgen05.alloc."):
             self._alloc(tr, i)
-        elif mn in _NAMED_BARS or mn.startswith(("bar.red.", "barrier.red.")):
-            _named_bar(tr, i, mn)
 
     def issued(self, tr: interp.Translator, ev: str, var, act) -> None:
         """An mbarrier event under the thread-varying mask `var`, issued by the threads
@@ -390,7 +386,7 @@ def _pair_mask(tr: interp.Translator, i, mn: str):
     (cluster.pair_mask); None for cta_group::1."""
     if "cta_group::2" not in mn:
         return None
-    if math.prod(tr.k.cluster) % 2:
+    if tr.k.ncta % 2:
         tr.fail(
             i, f"R5: {mn.split('.')[1]} cta_group::2 without a cluster of CTA pairs"
         )

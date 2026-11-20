@@ -23,7 +23,9 @@ with recorded contents (an exact KIR loop over a metadata `load`, without conten
 repeated region, of a tensor the kernel writes undecided); a switch `brx.idx` lowered to
 its compare chain (exact `if`s, a role split per warp, an index not provably in range
 refused); a class loop that leaves its dead registers unclassified; a cycle entered at
-two blocks (made reducible by node splitting); a call (refused, P0-6 undecided); a
+two blocks (made reducible by node splitting), also before a loop whose rotated test
+leaves it to a path back to its header (the path copied into the loop); a call (refused,
+P0-6 undecided); a
 warp-specialized kernel whose default may run no round (the workers' barriers under its
 decision, refused on a decision that is data); a nest of loops translated by classes
 (the final rounds the enclosing fixed-point rounds drop are skipped: the same KIR, fewer
@@ -279,7 +281,9 @@ $END:
         # a decision on data (a strong load) cannot be paired: refused
         g = facts(WS_ZERO.replace("    ld.param.b32 %r4, [k_param_1];\n",
                                   "    ld.relaxed.gpu.global.b32 %r4, [%rd1];\n"), threads=256)  # fmt: skip
-        self.assertIn("run a round is data", g.refusals[0]["msg"] if g.refusals else "")
+        self.assertIn(
+            "run a round depends on data", g.refusals[0]["msg"] if g.refusals else ""
+        )
 
     def test_id_from_memory_is_not_certain(self):
         f = facts("""
@@ -375,9 +379,8 @@ $END:
     ret;""")
         self.ok(f)
         self.assertEqual([r["name"] for r in f.roles], ["default:w0-0", "default:w1-3"])
-        keys = {r["name"]: [e["key"] for e in _stmts(r["body"]) if e.get("ev") == "nb_rep"]
-                for r in f.roles}  # fmt: skip
-        self.assertEqual(len(keys["default:w0-0"]), 4)  # the If on n < 1 and the loop
+        keys = _keys(f)
+        self.assertEqual(len(keys["default:w0-0"]), 2)  # the If on n < 1 and the loop
         self.assertEqual(keys["default:w0-0"], keys["default:w1-3"])
         self.assertNotIn("", keys["default:w0-0"])
 
@@ -467,8 +470,7 @@ $SKIP:
 $END:
     ret;""")
         self.ok(f)
-        keys = {r["name"]: [e["key"] for e in _stmts(r["body"]) if e.get("ev") == "nb_rep"]
-                for r in f.roles}  # fmt: skip
+        keys = _keys(f)
         self.assertEqual(sorted(keys), ["default:w0-0", "default:w1-3"])
         self.assertEqual(keys["default:w0-0"], keys["default:w1-3"])
         self.assertTrue(keys["default:w0-0"] and "" not in keys["default:w0-0"])
@@ -564,6 +566,41 @@ $B:
         self.assertTrue(f.split)
         self.assertEqual({s["status"] for s in sites(f)}, {"counted"})
 
+    def test_rotated_exit_path_is_copied_into_its_loop(self):
+        """After node splitting, a loop that exits to two blocks, one of them the start of
+        a path back to its header ($X, $Y: the only edges into it from outside come
+        before the loop), gets a copy of that path: the loop then exits to $OUT alone and
+        its barrier is counted."""
+        f = facts("""
+    ld.param.u32 %r1, [k_param_1];
+    mov.u32 %r3, 0;
+    setp.eq.s32 %p1, %r1, 0;
+    @%p1 bra $B;
+$A:
+    bar.sync 1, 128;
+$B:
+    add.s32 %r1, %r1, -1;
+    setp.gt.s32 %p2, %r1, 0;
+    @%p2 bra $A;
+$X:
+    add.s32 %r3, %r3, 1;
+$Y:
+    mov.u32 %r4, 0;
+$H:
+    bar.sync 2, 128;
+    setp.ge.s32 %p3, %r3, 4;
+    @%p3 bra $OUT;
+    add.s32 %r4, %r4, 1;
+    setp.lt.s32 %p4, %r4, 2;
+    @%p4 bra $H;
+    bra.uni $X;
+$OUT:
+    ret;""")
+        self.ok(f)
+        self.assertLessEqual({"$A", "$X", "$Y"}, {b.split("~")[0] for b in f.split})
+        self.assertEqual(sorted((s["status"], s["id"], s["rep"]) for s in sites(f)),
+                         [("counted", 1, False)] * 2 + [("counted", 2, False)])  # fmt: skip
+
     def test_call_is_refused(self):
         f = facts("""
     call.uni (_), helper, (0);
@@ -615,7 +652,7 @@ $J:"""
             self.ok(f)
             keys = _keys(f)
             self.assertEqual(sorted(keys), ["default:w0-0", "default:w1-3"])
-            self.assertEqual(len(keys["default:w0-0"]), 4)  # the If on n == 0, the loop
+            self.assertEqual(len(keys["default:w0-0"]), 2)  # the If on n == 0, the loop
             for a, b in zip(keys["default:w0-0"], keys["default:w1-3"]):
                 self.assertNotEqual(a, b)
                 self.assertEqual(a.split("#")[0], b.split("#")[0])
@@ -979,8 +1016,9 @@ def _nest(depth: int) -> str:
 
 
 def _keys(f) -> dict:
-    """role -> the keys of its nb_rep events, in order."""
-    return {r["name"]: [e["key"] for e in _stmts(r["body"]) if e.get("ev") == "nb_rep"]
+    """role -> the keys of its nb_rep begin events (the ones Lean reads), in order."""
+    return {r["name"]: [e["key"] for e in _stmts(r["body"])
+                        if e.get("ev") == "nb_rep" and e["begin"]]
             for r in f.roles}  # fmt: skip
 
 

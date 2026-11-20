@@ -252,7 +252,7 @@ class Handoffs(unittest.TestCase):
     def test_write_through_a_zero_extension_may_overwrite(self):
         # the default stores at the zero extension of x = (n & 7) - 1 in [-1, 6] at 16
         # bits: 0..6 or 65535, so its 4 bytes may cover the channel at 65536 (bounds of
-        # the extension, not of x: interp._capture_iv)
+        # the extension, not of x: interp.bounds)
         f = run(default="    and.b32 %r80, %r20, 7;\n    add.s32 %r81, %r80, -1;\n"
                         "    cvt.u32.u16 %r82, %r81;\n    add.s32 %r84, %r30, %r82;\n"
                         "    st.shared.b32 [%r84], %r1;\n",

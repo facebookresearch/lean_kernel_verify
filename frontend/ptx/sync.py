@@ -99,7 +99,6 @@ arrive) and mbarrier.complete_tx go to cluster.py.
 """
 
 import collections
-import math
 from dataclasses import dataclass
 
 from . import cluster, expr as E, regions as R
@@ -167,7 +166,7 @@ def _clc(tr: Translator, i, mn: str) -> None:
         resp = _address(tr, i)
         zero = E.const(0, 32)
         issued = len(tr.barriers)
-        n = math.prod(tr.k.cluster)
+        n = tr.k.ncta
         if n > 1 and ".multicast::cluster::all" not in mn:
             tr.fail(i, f"{mn} in a cluster of {n} CTAs without .multicast::cluster::all: "
                        "only the asking CTA receives the response (gap)")  # fmt: skip

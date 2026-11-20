@@ -65,6 +65,7 @@ them (mem_event). The holes of the CuTe frontend are closed:
 """
 
 import itertools
+import math
 import re
 from dataclasses import dataclass, field
 from typing import NoReturn, TYPE_CHECKING
@@ -80,32 +81,35 @@ _LANES = tuple(range(32))
 # Entries of a translator's substitution memos (Translator.memo) beyond which they are
 # dropped.
 _MEMO_MAX = 2_000_000
-# The op-table rows that write shared memory (re.match patterns), and where the
-# warp-specialize captures learn of each write (tests/ptx/test_captures.py checks the op
-# table against them): drops in Translator._shared_drop, the other instructions in
-# Translator._capture_writes, TMA tensor loads in tma.py, mbarrier objects (by their
-# arrays, after every role) in check_capture_barriers.
-CAPTURE_WRITERS = (
-    # Translator._shared_drop
-    r"st\.shared$",
-    r"stmatrix",
-    r"(atom|red)\.shared\.",
-    # Translator._capture_writes (generic st/atom/red: at a shared address)
-    r"st$",
-    r"(atom|red)\.(add|and|cas|dec|exch|inc|max|min|or|xor)$",
-    r"cp\.async\.(ca|cg)\.shared",
-    r"cp\.async\.bulk\.shared",
-    r"cp\.reduce\.async\.bulk\.shared",
-    r"(st|red)\.async\.shared",
-    r"clusterlaunchcontrol\.try_cancel",
-    r"tcgen05\.alloc",
-    r"tensormap\.replace\.\w+\.shared$",
-    r"mbarrier\.inval",
-    # tma.py (Translator.capture_landing)
-    r"cp\.async\.bulk\.tensor\.\dd\.shared",
-    # mbarrier objects: their arrays (check_capture_barriers)
-    r"mbarrier\.(init|arrive|expect_tx|complete_tx)",
-    r"tcgen05\.commit",
+# The op-table rows that write shared memory (re.match patterns of the mnemonic, first
+# match) and the kind of each write (shared_write), on which every model of those writes
+# dispatches: the warp-specialize captures (Translator._shared_drop and _capture_write;
+# TMA tensor loads in tma.py; mbarrier objects by their arrays, after every role, in
+# check_capture_barriers), the P1-2 events (bulk.execute; TMA tensor loads and
+# tensormap.replace in tma.py, mbarrier objects in bulk.finish; mbarrier.inval is refused
+# in a P1 pass, sync.py) and the tensormap staging buffers (tma.py, tma.CLOSE_ALL).
+# tests/ptx/test_captures.py checks the op table against them and that each kind reaches
+# the captures and P1-2, tests/ptx/test_tma.py that each closes the staging buffers.
+SHARED_WRITERS = (
+    (r"st\.shared$", "st.shared"),  # drops (Translator._shared_drop): the first three
+    (r"stmatrix", "stmatrix"),
+    (r"(atom|red)\.shared\.", "atom.shared"),
+    # a generic st/atom/red: at a shared address
+    (r"st$|(atom|red)\.(add|and|cas|dec|exch|inc|max|min|or|xor)$", "generic"),
+    (r"cp\.async\.(ca|cg)\.shared", "cp.async"),
+    # bulk copies and reduces into (another CTA's) shared memory, then bulk loads
+    (
+        r"cp\.async\.bulk\.shared::cluster\.shared|cp\.reduce\.async\.bulk\.shared",
+        "bulk.cluster",
+    ),  # fmt: skip
+    (r"cp\.async\.bulk\.shared", "bulk.load"),
+    (r"(st|red)\.async\.shared", "st.async"),
+    (r"cp\.async\.bulk\.tensor\.\dd\.shared", "tma.load"),
+    (r"clusterlaunchcontrol\.try_cancel", "clc"),
+    (r"tcgen05\.alloc", "tcgen05.alloc"),
+    (r"tensormap\.replace\.\w+\.shared$", "tensormap.replace"),
+    (r"mbarrier\.inval", "mbarrier.inval"),
+    (r"mbarrier\.(init|arrive|expect_tx|complete_tx)|tcgen05\.commit", "mbarrier"),
 )
 # Translator.env key (no PTX register has this name) of what mem.py knows of the thread's
 # local memory; run forgets it at the start of each basic block.
@@ -173,15 +177,15 @@ class Kernel:
     # byte) -> the byte the default stored there before its first fork barrier (an
     # 8-bit expression), or None if unknown (Translator._capture_store)
     captures: dict | None = None
-    capture_reads: bool = False  # some worker read a capture (_capture_load)
     # footprints of the asynchronous or other-CTA shared writes reported so far: a byte
     # the default stores later is not a known capture there (_capture_clobber)
     capture_dirty: list = field(default_factory=list)
-    # (shared symbol, byte) of the captures a worker read as known (check_capture_barriers)
+    # (shared symbol, byte) of the captures a worker read as known (check_capture_barriers;
+    # not empty: some worker read a capture, _capture_clobber)
     capture_forwarded: set = field(default_factory=set)
     # A dispatch that may run no round (cfg.py, item rounds): (G, F) of cfg.Dispatch.gate,
     # and the condition under which the default takes F, a value of the launch the default
-    # records at G (Translator._gate_if) and each worker's region runs under (run_gated)
+    # records at G (Translator.record_gate) and each worker's region runs under (run_gated)
     gate_at: tuple | None = None
     gate: tuple | None = None
     # Handoffs through shared memory (KIR change 17, frontend_ptx.md "Handoffs"): the
@@ -200,6 +204,11 @@ class Kernel:
     protocols: dict = field(default_factory=dict)
     protocol_records: dict = field(default_factory=dict)
 
+    @property
+    def ncta(self) -> int:
+        """The CTAs of a cluster."""
+        return math.prod(self.cluster)
+
 
 # An mbarrier event awaiting its array (mem.Memory.barriers): the KIR event (bar and idx
 # filled in then), the shared-memory symbol, the constant part `const` of the slot's byte
@@ -207,12 +216,12 @@ class Kernel:
 # the role's scope at the event), the interval of the offset (CuTe array splitting), the
 # issuing thread count of an arrive (None when counted inside a thread loop), and for a
 # bar_init its offset, its source line (path, line) and the key its array is split by;
-# `alt`: (constant, rest JSON) of the same offset counting the entry constants of the
-# induction variables in it (Translator.slot_iv), and `arms`: (condition JSON, (constant,
-# rest JSON) per arm) of an offset whose top-level sum holds a select on a thread-uniform
-# condition, both for an offset whose own constant is no initialized mbarrier
-# (mem._resolve; `else_event`, `cond`: the event of the select's second arm and the
-# condition it is wrapped in, mem.Memory.barriers).
+# `readings`: the other readings of the offset, for an offset whose own constant is no
+# initialized mbarrier (mem._resolve; Translator._readings), each (condition JSON or None,
+# ((constant, rest JSON) per arm)): the offset counting the entry constants of the
+# induction variables in it (Translator.slot_iv), then the two arms of a select on a
+# thread-uniform condition in its top-level sum; `select`: (condition, the event of the
+# second arm) of a select between two arrays, wrapped in an `if` by Memory.barriers.
 @dataclass
 class BarrierUse:
     event: dict
@@ -225,10 +234,8 @@ class BarrierUse:
     init: int | None = None
     srcloc: tuple | None = None
     key: tuple = ()
-    alt: tuple | None = None
-    arms: tuple | None = None
-    else_event: dict | None = None
-    cond: dict | None = None
+    readings: tuple = ()
+    select: tuple | None = None
 
 
 def _launch_only(e, params, created) -> bool:
@@ -240,6 +247,27 @@ def _launch_only(e, params, created) -> bool:
         or (v not in params and not v.startswith("%"))
         for v in E.free_vars(e)
     )
+
+
+@dataclass(eq=False)
+class _Loop:
+    """An open loop of a translator (Translator.loops): the registers it carries (in a
+    class round of the P0-6 pass, nbar.py: every register it writes) and their slots, the
+    kinds, trailing-zero caps and seeds a retry narrows (end_iteration), the registers live
+    at its header, its exit flag (None for a `for`), the latch test of a counted loop
+    (run: the `for` does it), the carried values at its edges (run_loop) and its
+    induction variable candidates (slot_iv)."""
+
+    carried: list
+    slots: list
+    kinds: list
+    caps: list
+    seeds: list
+    live: frozenset
+    go: tuple | None = None
+    latch: R.If | None = None
+    exits: dict = field(default_factory=dict)
+    ivs: list | None = None
 
 
 class Translator:
@@ -254,7 +282,7 @@ class Translator:
         self.created: list = []  # every KIR variable name made so far, in order
         self.names: dict = {}  # expression -> visible let variable
         self.scopes: list = [[]]  # expressions bound in each open scope
-        self.loops: list = []  # open loops: [carried, slots, go, kinds, caps, latch If]
+        self.loops: list = []  # open loops (_Loop)
         # per open loop: (the statement list before it, the names defined before it, the
         # index of the scope enclosing it, its body's statement list): where _let puts a
         # loop-invariant binding
@@ -774,7 +802,7 @@ class Translator:
                 self.env.pop(LOCAL, None)  # so do known local bytes (mem.py)
                 for i in node.instrs:
                     self.step(i)
-            elif isinstance(node, R.If) and self.loops and node is self.loops[-1][5]:
+            elif isinstance(node, R.If) and self.loops and node is self.loops[-1].latch:
                 self.flush()  # a counted loop's latch test: the `for` does it
                 self.end_iteration(False)
             elif isinstance(node, R.If):
@@ -875,10 +903,7 @@ class Translator:
 
     def run_if(self, node: R.If) -> None:
         assert node.branch.guard is not None, "regions.py: an If is a guarded bra"
-        gate = self.k.gate_at
-        if gate is not None and node.block == gate[0] and self.name == "default":
-            self._gate_if(node, gate[1])
-            return
+        self.record_gate(node)
         if isinstance(self.env.get(node.branch.guard[0]), Data) and self._inert(node):
             return
         c = self._cond(node)
@@ -895,13 +920,18 @@ class Translator:
         else:
             self._uniform_if(node, cu)
 
-    def _gate_if(self, node: R.If, full: str) -> None:
-        """The default's decision whether the workers run their round (cfg.py, item
-        rounds; `full`: the first block of the side that runs it). The workers learn it
-        from the state bytes only, so it must be one value of the launch that each worker
-        evaluates alike (parameters, program id, metadata): recorded in Kernel.gate,
-        under which run_gated translates their regions; else the variant is refused. The
-        two sides are a KIR `if`, each from the fork barriers before the decision."""
+    def record_gate(self, node: R.If) -> None:
+        """At the default's decision whether the workers run their round (cfg.py, item
+        rounds; Kernel.gate_at: its block and the first block of the side that runs it),
+        every pass that translates the default (the P0-6 pass too, nbar.py). The workers
+        learn it from the state bytes only, so it must be one value of the launch that
+        each worker evaluates alike (parameters, program id, metadata): recorded in
+        Kernel.gate, under which run_gated translates their regions; else the variant is
+        refused. The If itself is translated as any other: in the P0 translation the two
+        sides are a KIR `if`, each from the fork barriers before the decision."""
+        gate = self.k.gate_at
+        if gate is None or node.block != gate[0] or self.name != "default":
+            return
         assert node.branch.guard is not None  # (cfg.py: G is a conditional branch)
         reg, _neg = node.branch.guard
         self.cur = node.branch
@@ -916,15 +946,11 @@ class Translator:
         if not _launch_only(cu, self.k.mem.used_params, self.created):
             self.fail(node.branch, f"{why} is no value of the launch (parameters, program "
                                    "id, metadata): the workers cannot evaluate it")  # fmt: skip
-        full_then = self.k.mem.cfg.blocks[node.block].succs[0] == full
+        full_then = self.k.mem.cfg.blocks[node.block].succs[0] == gate[1]
         g = cu if full_then else E.not1(cu)
         if self.k.gate is not None and self.k.gate != g:
             self.fail(node.branch, f"{why} differs between the parts of the default")
         self.k.gate = g
-        if E.is_const(cu):
-            self.run(node.then if cu[2] else node.else_)
-            return
-        self._uniform_if(node, cu)
 
     def run_gated(self, seq: list, start: str) -> None:
         """A worker role of a dispatch that may run no round (cfg.Role.gate): its region,
@@ -1040,7 +1066,7 @@ class Translator:
         """The registers to merge at the join of an If. A join CONTINUE (BREAK) is the
         innermost loop's back (exit) edge, which reads its carried registers."""
         if node.join in (R.CONTINUE, R.BREAK):
-            return self.loops[-1][0]
+            return self.loops[-1].carried
         return self.tree.live_in.get(node.join, frozenset()) if node.join else ()
 
     def _branch(self, node, side: int, seq: list, env: dict):
@@ -1237,7 +1263,7 @@ class Translator:
             return None
         return iv, lb, ub, step, latch, self.fresh("i")
 
-    def _loop_once(self, node, carried, kinds, caps, seeds, counted=None, ivs=None):
+    def _loop_once(self, node, carried, kinds, caps, seeds, counted, ivs):
         slots, env = [], dict(self.env)
         before = set(self.created)  # the names the loop cannot change (_let)
         if counted is not None:
@@ -1272,14 +1298,7 @@ class Translator:
             # value stays known (LLVM strength-reduces `base + 8 * i` into such a register:
             # an mbarrier array's start, mem._resolve)
             c0 = self.k.mem.entry_const(off, E.width(off))
-            if (
-                ivs is not None
-                and ivs[k]
-                and s[0] == "u"
-                and s[3] is None
-                and s[4] is None
-                and c0
-            ):
+            if ivs[k] and s[0] == "u" and s[3] is None and s[4] is None and c0:
                 self.slot_iv[s[1]] = c0
             slots.append(s)
             env[r] = self.read(s)
@@ -1293,20 +1312,8 @@ class Translator:
         self.hoist.append((saved, before, len(self.scopes) - 1, self.stmts))
         self.env = env
         mark = self.push_scope()
-        self.loops.append(
-            [
-                carried,
-                slots,
-                go,
-                kinds,
-                caps,
-                counted[4] if counted else None,
-                live,
-                seeds,
-                exits,
-                ivs,
-            ]  # fmt: skip
-        )
+        self.loops.append(_Loop(carried, slots, kinds, caps, seeds, live, go,
+                                counted[4] if counted else None, exits, ivs))  # fmt: skip
         try:
             self.run(node.body, inherit=False, fields=self._loop_work(node))
         finally:
@@ -1354,21 +1361,20 @@ class Translator:
                 "a loop exits or continues under a thread-varying condition "
                 "(divergent loop)",
             )
-        carried, slots, go, kinds, caps, _latch, live, seeds, exits, ivs = self.loops[
-            -1
-        ]
+        lp = self.loops[-1]
+        carried, live, kinds, exits = lp.carried, lp.live, lp.kinds, lp.exits
         values = [self.env.get(r) for r in carried]
         _exit_values(exits, carried, live, values)  # the P1 pass reads them (run_loop)
         widened = False
-        for k, (s, v) in enumerate(zip(slots, values)):
+        for k, (s, v) in enumerate(zip(lp.slots, values)):
             if s is None:
                 continue
             bad = isinstance(v, Data) or v is None
             if carried[k] not in live and s[3] is None and not bad and E.reserved(v):
                 if (
-                    seeds[k] is None
+                    lp.seeds[k] is None
                 ):  # read after the loop only: an address of this base
-                    seeds[k], widened = self.k.mem.slot_base(self, v), True
+                    lp.seeds[k], widened = self.k.mem.slot_base(self, v), True
                     continue
                 bad = True  # its base changes
             if carried[k] not in live and bad:
@@ -1384,14 +1390,14 @@ class Translator:
                 kinds[k], widened = (kind if s[4] is None else self.kind_of(v)), True
             have = E.tz(off, self.slot_facts)
             if have < self.slot_facts.get(_slot_vars(s)[0], 0):
-                caps[k], widened = have, True
+                lp.caps[k], widened = have, True
             if s[0] == "u" and s[1] in self.slot_iv and not self.k.mem.steps(off, s[1]):
-                ivs[k], widened = False, True  # not an induction variable
+                lp.ivs[k], widened = False, True  # not an induction variable
         if widened:
             raise _Widen()
-        self.stmts += self._parallel_assign(slots, values)
-        if brk and go is not None:
-            self.stmts += self.assign(go, E.const(0, 32))
+        self.stmts += self._parallel_assign(lp.slots, values)
+        if brk and lp.go is not None:
+            self.stmts += self.assign(lp.go, E.const(0, 32))
 
     def _parallel_assign(self, slots: list, values: list) -> list:
         """slot := value for all pairs, as if simultaneous (temporaries where a value
@@ -1837,46 +1843,49 @@ class Translator:
             stmt, sym, c, restj, E.interval(a), issued[2], stmt["loc"], init,
             self.k.srclocs.get(id(self.cur)) if init is not None else None,
             self.k.mem.init_key(self) if init is not None else (),
-            self._iv_offset(c, rest), self._select_arms(a)))  # fmt: skip
+            self._readings(c, rest, a)))  # fmt: skip
         self._emit_under(issued[0], issued[1])
 
-    def _iv_offset(self, c: int, rest):
-        """(constant, rest / 8 as KIR JSON) of the offset c + rest counting the entry
-        constants of its induction variables (slot_iv) as constant (BarrierUse.alt), or None:
-        none in it, or the rest not provably a multiple of 8. The JSON binds nothing (it is
-        used only if c is no mbarrier): its terms are in scope at the event."""
+    def _readings(self, c: int, rest, a) -> tuple:
+        """BarrierUse.readings of the offset a = c + rest: counting the entry constants of
+        its induction variables (slot_iv) as constant, and the arms of the one select on a
+        uniform condition in a's top-level sum (LLVM if-converts `if c: wait(A[i]) else:
+        wait(B[j])` into one wait on a selected address); each left out if none is in it
+        or an arm's rest is not provably a multiple of 8. The JSON binds nothing (it is used
+        only if c is no mbarrier): its terms are in scope at the event."""
+        out: list[tuple] = []
         civ = self.k.mem.iv_const(rest, self.slot_iv) if self.slot_iv else 0
-        if not civ:
-            return None
-        w = E.width(rest)
-        q = E.div_exact(E.bin("sub", rest, E.const(civ, w)), 8, self.slot_facts)
-        try:
-            return None if q is None else (
-                (c + civ) % (1 << w), E.to_json(E.resize(q, 32), self.names))  # fmt: skip
-        except E.ExprError:  # not expressible without a binding: no alternative
-            return None
-
-    def _select_arms(self, a):
-        """BarrierUse.arms of the offset a (LLVM if-converts `if c: wait(A[i]) else:
-        wait(B[j])` into one wait on a selected address), or None: no select on a uniform
-        condition in a's top-level sum, or an arm's rest not provably a multiple of 8. The
-        JSON binds nothing (used only if a's own constant is no mbarrier)."""
+        if civ:
+            w = E.width(rest)
+            r = self._reading(c + civ, E.bin("sub", rest, E.const(civ, w)), w)
+            if r is not None:
+                out.append((None, (r,)))
         got = self.k.mem.select_arms(a)
         cond = None if got is None else self.uniform(got[0])
-        if cond is None:
-            return None
-        arms = []
-        try:
+        if cond is not None:
+            arms = []
             for x in got[1:]:
-                c, rest = self.k.mem.split_offset(x)
-                q = E.div_exact(rest, 8, self.slot_facts)
-                if q is None:
-                    return None
-                j = None if E.is_const(q, 0) else E.to_json(E.resize(q, 32), self.names)
-                arms.append((c % (1 << E.width(x)), j))
-            return (E.to_json(cond, self.names), *arms)
+                c2, rest2 = self.k.mem.split_offset(x)
+                arms.append(self._reading(c2, rest2, E.width(x)))
+            try:
+                if None not in arms:
+                    out.append((E.to_json(cond, self.names), tuple(arms)))
+            except E.ExprError:  # not expressible without a binding: no alternative
+                pass
+        return tuple(out)
+
+    def _reading(self, c: int, rest, w: int):
+        """(c mod 2^w, rest / 8 as KIR JSON or None for 0) of a reading of an mbarrier
+        offset (_readings), or None: the rest not provably a multiple of 8, or not
+        expressible without a binding."""
+        q = E.div_exact(rest, 8, self.slot_facts)
+        if q is None:
+            return None
+        try:
+            j = None if E.is_const(q, 0) else E.to_json(E.resize(q, 32), self.names)
         except E.ExprError:  # not expressible without a binding: no alternative
             return None
+        return c % (1 << w), j
 
     def _issue(self, stmt: dict, mode: str, per: list):
         """(uniform condition, statement, issuer count in mode "count") for an event
@@ -2019,7 +2028,7 @@ class Translator:
         if C._is_fork(i, mn):  # (cfg.py)
             self.forks += 1
         if cls == "event" and self._tracked():
-            self._capture_writes(i, mn)
+            self._capture_write(i, mn)
         if self.k.gsync is not None:  # global synchronization (gsev.py)
             from . import gsev
 
@@ -2055,27 +2064,23 @@ class Translator:
                 self.write(r, v)
 
     def _shared_drop(self, i, mn: str, maybe: bool = False) -> None:
-        """A dropped write of shared memory (st.shared, stmatrix, atom/red.shared)
-        closes the tensormap staging buffers it may overlap (tma.py); a st.shared may
-        also zero one, unless `maybe` (under a data predicate: it may not happen). It
-        may also write warp-specialize captures (_capture_store) and handoff channels
-        (_handoff_store)."""
-        if mn == "st.shared" or mn.startswith("stmatrix"):
+        """A dropped write of shared memory (st.shared, stmatrix, atom/red.shared:
+        shared_write) closes the tensormap staging buffers it may overlap (tma.py); a
+        st.shared may also zero one, unless `maybe` (under a data predicate: it may not
+        happen). It may also write warp-specialize captures (_capture_store,
+        _capture_write) and handoff channels (_handoff_store)."""
+        kind = shared_write(mn)
+        if kind in ("st.shared", "stmatrix"):
             self._handoff_store(i, maybe)
-        if mn == "st.shared":
+        if kind == "st.shared":
             self.k.mem.tma.staging_store(self, i, maybe)
             self._capture_store(i, maybe)
-        elif mn.startswith("stmatrix"):  # (tma.SHARED_WRITES)
+        elif kind == "stmatrix":  # (tma.CLOSE_ALL)
             self.k.mem.tma.close_staging(self)
-            if self.k.captures is not None:  # each address-giving lane: a 16-byte row
-                a = self.k.mem.address(self, i.operands[0])
-                self._capture_clobber(i, a, 16, checked=True)
-        elif mn.startswith(("atom.shared", "red.shared")):  # as a generic one (mem.py)
+            self._capture_write(i, mn, checked=True)
+        elif kind == "atom.shared":  # as a generic one (mem.py)
             self.k.mem.execute(self, i, mn)
-            if self._tracked():
-                op = i.operands[1 if mn.startswith("atom") else 0]
-                a = self.k.mem.address(self, op)
-                self._capture_clobber(i, a, _access_bytes(i.opcode))
+            self._capture_write(i, mn)
 
     # ------------------------------------------------- warp-specialize captures
     def _capture_bytes(self, i, op) -> list | None:
@@ -2083,9 +2088,7 @@ class Translator:
         accesses through address operand op, if the address is the same constant in
         every thread of the role; else None."""
         t = i.opcode.rsplit(".", 1)[-1]
-        if i.base not in ("ld", "st", "atom", "red") or not re.fullmatch(
-            r"[bsu](8|16|32|64)", t
-        ):
+        if i.base not in ("ld", "st") or not re.fullmatch(r"[bsu](8|16|32|64)", t):
             return None  # (stmatrix: bytes over the lanes, unknown here)
         n = next(
             (int(m[1:]) for m in i.opcode.split(".") if re.fullmatch(r"v\d", m)), 1
@@ -2135,7 +2138,7 @@ class Translator:
                 vals = self._capture_values(i, len(where))
         if vals is None or where is None:  # no capture: the bytes it may touch
             a = self.k.mem.address(self, mem) if mem else None
-            self._capture_clobber(i, a, _access_bytes(i.opcode), checked=True)
+            self._capture_clobber(i, a, access_bytes(i.opcode), checked=True)
             return
         for k, b in enumerate(where):  # (not over an earlier asynchronous write)
             dirty = any(
@@ -2189,21 +2192,21 @@ class Translator:
                 v = E.bin("or", v, E.bin("shl", E.ext(b, w, False), E.const(8 * j, w)))
             rw = _reg_width(self.k.fn.regs.get(r, "b32"))
             self.write(r, E.ext(v, rw, signed) if rw > w else v)
-        self.k.capture_reads = True
         self.k.capture_forwarded.update(where)
         return True
 
     def _region(self, sym: str) -> str:
         return _region(self.k, sym)
 
-    def _footprint(self, a, nbytes: int | None):
+    def _footprint(self, a, nbytes: int | None, iv=None):
         """The shared bytes a write of nbytes per executing thread at address a (window
         or generic; a mapa Remote or Peer: its address in that CTA) may touch: (region,
         lo, hi) over the threads of the role that may execute it, whichever lane
         elect.sync elects (all of them where that depends on runtime values), () if none
         may, ("dyn", region, offset, nbytes) if the offsets have no static bounds
         (_capture_assume), None if the address is no shared symbol plus an offset or its
-        offset depends on the elected lane (any byte)."""
+        offset depends on the elected lane (any byte). `iv`: the bounds of an offset
+        (default `bounds`; P1-2's pruning: bulk._iv)."""
         from . import cluster  # (it imports this module)
         from .mem import peel
 
@@ -2226,7 +2229,7 @@ class Translator:
         if E.thread_varying(off):
             inst = self.instances(off)
             vals = list({id(inst[t]): inst[t] for t in act}.values())
-        rs = [_capture_iv(v) for v in vals]
+        rs = [(iv or bounds)(v) for v in vals]
         region = self._region(p[0][2][3:])
         if any(r is None for r in rs):  # (a loop-carried, strength-reduced offset)
             return ("dyn", region, off, nbytes)
@@ -2264,7 +2267,7 @@ class Translator:
             return self._capture_assume(fp)
         hit = [b for b in caps if b is not None
                and (fp is None or _covers(fp, self._region(b[0]), b[1]))]  # fmt: skip
-        if self.k.capture_reads and (
+        if self.k.capture_forwarded and (
             fp is None or any(caps[b] is not None for b in hit)
         ):
             self.fail(i, "a shared write that may overwrite a warp-specialize capture "
@@ -2308,54 +2311,47 @@ class Translator:
             remote = remote or isinstance(a, cluster.Remote)
             self._capture_clobber(i, a, nbytes, True, remote)
 
-    def _capture_writes(self, i, mn: str) -> None:
-        """The shared bytes an event-class instruction writes beside its events, for the
-        captures (_capture_clobber): a generic st/atom/red at a shared address; cp.async
-        and bulk copies and reduces into shared memory (asynchronous; multicast, or into
-        another CTA: remote); st.async/red.async (remote); a CLC response (asynchronous; multicast:
-        remote); tcgen05.alloc's address slot; tensormap.replace of a staging buffer;
+    def _capture_write(self, i, mn: str, checked: bool = False) -> None:
+        """The shared bytes a write of shared memory (shared_write) but st.shared
+        (_capture_store) may touch, at its address operand, for the captures and the
+        handoff channels (_capture_clobber; `checked`: the caller checked the channels,
+        _handoff_store): a generic st/atom/red at a shared address; atom/red.shared;
+        stmatrix (each address-giving lane: a 16-byte row); cp.async and bulk copies and
+        reduces into shared memory (asynchronous; multicast, or into another CTA: remote);
+        st.async/red.async (remote); a CLC response (asynchronous; multicast: remote);
+        tcgen05.alloc's address slot; tensormap.replace of a staging buffer;
         mbarrier.inval. TMA tensor loads report theirs (tma.py); mbarrier objects are
-        checked by their arrays after every role (check_capture_barriers); st.shared,
-        stmatrix, atom/red.shared are drops (_shared_drop)."""
+        checked by their arrays after every role (check_capture_barriers)."""
         from . import cluster  # (it imports this module)
 
-        ops_, mem = i.operands, self.k.mem
-        if mn.startswith(("st.async", "red.async.shared")):
+        kind, ops_, mem = shared_write(mn), i.operands, self.k.mem
+        tracked = self.k.captures is not None or (self.k.handoffs and not checked)
+        if kind is None or not tracked:
+            return None
+        if kind in ("st.async", "cp.async", "bulk.load", "bulk.cluster"):
             a = cluster._address(self, ops_[0])
-            return self._capture_clobber(
-                i, a, _access_bytes(i.opcode), asynchronous=True, remote=True
-            )
-        if mn in ("st", "atom", "red") or (
-            mn.startswith(("atom.", "red.")) and ".global" not in mn
-        ):  # generic: a shared address only (a global one writes no shared memory)
-            a = mem.address(self, ops_[1 if mn.startswith("atom") else 0])
-            if isinstance(a, Data):  # any byte (mem.py refuses the access itself too)
-                return self._capture_clobber(i, a, None)
-            if not any(v[:3] in ("%s:", "%S:") for v in E.free_vars(a)):
-                return None
-            return self._capture_clobber(i, a, _access_bytes(i.opcode))
-        if mn.startswith(
-            (
-                "cp.async.ca.shared",
-                "cp.async.cg.shared",
-                "cp.async.bulk.shared",
-                "cp.reduce.async.bulk.shared",
-            )
-        ):
-            a = cluster._address(self, ops_[0])
-            v = self.operand(i, 2, 32) if len(ops_) > 2 else None
-            n = None if v is None or isinstance(v, Data) else self.uniform(v)
-            nb = n[2] if n is not None and E.is_const(n) and n[2] > 0 else None
+            if kind == "st.async":
+                return self._capture_clobber(
+                    i, a, access_bytes(i.opcode), asynchronous=True, remote=True
+                )
             remote = "multicast" in mn or isinstance(a, cluster.Remote)
-            return self._capture_clobber(i, a, nb, asynchronous=True, remote=remote)
-        if mn.startswith("clusterlaunchcontrol.try_cancel"):
-            a = mem.address(self, ops_[0])
-            remote = "multicast" in mn
-            return self._capture_clobber(i, a, 16, asynchronous=True, remote=remote)
-        sizes = {"tcgen05.alloc": 4, "tensormap.replace": 128, "mbarrier.inval": 8}
-        for prefix, nb in sizes.items():
-            if mn.startswith(prefix) and not mn.endswith(".global"):
-                return self._capture_clobber(i, mem.address(self, ops_[0]), nb)
+            return self._capture_clobber(
+                i, a, self.copy_size(i), asynchronous=True, remote=remote
+            )
+        if kind in ("generic", "atom.shared"):
+            a = mem.address(self, ops_[1 if mn.startswith("atom") else 0])
+            # generic: a shared address only (a global one writes no shared memory); at
+            # a data address any byte (mem.py refuses the access itself too)
+            if (kind == "generic" and not isinstance(a, Data)
+                    and not any(v[:3] in ("%s:", "%S:") for v in E.free_vars(a))):  # fmt: skip
+                return None
+            return self._capture_clobber(i, a, access_bytes(i.opcode))
+        sizes = {"stmatrix": 16, "clc": 16, "tcgen05.alloc": 4,
+                 "tensormap.replace": 128, "mbarrier.inval": 8}  # fmt: skip
+        if kind in sizes:
+            a, clc = mem.address(self, ops_[0]), kind == "clc"
+            return self._capture_clobber(i, a, sizes[kind], asynchronous=clc,
+                                         remote=clc and "multicast" in mn, checked=checked)  # fmt: skip
         return None
 
     # ------------------------------------------- handoffs through shared memory
@@ -2447,7 +2443,7 @@ class Translator:
                 return
         mem = next((x for x in i.operands if x[0] == "mem"), None)
         a = self.k.mem.address(self, mem) if mem is not None else None
-        nb = 16 if i.opcode.startswith("stmatrix") else _access_bytes(i.opcode)
+        nb = 16 if i.opcode.startswith("stmatrix") else access_bytes(i.opcode)
         self._handoff_clobber(i, self._footprint(a, nb))
 
     def _handoff_clobber(self, i, fp) -> None:
@@ -2547,6 +2543,13 @@ class Translator:
         if isinstance(v, Data) or w is None or E.width(v) == w:
             return v
         return E.resize(v, w, signed)
+
+    def copy_size(self, i, k: int = 2) -> int | None:
+        """The byte size operand k of a copy if it is a positive constant (the same in
+        every thread), else None."""
+        v = self.operand(i, k, 32) if len(i.operands) > k else None
+        n = None if v is None or isinstance(v, Data) else self.uniform(v)
+        return n[2] if n is not None and E.is_const(n) and n[2] > 0 else None
 
     def operand_value(self, op, w=None):
         kind = op[0]
@@ -3034,9 +3037,11 @@ _TRANSFORMED: dict = {}
 
 
 def _region(k: Kernel, sym: str) -> str:
-    """The shared region a symbol's bytes are in: every .extern shared variable starts at
-    the dynamic shared memory (one region), the others are their own."""
-    return "%extern" if sym in k.mem.policy.get("shared_extern", ()) else sym
+    """The shared region a symbol's bytes are in, named by a symbol: every .extern shared
+    variable starts at the dynamic shared memory (one region, the first of them), the
+    others are their own."""
+    ext = k.mem.policy.get("shared_extern", ())
+    return min(ext) if sym in ext else sym
 
 
 def check_capture_barriers(k: Kernel, arrays: list) -> None:
@@ -3058,24 +3063,25 @@ def check_capture_barriers(k: Kernel, arrays: list) -> None:
                                   f"an mbarrier array ({s} + {a}, {n} entries)")  # fmt: skip
 
 
-_CAPTURE_IV: dict = {}
+_BOUNDS: dict = {}
 
 
-def _capture_iv(e):
-    """Signed bounds of e, or None, for the captures' footprints: expr.interval, refined
-    through sums, products, shifts, masks (x & m for a constant m >= 0 is in [0, m],
-    within the bits x can have), extensions and selects, urem/srem by a positive
-    constant, and the remainders LLVM writes for `x % k` (a ring buffer's index), with
-    x's bounds or any 32-bit value: x - ((x + b) & -k) for k a power of two and b in
-    [0, k) (_rem_pow2), and x - q k for q = mul.hi(x, M) >> s, plus its sign bit or not
-    (_rem_magic)."""
-    if e in _CAPTURE_IV:
-        return _CAPTURE_IV[e]
-    r = _meet(E.interval(e), _capture_iv_parts(e))
+def bounds(e):
+    """Signed bounds of e, or None, for the footprints of the captures' shared writes
+    (Translator._footprint): expr.interval, refined by expr's own rules over the
+    operands' refined bounds (expr._interval with this function as its recursion: sums,
+    products, shifts, extensions, selects), masks (x & m for a constant m >= 0 is in
+    [0, m], within the bits x can have), urem/srem by a positive constant, and the
+    remainders LLVM writes for `x % k` (a ring buffer's index), with x's bounds or any
+    32-bit value: x - ((x + b) & -k) for k a power of two and b in [0, k) (_rem_pow2), and
+    x - q k for q = mul.hi(x, M) >> s, plus its sign bit or not (_rem_magic)."""
+    if e in _BOUNDS:
+        return _BOUNDS[e]
+    r = _meet(E.interval(e), _bounds_parts(e))
     w = E.width(e)
     if r is not None and w > 1 and not -(1 << (w - 1)) <= r[0] <= r[1] < (1 << (w - 1)):
         r = None  # (the operation may wrap at its width)
-    _CAPTURE_IV[e] = r
+    _BOUNDS[e] = r
     return r
 
 
@@ -3085,60 +3091,35 @@ def _meet(a, b):
     return max(a[0], b[0]), min(a[1], b[1])
 
 
-def _capture_iv_parts(e):  # noqa: C901 (one case per expression kind)
+def _bounds_parts(e):  # noqa: C901 (one case per expression kind)
+    """bounds(e) before its meet with expr.interval and its width check: the masks and
+    remainders above, else expr's rules over the operands' bounds (a zero extension of a
+    value that may be negative has every value of the source width, a 1-bit value's sign
+    extension is 0 or -1, as in expr.interval)."""
     if e[0] == "bin":
         o, a, b = e[2], e[3], e[4]
         if o in ("urem", "srem") and E.is_const(b) and b[2] > 0:
-            ia = _capture_iv(a)
+            ia = bounds(a)
             k = b[2] - 1
             return (0, k) if o == "urem" or (ia is not None and ia[0] >= 0) else (-k, k)
         if o == "and" and (E.is_const(b) or E.is_const(a)):
             x, m = (a, b[2]) if E.is_const(b) else (b, a[2])
-            if m < 0:
-                return None
-            ix = _capture_iv(x)
-            if ix is not None and ix[0] >= 0:  # x's bits are below 2^bitlen(max x)
-                return 0, min(ix[1], m & ((1 << ix[1].bit_length()) - 1))
-            return 0, m
+            if m >= 0:
+                ix = bounds(x)
+                if ix is not None and ix[0] >= 0:  # x's bits are below 2^bitlen(max x)
+                    return 0, min(ix[1], m & ((1 << ix[1].bit_length()) - 1))
+                return 0, m
         if o == "sub" or (o == "add" and b[0] == "bin" and b[2] == "mul"):
             r = _rem_pow2(a, b) if o == "sub" else None
             r = r or _rem_magic(a, b, o == "add")
             if r is not None:
                 return r
-        if o in ("add", "sub", "mul", "shl"):
-            x, y = _capture_iv(a), _capture_iv(b)
-            if x is None or y is None:
-                return None
-            if o == "add":
-                return x[0] + y[0], x[1] + y[1]
-            if o == "sub":
-                return x[0] - y[1], x[1] - y[0]
-            if o == "shl":
-                if not E.is_const(b) or not 0 <= b[2] < 32:
-                    return None
-                y = (1 << b[2], 1 << b[2])
-            ps = [u * v for u in x for v in y]
-            return min(ps), max(ps)
-        return None
-    if e[0] in ("ext", "trunc"):
-        x = _capture_iv(e[3] if e[0] == "ext" else e[2])
-        w = E.width(e)
-        if x is None or not -(1 << (w - 1)) <= x[0] <= x[1] < (1 << (w - 1)):
-            return None  # (a value the extension or truncation would change)
-        if e[0] == "ext" and (E.width(e[3]) == 1 or not e[2] and x[0] < 0):
-            # E.interval's bounds: a 1-bit value's read it unsigned (its sign extension is
-            # 0 or -1), and a zero extension changes a negative value
-            return None
-        return x
-    if e[0] == "select":
-        x, y = _capture_iv(e[3]), _capture_iv(e[4])
-        return (min(x[0], y[0]), max(x[1], y[1])) if x and y else None
-    return None
+    return E._interval(e, bounds)
 
 
 def _full(x):
     """x's bounds, or every value of its width (signed)."""
-    r = _capture_iv(x)
+    r = bounds(x)
     w = E.width(x)
     return r if r is not None else (-(1 << (w - 1)), (1 << (w - 1)) - 1)
 
@@ -3157,7 +3138,7 @@ def _rem_pow2(x, m):
         return 0, k - 1
     if y[0] != "bin" or y[2] != "add" or x not in (y[3], y[4]):
         return None
-    ib = _capture_iv(y[4] if y[3] == x else y[3])
+    ib = bounds(y[4] if y[3] == x else y[3])
     if ib is None or ib[0] < 0 or ib[1] > k - 1:
         return None
     return -ib[1], k - 1 - ib[0]
@@ -3236,7 +3217,20 @@ def _covers(fp, region: str, byte: int) -> bool:
     return fp != () and fp[0] == region and fp[1] <= byte < fp[2]
 
 
-def _access_bytes(opcode: str) -> int | None:
+_KINDS: dict = {}  # mnemonic -> shared_write's kind
+
+
+def shared_write(mn: str) -> str | None:
+    """The kind of shared-memory write (SHARED_WRITERS) of the mnemonic mn, or None."""
+    kind = _KINDS.get(mn, False)
+    if kind is False:
+        kind = _KINDS[mn] = next(
+            (k for p, k in SHARED_WRITERS if re.match(p, mn)), None
+        )
+    return kind
+
+
+def access_bytes(opcode: str) -> int | None:
     """Bytes one thread's ld/st/atom/red accesses: the vector width times the element
     size (b128: 16), or None if the opcode names no element type."""
     parts = opcode.split(".")
@@ -3246,6 +3240,16 @@ def _access_bytes(opcode: str) -> int | None:
         if m:
             return vec * int(m[1]) * (2 if m[2] else 1) // 8
     return None
+
+
+def write_bytes(opcode: str) -> int:
+    """access_bytes of a write whose element type the PTX ISA requires (P1-2's st.shared,
+    atom/red and st.async/red.async, cluster.async_store), else a ValueError (as mem.py's
+    _elem_type)."""
+    n = access_bytes(opcode)
+    if n is None:
+        raise ValueError(f"no element type in {opcode}")
+    return n
 
 
 def _transformed(e) -> bool:

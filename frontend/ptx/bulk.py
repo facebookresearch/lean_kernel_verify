@@ -8,13 +8,15 @@ references/specs.md "P1-2", references/kir.md change 15): bulk stores, their com
 wait groups, and the writes of shared memory and of tensormaps that may overlap what a
 bulk store reads, read off the PTX instructions.
 
-    State(extern)                    per kernel (tmem.P1.bulk); extern: the .extern shared
-                                     symbols (they all start at the dynamic shared memory)
+    State()                          per kernel (tmem.P1.bulk)
     execute(st, tr, i, mn, maybe)    before the P0 rule of every instruction (tmem.P1.execute):
-                                     commit/wait groups, st.shared, stmatrix, atom/red on
-                                     shared memory, generic stores to it, tcgen05.alloc,
-                                     writes of another CTA's shared memory; `maybe`: under a
-                                     predicate that depends on data
+                                     commit/wait groups, non-tensor bulk stores, and every
+                                     write of shared memory by its kind (interp.shared_write)
+                                     but those P1-2 reads elsewhere (ELSEWHERE): st.shared,
+                                     stmatrix, atom/red on shared memory, generic stores to
+                                     it, cp.async and bulk loads, tcgen05.alloc, CLC
+                                     responses, writes of another CTA's shared memory;
+                                     `maybe`: under a predicate that depends on data
     store(st, tr, i, kind, src, nbytes, tmap)
                                      a bulk store (tma.py: cp{.reduce}.async.bulk{.tensor}
                                      .global.shared::cta.bulk_group)
@@ -68,7 +70,6 @@ issuing threads (an offset with a loop-carried part keeps its event); the loops 
 left empty are dropped.
 """
 
-import math
 import weakref
 from dataclasses import dataclass, field
 
@@ -76,10 +77,10 @@ from . import cluster, expr as E, interp
 
 _COMMIT = "cp.async.bulk.commit_group"
 _WAIT = "cp.async.bulk.wait_group"
-_REMOTE = ("st.async.shared::cluster", "red.async.shared::cluster",
-           "cp.async.bulk.shared::cluster.shared",
-           "cp.reduce.async.bulk.shared::cluster.shared")  # fmt: skip
-_BITS = {"b": None, "u": None, "s": None, "f": None}
+# The kinds of shared-memory writes (interp.shared_write) P1-2 reads elsewhere: a TMA
+# tensor load's landing and a tensormap staging buffer (tensormap.replace) in tma.py,
+# mbarrier objects in finish; mbarrier.inval is refused in a P1 pass (sync.py)
+ELSEWHERE = ("tma.load", "tensormap.replace", "mbarrier", "mbarrier.inval")
 
 
 @dataclass
@@ -91,8 +92,7 @@ class _Role:
 
 
 class State:
-    def __init__(self, extern=()):
-        self.extern = sorted(extern)
+    def __init__(self):
         self._roles: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
         # shared bytes written outside the events: (symbol, (lo, hi) or None, what, loc)
         self.fixed: list = []
@@ -105,10 +105,10 @@ class State:
             r = self._roles[tr] = _Role()
         return r
 
-    def sym(self, name: str) -> str:
-        """The symbol a shared address is relative to: every .extern shared variable
-        starts at the dynamic shared memory (one region), the others are their own."""
-        return self.extern[0] if name in self.extern else name
+
+def of(tr) -> State | None:
+    """The P1-2 state of tr's kernel (tmem.P1.bulk), None outside a P1-2 pass."""
+    return None if tr.k.p1 is None else tr.k.p1.bulk
 
 
 # ------------------------------------------------------------------ dispatch
@@ -119,43 +119,27 @@ def execute(st: State, tr, i, mn: str, maybe: bool = False) -> None:
         if maybe:
             tr.fail(i, f"P1-2: {mn} under a predicate that depends on data")
         return _group(st, tr, i, mn)
-    if mn.startswith(_REMOTE):
-        return _remote(st, tr, i, mn)
     if mn.startswith(
         ("cp.async.bulk.global.shared", "cp.reduce.async.bulk.global.shared")
     ):
         kind = "bulk_reduce" if mn.startswith("cp.reduce") else "bulk"
         return store(st, tr, i, kind, i.operands[1], _size(tr, i, 2))
-    if mn.startswith("cp.async.bulk.shared") and ".global" in mn:  # a bulk load
+    kind, what = interp.shared_write(mn), mn.split(".")[0]
+    if kind in ("st.async", "bulk.cluster"):  # into another CTA, or the issuing one
+        nbytes = (
+            _size(tr, i, 2) if kind == "bulk.cluster" else interp.write_bytes(i.opcode)
+        )
+        return _write(st, tr, i, i.operands[0], nbytes, what, async_=True)
+    if kind == "bulk.load":
         return landing(st, tr, i, i.operands[0], _size(tr, i, 2))
-    if mn.startswith(("cp.async.ca.shared", "cp.async.cg.shared")):
+    if kind == "cp.async":
         n = i.operands[2]
         if n[0] != "imm":
             tr.fail(i, f"{mn} with a non-constant copy size", "error")
         return landing(st, tr, i, i.operands[0], n[1])
-    if mn.startswith("clusterlaunchcontrol.try_cancel"):
+    if kind == "clc":
         return fixed(st, tr, tr.k.mem.address(tr, i.operands[0]), 16, "a CLC response")
-    if mn.startswith("st.shared"):
-        return _write(st, tr, i, i.operands[0], _nbytes(i), "st.shared", maybe=maybe)
-    if mn.startswith(("atom.shared", "red.shared")):
-        op = i.operands[1 if mn.startswith("atom") else 0]
-        return _write(st, tr, i, op, _nbytes(i), mn.split(".")[0], maybe=maybe)
-    if (
-        mn in ("st", "atom", "red")
-        or mn.startswith(("atom.", "red."))
-        and ".global" not in mn
-    ):
-        op = i.operands[1 if mn.startswith("atom") else 0]
-        a = tr.k.mem.address(tr, op)
-        p = _peel(a)
-        if p is not None and p[0][2][:3] in ("%s:", "%S:"):
-            _write(
-                st, tr, i, op, _nbytes(i), f"generic {mn.split('.')[0]}", maybe=maybe
-            )
-        return None
-    if mn.startswith("stmatrix"):
-        return _stmatrix(st, tr, i, mn, maybe)
-    if mn.startswith("tcgen05.alloc"):
+    if kind == "tcgen05.alloc":
         return fixed(
             st,
             tr,
@@ -163,25 +147,29 @@ def execute(st: State, tr, i, mn: str, maybe: bool = False) -> None:
             4,
             "tcgen05.alloc's address slot",
         )
+    if kind == "stmatrix":
+        return _stmatrix(st, tr, i, mn, maybe)
+    if kind in ("st.shared", "atom.shared", "generic"):
+        op = i.operands[1 if mn.startswith("atom") else 0]
+        if kind == "st.shared":
+            what = mn
+        elif kind == "generic":  # at a shared address
+            p = _peel(tr.k.mem.address(tr, op))
+            if p is None or p[0][2][:3] not in ("%s:", "%S:"):
+                return None
+            what = f"generic {what}"
+        return _write(st, tr, i, op, interp.write_bytes(i.opcode), what, maybe=maybe)
     return None
 
 
 def _size(tr, i, k: int) -> int:
-    """The constant byte size operand k of a bulk copy."""
-    n = tr.uniform(tr.as_int(tr.operand(i, k, 32), "the bulk copy size"))
-    if n is None or not E.is_const(n) or n[2] <= 0:
+    """The constant byte size operand k of a bulk copy (Translator.copy_size), else
+    refused."""
+    n = tr.copy_size(i, k)
+    if n is None:
+        tr.as_int(tr.operand(i, k, 32), "the bulk copy size")  # data: slice soundness
         tr.fail(i, "P1-2: a bulk copy of a size that is not a positive constant")
-    return n[2]
-
-
-def _nbytes(i) -> int:
-    """Bytes a thread writes: the vector width times the element size."""
-    from .mem import (  # mem.py imports tmem.py, which imports this module
-        _elem_bits,
-        _vec,
-    )
-
-    return _vec(i.opcode) * _elem_bits(i.opcode) // 8
+    return n
 
 
 def _peel(a):
@@ -210,81 +198,48 @@ def _threads(tr, what: str, operands=()):
     return act, any(map(E.is_elect, cs))
 
 
-def _shared_offset(st: State, tr, i, a, what: str):
-    """(symbol, i32 offset) of a shared address (window or generic), else refused."""
+def _shared_offset(tr, i, a, what: str):
+    """(symbol, i32 offset) of a shared address (window or generic), else refused; the
+    symbol of a .extern variable is its region's (interp._region)."""
     p = _peel(a)
     if p is None or p[0][2][:3] not in ("%s:", "%S:"):
         tr.fail(
             i,
             f"P1-2: {what} at an address that is no shared-memory symbol plus an offset",
         )
-    return st.sym(p[0][2][3:]), E.resize(p[1], 32, False)
+    return tr._region(p[0][2][3:]), E.resize(p[1], 32, False)
 
 
 # ------------------------------------------------------------------ intervals
 
 
 def _iv(e):
-    """Signed bounds of e, or None: expr.interval, plus urem and srem by a positive
-    constant (a ring index `i % N` of a loop-carried i); for pruning and the disjointness
-    checks only (the P0 translation keeps expr.interval). As in expr.interval, None where
+    """Signed bounds of e, or None: expr.interval, else expr's rules over the operands'
+    _iv (expr._interval), plus srem by a positive constant (a ring index `i % N` of a
+    loop-carried i); for pruning and the disjointness checks only (the P0 translation
+    keeps expr.interval; the captures' finer interp.bounds, with masks and LLVM's
+    remainders, would prune writes the P1 KIRs keep). As in expr.interval, None where
     the bounds of e or of a subexpression leave its signed width (the value may wrap)."""
-    r = _iv_unchecked(e)
+    r = E.interval(e)
+    if r is not None:
+        return r
+    if e[0] == "bin" and e[2] == "srem" and E.is_const(e[4]) and e[4][2] > 0:
+        ia, k = _iv(e[3]), e[4][2] - 1
+        r = (0, k) if ia is not None and ia[0] >= 0 else (-k, k)
+    else:
+        r = E._interval(e, _iv)
     w = E.width(e)
     if r is not None and w > 1 and not -(1 << (w - 1)) <= r[0] <= r[1] < 1 << (w - 1):
         return None
     return r
 
 
-def _iv_unchecked(e):
-    """_iv's bounds of e before the width check at e (its operands' are checked)."""
-    r = E.interval(e)
-    if r is not None:
-        return r
-    if e[0] == "bin" and e[2] in ("urem", "srem") and E.is_const(e[4]) and e[4][2] > 0:
-        k = e[4][2] - 1
-        ia = _iv(e[3])
-        if e[2] == "urem" or ia is not None and ia[0] >= 0:
-            return 0, k
-        return -k, k
-    if e[0] == "bin" and e[2] in ("add", "sub", "mul", "shl"):
-        a, b = _iv(e[3]), _iv(e[4])
-        if a is None or b is None:
-            return None
-        if e[2] == "add":
-            return a[0] + b[0], a[1] + b[1]
-        if e[2] == "sub":
-            return a[0] - b[1], a[1] - b[0]
-        if e[2] == "shl":
-            if not E.is_const(e[4]) or not 0 <= e[4][2] < 32:
-                return None
-            b = (1 << e[4][2], 1 << e[4][2])
-        ps = [x * y for x in a for y in b]
-        return min(ps), max(ps)
-    if e[0] in ("ext", "trunc"):
-        return _iv(e[3] if e[0] == "ext" else e[2])
-    if e[0] == "select":
-        a, b = _iv(e[3]), _iv(e[4])
-        return (min(a[0], b[0]), max(a[1], b[1])) if a and b else None
-    return None
-
-
-def _range(tr, off, act, nbytes: int):
-    """[lo, hi) of the bytes the threads `act` write at offsets `off`, or None."""
-    vals = [off]
-    if E.thread_varying(off):
-        inst = tr.instances(off)
-        vals = list({id(inst[t]): inst[t] for t in act}.values())
-    lo = hi = None
-    for v in vals:
-        r = _iv(v)
-        if r is None:
-            return None
-        lo = r[0] if lo is None else min(lo, r[0])
-        hi = r[1] if hi is None else max(hi, r[1])
-    if lo is None or hi is None:  # no thread writes
-        return None
-    return lo, hi + nbytes
+def _range(tr, a, nbytes: int):
+    """[lo, hi) of the bytes the executing threads write at shared address a, each
+    nbytes, or None: their footprint (interp's Translator._footprint, over _iv), None
+    where it has no static bounds."""
+    fp = tr._footprint(a, nbytes, _iv)
+    return (fp[1], fp[2]) if fp is not None and len(fp) == 3 else None
 
 
 # ------------------------------------------------------------------ events
@@ -302,11 +257,11 @@ def _write(st: State, tr, i, op, nbytes: int, what: str, sync=False, async_=Fals
     a = addr if addr is not None else cluster._address(tr, op)
     if isinstance(a, cluster.Remote):
         return _remote_write(st, tr, i, a, nbytes, what)
-    sym, off = _shared_offset(st, tr, i, a, what)
+    sym, off = _shared_offset(tr, i, a, what)
     act, elect = _threads(tr, what, [off])
     if not act:
         return
-    iv = _range(tr, off, act, nbytes)
+    iv = _range(tr, a, nbytes)
     lanes = not (elect or sync)
     k = 2 if lanes else 1  # the offset's operand
     ops = (
@@ -345,7 +300,7 @@ def _remote_write(st: State, tr, i, a, nbytes: int, what: str) -> None:
     if p is None or p[0][2][:3] != "%s:":
         tr.fail(i, f"P1-2: {what} into another CTA at an address that is no shared symbol "
                    "plus an offset")  # fmt: skip
-    one = math.prod(tr.k.cluster) <= 1
+    one = tr.k.ncta <= 1
     _write(
         st,
         tr,
@@ -357,20 +312,6 @@ def _remote_write(st: State, tr, i, a, nbytes: int, what: str) -> None:
         addr=a.addr,
         cta=None if one else a.cta,
     )
-
-
-def _remote(st: State, tr, i, mn: str) -> None:
-    """st.async / red.async [remote], ... and the shared::cluster bulk copies and reduces
-    (into another CTA): their destination bytes (module doc)."""
-    if mn.startswith(("cp.async.bulk", "cp.reduce.async.bulk")):
-        nbytes = _size(tr, i, 2)
-    else:
-        nbytes = _nbytes(i)
-    a = cluster._address(tr, i.operands[0])
-    if not isinstance(a, cluster.Remote):  # into the issuing CTA's own shared memory
-        return _write(st, tr, i, i.operands[0], nbytes, mn.split(".")[0], addr=a,
-                      async_=mn.startswith(("cp.", "st.async", "red.async")))  # fmt: skip
-    return _remote_write(st, tr, i, a, nbytes, mn.split(".")[0])
 
 
 def _stmatrix(st: State, tr, i, mn: str, maybe: bool) -> None:
@@ -418,39 +359,37 @@ def _slot_of(e: dict, holder) -> None:
             e["leader"] = True
 
 
+def _tensormap(tr, i, a, what: str) -> tuple:
+    """(global buffer, i64 byte offset) of a tensormap's address a, Triton's scratch or a
+    tensor plus an offset, else refused."""
+    p = _peel(a)
+    if p is None or p[0][2][:3] not in ("%x:", "%g:"):
+        tr.fail(i, f"P1-2: {what} of unknown provenance")
+    return p[0][2][3:], E.resize(p[1], 64)
+
+
 def tmap(st: State, tr, i, dst) -> None:
     """tensormap.cp_fenceproxy [dst], ...: a tmap_write of every warp executing it."""
-    p = _peel(dst)
-    if p is None or p[0][2][:3] not in ("%x:", "%g:"):
-        tr.fail(i, "P1-2: tensormap.cp_fenceproxy to an address of unknown provenance")
+    base, off = _tensormap(tr, i, dst, "tensormap.cp_fenceproxy to an address")
     act, _elect = _threads(tr, "tensormap.cp_fenceproxy")
-    off = tr.json(E.resize(p[1], 64))
+    off = tr.json(off)
     for w in sorted({tr.threads()[t][0] for t in act}):
-        tr.emit({"op": "event", "ev": "tmap_write", "base": p[0][2][3:], "addr": off,
+        tr.emit({"op": "event", "ev": "tmap_write", "base": base, "addr": off,
                  "warp": interp._c32(w), "loc": tr.loc()})  # fmt: skip
 
 
 def fixed(st: State, tr, a, nbytes: int, what: str) -> None:
     """Shared bytes written outside the events (module doc): their static interval."""
-    p = _peel(a)
-    if p is None or p[0][2][:3] not in ("%s:", "%S:"):
-        tr.fail(
-            tr.cur,
-            f"P1-2: {what} at an address that is no shared-memory symbol plus an offset",
-        )
-    off = E.resize(p[1], 32, False)
+    sym, off = _shared_offset(tr, tr.cur, a, what)
     act, _elect = _threads(tr, what, [off])
     if act:
-        st.fixed.append(
-            (st.sym(p[0][2][3:]), _range(tr, off, act, nbytes), what, tr.loc())
-        )
+        st.fixed.append((sym, _range(tr, a, nbytes), what, tr.loc()))
 
 
 def store(st: State, tr, i, kind: str, src_op, nbytes: int, tmap_addr=None) -> None:
     """A bulk store of `nbytes` from shared memory (module doc)."""
-    sym, off = _shared_offset(
-        st, tr, i, tr.k.mem.address(tr, src_op), "a bulk store source"
-    )
+    a = tr.k.mem.address(tr, src_op)
+    sym, off = _shared_offset(tr, i, a, "a bulk store source")
     act, elect = _threads(tr, "a bulk store", [off])
     if not act:
         return
@@ -459,15 +398,12 @@ def store(st: State, tr, i, kind: str, src_op, nbytes: int, tmap_addr=None) -> N
                    "depend on run-time operand values)")  # fmt: skip
     tm = None
     if tmap_addr is not None:
-        p = _peel(tmap_addr)
-        if p is None or p[0][2][:3] not in ("%x:", "%g:"):
-            tr.fail(i, "P1-2: a bulk store through a tensormap of unknown provenance")
-        tm = (p[0][2][3:], E.resize(p[1], 64))
+        tm = _tensormap(tr, i, tmap_addr, "a bulk store through a tensormap")
     r = st.role(tr)
     for t in act:
         w, lane = tr.threads()[t]
         r.issuers.add((w, None if elect else lane))
-    iv = _range(tr, off, act, nbytes)
+    iv = _range(tr, a, nbytes)
     ops = [E.WARP] + ([] if elect else [E.LANE]) + [off] + ([tm[1]] if tm else [])
     loc = tr.loc()
 
@@ -587,7 +523,7 @@ def finish(st: State, translators: list) -> bool:
                     "tensormaps of bulk stores (not modeled)"
                 )
                 raise interp.Unsupported(s["ev"], s["loc"], why)
-    objects = {(st.sym(u.sym), u.init, u.loc) for tr in translators for u in tr.barriers
+    objects = {(tr._region(u.sym), u.init, u.loc) for tr in translators for u in tr.barriers
                if u.init is not None}  # fmt: skip
     for sym, off, loc in sorted(objects):  # mbarrier objects (8 bytes; mem.py's arrays)
         st.fixed.append((sym, (off, off + 8), "an mbarrier object", loc))

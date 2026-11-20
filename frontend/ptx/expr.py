@@ -407,7 +407,9 @@ def interval(e):
     return r
 
 
-def _interval(e):
+def _interval(e, rec=interval):
+    """interval's bounds of e before its width check at e, with `rec` for the bounds of
+    e's operands (interval itself, or a refinement of it: interp.bounds)."""
     k = e[0]
     if k == "const":
         return e[2], e[2]
@@ -416,10 +418,10 @@ def _interval(e):
     if e is LANE:
         return 0, 31
     if k == "select":
-        ia, ib = interval(e[3]), interval(e[4])
+        ia, ib = rec(e[3]), rec(e[4])
         return (min(ia[0], ib[0]), max(ia[1], ib[1])) if ia and ib else None
     if k == "ext":
-        ia, wa = interval(e[3]), width(e[3])
+        ia, wa = rec(e[3]), width(e[3])
         if wa == 1:
             return (-1, 0) if e[2] else (0, 1)
         if ia is None:  # every value of the source width
@@ -428,11 +430,11 @@ def _interval(e):
             )
         return ia if e[2] or ia[0] >= 0 else (0, (1 << wa) - 1)
     if k == "trunc":
-        return interval(e[2])
+        return rec(e[2])
     if k != "bin":
         return None
     op, w = e[2], e[1]
-    ia, ib = interval(e[3]), interval(e[4])
+    ia, ib = rec(e[3]), rec(e[4])
     if op == "and" and (ia and ia[0] >= 0 or ib and ib[0] >= 0):
         return 0, min(x[1] for x in (ia, ib) if x and x[0] >= 0)
     if op == "urem" and is_const(e[4]) and e[4][2] > 0:

@@ -237,8 +237,9 @@ variant must have the same block and cluster.
   may be wider than its packed bytes), bulk copies and `cp.async`, a CLC response (16 bytes),
   `st.async`/`red.async`, `tcgen05.alloc`'s address slot, `tensormap.replace` of a
   staging buffer and `mbarrier.inval` (the op-table rows that write shared memory are
-  listed in interp.CAPTURE_WRITERS; tests/ptx/test_captures.py checks the table against
-  them, and that each reaches a capture hook). The bounds come from interval arithmetic, including masks and the ring-buffer
+  interp.SHARED_WRITERS, by kind, the table every model of those writes dispatches on:
+  the captures, the P1-2 pass and the tensormap staging buffers; tests/ptx/test_captures.py
+  checks the table against them, and that each reaches a capture hook and a P1-2 rule). The bounds come from interval arithmetic, including masks and the ring-buffer
   index `x % k` as LLVM writes it for any x (`x - ((x + b) & -k)`, `x - q k` with q a
   multiply-high quotient, its multiplier a 32-bit one): bounds on the arithmetic, no
   claim about the quotient, and none where the arithmetic may wrap at its width. Such a
@@ -308,8 +309,9 @@ thread of the role, under no mask, whose bytes are the same in every warp of the
 (`st.shared.{b,u,s}32` at an address the same in every thread; `stmatrix
 .m8n8.x{1,2,4}.shared.b16`, not `.trans`, whose lanes 0 .. 8x-1 address 16-byte rows that
 are one run of bytes). Bytes stored that way by one role only, overlapping no other such
-bytes, are a channel, named `<region>+<offset>` (`%extern+219392`), and the variant is
-translated again with them (translate.py):
+bytes, are a channel, named `<region>+<offset>` (`%extern+219392`: the region of the
+`.extern` variables, which all start at the dynamic shared memory, is `%extern`), and the
+variant is translated again with them (translate.py):
 
 * such a store of exactly a channel's bytes by its putter is a `handoff_put` of the stored
   value (kir.md change 17). Any other write that may touch a channel (the shared writes
@@ -604,7 +606,8 @@ issuing thread: its warp, its lane (absent for the elected lane of a full-warp
 times the element bytes, a bulk store's size) and, through an in-kernel descriptor, the
 128-byte tensormap it reads (`tmap`: Triton's scratch and the slot's byte offset).
 `cp.async.bulk.commit_group` and `cp.async.bulk.wait_group{.read} N` are `bulk_commit`
-and `bulk_wait` events of the role. Writes of shared memory are `smem_write` events per
+and `bulk_wait` events of the role. Writes of shared memory (the rows of
+interp.SHARED_WRITERS, as for the captures, "Threads and roles") are `smem_write` events per
 executing thread (in a thread loop): st.shared and generic st to a shared address
 (vector width times element size), atom and red on shared memory, stmatrix (m8n8
 .x1/.x2/.x4: each address-providing lane writes a 16-byte row; `sync`: one
@@ -666,9 +669,10 @@ the TTGIR dump, also `<spec>@cluster<dims>.nb.json` for a preferred cluster geom
 `<Kernel>__<digest>.nb.json` in the CuTe `kir/`; `kir.md` change 14):
 in both families, whatever `LKV_FRONTEND` selects (also `legacy`), and also for variants
 whose P0 translation is refused, but for a cluster geometry LKV does not check ("Launch
-records", "Clusters, tcgen05, CLC"). It reuses this frontend's parser, CFG, regions, roles
-and exact interpreter (`interp.Translator` subclassed), and emits no P0 event: its slice
-is the control flow, the named barriers and the values that decide them.
+records", "Clusters, tcgen05, CLC"). It reuses this frontend's parser, CFG, regions, roles,
+driver (translate.py: refusals, a role translated per run of warps) and exact interpreter
+(`interp.Translator` subclassed), and emits no P0 event: its slice is the control flow,
+the named barriers and the values that decide them.
 
 - **Roles.** The roles above, a padding state's role included whether or not it emits
   an event (its warps run the code before the dispatch too); split into warp ranges (SplitWarps) at every

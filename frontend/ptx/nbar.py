@@ -251,7 +251,7 @@ def _join(*cls) -> tuple:
     var, nd, srcs, ou, ol = "u", False, _NONE, True, True
     for c in cls:
         var, nd, srcs = _jvar(var, c[0]), nd or c[1], srcs | c[2]
-        ou, ol = ou and len(c) > 3 and c[3], ol and len(c) > 4 and c[4]
+        ou, ol = ou and c[3], ol and c[4]
     return var, nd, srcs, ou, ol
 
 
@@ -259,7 +259,7 @@ def _lanes(cls) -> tuple:
     """The class of a collective over the lanes of each warp of a value of class cls: one
     value per warp, the same in every warp where the operand's lanes are alike in every
     warp of the role before splitting."""
-    same = len(cls) > 4 and cls[4]
+    same = cls[4]
     return ("u" if cls[0] in ("u", "l") else "w", cls[1], cls[2], same, same)
 
 
@@ -394,13 +394,14 @@ class _Nb(interp.Translator):
 
     def snapshot(self):
         return super().snapshot() + (
-            (len(self.sites), self.reps),
+            (len(self.sites), self.reps, len(self.keyed)),
         )  # base indexes the rest
 
     def restore(self, snap, forget: bool = True) -> None:
         super().restore(snap[:-1], forget)
-        n, self.reps = snap[-1]
+        n, self.reps, nk = snap[-1]
         del self.sites[n:]
+        del self.keyed[nk:]  # the keyed regions of the dropped statements
 
     # ------------------------------------------------------ class-loop symbols
     @staticmethod
@@ -583,7 +584,7 @@ class _Nb(interp.Translator):
         ka = self.klass(a)
         key = None if a is None or isinstance(a, (interp.Data, cluster.Remote,
                                                    cluster.Peer)) else a  # fmt: skip
-        self.ctx["loads"][id(i)] = (ka[0], key, ka[3])
+        self.ctx["loads"][id(i)] = (ka[0], key)
         v = NbData(f"{i.opcode} at {self.where(i)}, a strong load", "t", True,
                    frozenset((id(i),)), raw=True)  # fmt: skip
         for r in R.dests(i):
@@ -597,7 +598,7 @@ class _Nb(interp.Translator):
         if cls[:3] == _U and len(widths) == 1 and 0 not in widths:
             self.ctx["nsym"] += 1
             name = f"nb~{self.ctx['nsym']}:{sorted(regs)[0]}"
-            if len(cls) > 3 and cls[3]:
+            if cls[3]:
                 self.ctx["sym_ou"].add(name)
             return E.var(name, widths.pop())
         return NbData(origin, *cls)
@@ -783,9 +784,7 @@ class _Nb(interp.Translator):
             for r, x in old.items():
                 self.env[r] = self._select(p, self.env.get(r), x, r)
             return
-        if interp._carries(mn):
-            self.fail(i, "a carry-flag instruction under a predicate")
-        super().predicated(i, cls)
+        super().predicated(i, cls)  # (it refuses a carry-flag instruction)
 
     # ------------------------------------------------------- named barriers
     def named_bar(self, i, mn: str) -> None:
@@ -946,9 +945,7 @@ class _Nb(interp.Translator):
 
     def _run_if(self, node, dec) -> None:  # noqa: C901 (one case per condition class)
         reg, neg = node.branch.guard
-        gate = self.k.gate_at
-        if gate is not None and node.block == gate[0] and self.name == "default":
-            self._gate(node, gate[1])
+        self.record_gate(node)  # the If itself is translated as any other
         self.cur = node.branch
         c = self.env.get(reg)
         if c is None:
@@ -962,7 +959,10 @@ class _Nb(interp.Translator):
         cu = self.uniform(c) if exact else None
         if exits and top is not None and top["mode"] == "exact":
             if cu is not None:
-                self._exact_if(node, cu, dec)
+                if E.is_const(cu):
+                    self._run_arm(node, int(cu[2] != 0))
+                else:  # a symbol: the loop falls back
+                    interp.Translator._uniform_if(self, node, cu)
                 return
             if exact and (bars or top["bars"]) and self.per_warp(c):
                 self.split_per_warp(c)
@@ -982,7 +982,10 @@ class _Nb(interp.Translator):
             self._rep_if(node, cu, dec)  # no KIR `if` on a symbol, nor in a class loop
             return
         if cu is not None:
-            self._exact_if(node, cu, dec)
+            if E.is_const(cu):
+                self._run_arm(node, int(cu[2] != 0))
+            else:
+                self._uniform_if(node, cu, dec=dec)
             return
         if exact and self.per_warp(c):
             self.split_per_warp(c)
@@ -1016,45 +1019,7 @@ class _Nb(interp.Translator):
             memo[id(node)] = frozenset(
                 r for i in _instrs([node.then, node.else_]) for r in R.dests(i)
             )
-            self.ctx["keep"].append(node)  # id(node) stays this If's
         return memo[id(node)]
-
-    def _gate(self, node, full: str) -> None:
-        """The default's decision whether the workers run their round (cfg.py, item
-        rounds): recorded as in the P0 translation (interp.Translator._gate_if), so that
-        each worker's region runs under it (run_gated); the If itself is translated as
-        any other. A decision that is data, differs between threads or is no value of the
-        launch refuses the P0-6 KIR: the workers' barriers could not be paired."""
-        reg, neg = node.branch.guard
-        c = self.env.get(reg)
-        why = "the decision whether the warp-specialize workers run a round"
-        if c is None or isinstance(c, interp.Data):
-            self.fail(node.branch, f"{why} is data: the workers cannot evaluate it")
-        cu = self.uniform(E.not1(c) if neg else c)
-        if cu is None or not interp._launch_only(
-            cu, self.k.mem.used_params, self.created
-        ):
-            self.fail(node.branch, f"{why} is no value of the launch that every thread of "
-                                   "the default and the workers evaluates alike")  # fmt: skip
-        full_then = self.k.mem.cfg.blocks[node.block].succs[0] == full
-        g = cu if full_then else E.not1(cu)
-        if self.k.gate is not None and self.k.gate != g:
-            self.fail(node.branch, f"{why} differs between the parts of the default")
-        self.k.gate = g
-
-    def _exact_if(self, node, cu, dec=None) -> None:
-        if E.is_const(cu):
-            self._run_arm(node, int(cu[2] != 0))
-        elif (
-            self.nb
-            and self.nb[-1]["mode"] == "exact"
-            and (interp._exits(node.then) or interp._exits(node.else_))
-        ):
-            interp.Translator._uniform_if(
-                self, node, cu
-            )  # a symbol: the loop falls back
-        else:
-            self._uniform_if(node, cu, dec=dec)
 
     def _uniform_if(self, node, c, dec=None) -> None:
         """interp's KIR `if`; if its arms leave symbols to merge, the If is translated
@@ -1294,7 +1259,8 @@ class _Nb(interp.Translator):
                 )
                 kinds[r] = kinds.get(r, frozenset()) | {kind}
             return
-        carried, slots, _go, kinds = self.loops[-1][:4]
+        lp = self.loops[-1]
+        carried, slots, kinds = lp.carried, lp.slots, lp.kinds
         self.own([r for r in carried if self._special(self.env.get(r))],
                  self.cur.line if self.cur else 0)  # fmt: skip
         for k, r in enumerate(carried):
@@ -1322,12 +1288,13 @@ class _Nb(interp.Translator):
                 self.env[r] = NbData(f"{r} carried by {why}", *classes[r])
         carried = [r for r in written if r in live]
         top = {"mode": "class", "bars": self._bars(node.body), "exits": [], "backs": {},
-               "outs": {}, "exitk": {}, "backk": {}, "written": written,
+               "outs": {}, "exitk": {}, "backk": {},
                "start": {r: self.env[r] for r in carried}, "carried": carried,
                "dropped": mode is None}  # fmt: skip
         self.nb.append(top)
-        self.loops.append([written, [None] * len(written), None, [None] * len(written),
-                           [None] * len(written), None, live, [None] * len(written), {}])  # fmt: skip
+        n = len(written)
+        self.loops.append(interp._Loop(written, [None] * n, [None] * n, [None] * n,
+                                       [None] * n, live))  # fmt: skip
         if mode not in (None, "rep"):
             self.div.append(mode)
         mark = self.push_scope()
@@ -1386,7 +1353,7 @@ class _Nb(interp.Translator):
         if skip:
             pass  # (docstring)
         elif bars and not exits:
-            ou = all(len(e[0]) > 3 and e[0][3] for e in top["exits"])
+            ou = all(e[0][3] for e in top["exits"])
             self._class_round(node, written, classes, live,
                               f"{why} repeats a number of times the model does not "
                               "evaluate, the same in every warp", "rep",
@@ -1486,7 +1453,6 @@ class _Nb(interp.Translator):
                 is_named(ops.mnemonic(i.opcode)) and id(i) not in self.ctx["forks"]
                 for i in _instrs([seq])
             )
-            self.ctx["keep"].append(seq)  # id(seq) stays this list's
         return memo[key]
 
 
@@ -1582,7 +1548,7 @@ def _cfg(fn, split: list):
     except C.CfgError as e:
         if "irreducible control flow" not in str(e):
             raise
-    blocks, succ = _blocks(fn)
+    blocks, succ = C._blocks(fn)
     entry = next(iter(blocks))
     for _round in range(_SPLIT_BUDGET):
         found = _irreducible(fn, entry, succ)
@@ -1594,22 +1560,7 @@ def _cfg(fn, split: list):
     else:
         raise C.CfgError(f"{fn.name}: irreducible control flow beyond the node "
                          "splitting budget")  # fmt: skip
-    rpo = C._rpo(fn, entry, succ)
-    keep = {n: blocks[n] for n in blocks if n in set(rpo)}
-    for n, b in keep.items():
-        b.succs, b.preds = succ[n], []
-    for n, b in keep.items():
-        for s in dict.fromkeys(b.succs):
-            keep[s].preds.append(n)
-    cfg = C.Cfg(fn, keep, C._idom(keep, rpo), {})
-    index = {b: k for k, b in enumerate(rpo)}
-    for b in rpo:
-        for s in dict.fromkeys(keep[b].succs):
-            if index[s] <= index[b]:
-                if not cfg.dominates(s, b):
-                    raise C.CfgError(f"{fn.name}: irreducible control flow after node "
-                                     f"splitting at {cfg.where(b)}")  # fmt: skip
-                cfg.loops.setdefault(s, set()).update(C._natural_loop(keep, s, b))
+    cfg = C._graph(fn, blocks, succ)
     C._check_shape(cfg)
     return cfg
 
@@ -1620,18 +1571,8 @@ def _absorb_exits(fn, entry, blocks, succ, split) -> bool:
     leaves the natural loop and re-enters it through the old test): copy that path, if it
     only reaches the header or the loop's other exits, into the loop. True if a loop
     changed."""
-    rpo = C._rpo(fn, entry, succ)
-    nodes = {b: C.Block(b, [], succ[b], []) for b in rpo}
-    for b in rpo:
-        for x in dict.fromkeys(succ[b]):
-            nodes[x].preds.append(b)
-    idom = C._idom(nodes, rpo)
-    index = {b: k for k, b in enumerate(rpo)}
-    loops: dict = {}
-    for b in rpo:
-        for x in dict.fromkeys(succ[b]):
-            if index[x] <= index[b] and _dominates(idom, entry, x, b):
-                loops.setdefault(x, set()).update(C._natural_loop(nodes, x, b))
+    loops = C._graph(fn, blocks, succ).loops  # no cycle has several entries here
+    index = {b: k for k, b in enumerate(C._rpo(fn, entry, succ))}
     for h, body in loops.items():
         outs = {x for u in body for x in succ[u] if x not in body}
         if len(outs) < 2:
@@ -1666,42 +1607,6 @@ def _back_path(succ, t, h, body, others):
             path.append(x)
             todo.append(x)
     return path
-
-
-def _dominates(idom, entry, a, b) -> bool:
-    while b != a:
-        if b == entry:
-            return False
-        b = idom[b]
-    return True
-
-
-def _blocks(fn):
-    """The blocks and successors of cfg.build (its first part)."""
-    blocks, alias, cur = {}, {}, None
-    for x in fn.body:
-        if isinstance(x, parse.Label):
-            if cur is not None and not cur.instrs and "#" not in x.name:
-                alias[x.name] = cur.name
-                continue
-            cur = blocks[x.name] = C.Block(x.name, [])
-        else:
-            if cur is None or (cur.instrs and C._ends(cur.instrs[-1])):
-                cur = blocks[f"@{x.line}"] = C.Block(f"@{x.line}", [])
-            cur.instrs.append(x)
-    names = list(blocks)
-    succ = {n: C._succs(fn, blocks, alias, n, names[k + 1] if k + 1 < len(names) else None)
-            for k, n in enumerate(names)}  # fmt: skip
-    for n in names:
-        last = blocks[n].instrs[-1] if blocks[n].instrs else None
-        if last is not None and last.base == "trap" and last.guard is None:
-            preds = [m for m, s in succ.items() if n in s]
-            other = set(succ[preds[0]]) - {n} if len(preds) == 1 else set()
-            if len(other) != 1:
-                raise C.CfgError(f"{fn.name}: trap at line {last.line} is not reached by "
-                                 "one conditional branch")  # fmt: skip
-            succ[n] = (other.pop(),)
-    return blocks, succ
 
 
 def _irreducible(fn, entry, succ) -> tuple | None:
@@ -1868,15 +1773,8 @@ def translate(ptx_text: str, entry: str, launch_records: list, pol: dict,
     `module`: ptx_text already parsed (never modified: the pass works on a copy of the
     entry function)."""
     facts = Facts(entry)
-    try:
-        _translate(facts, ptx_text, entry, launch_records, pol, module)
-    except interp.Unsupported as e:
-        facts.refusals.append({"kind": e.kind, "msg": str(e)})
-    except (C.CfgError, R.RegionError) as e:
-        facts.refusals.append({"kind": "gap", "msg": str(e)})
-    except Exception as e:  # a PtxSyntaxError, bad inputs or a bug: refused, not raised
-        facts.refusals.append({"kind": "error", "msg": f"{type(e).__name__}: {e}"})
-    if facts.refusals:
+    if T.guarded(facts, lambda: _translate(facts, ptx_text, entry, launch_records, pol,
+                                           module)):  # fmt: skip
         facts.roles, facts.sites, facts.params = [], [], {}
     return facts
 
@@ -1916,17 +1814,15 @@ def _translate(facts, text, entry, records, pol, module=None) -> None:
                                       for i in cfg.blocks[b].instrs)  # fmt: skip
         return loop_ids[key]
 
-    ctx = {"forks": forks, "dispatch": facts.dispatch, "bars": {}, "defs": {},
-           "keep": [], "loads": {}, "spins": {}, "pub": {}, "loop_instrs": loop_instrs,
-           "nsym": 0, "sym_ou": set()}  # fmt: skip
+    ctx = {"forks": forks, "dispatch": facts.dispatch, "loads": {}, "spins": {},
+           "pub": {}, "loop_instrs": loop_instrs, "nsym": 0, "sym_ou": set()}  # fmt: skip
     nwarps = facts.block[0] // 32
     for role in roles:
         tree = R.build(cfg, role)
-        warps = role.warps or tuple(range(nwarps))
-        if list(warps) != list(range(warps[0], warps[0] + len(warps))):
-            raise interp.Unsupported(
-                "role", role.name, f"warps {warps} are not contiguous"
-            )
+        warps = T.role_warps(role, nwarps)
+        # _bars' and _arm_defs' memos, by id of this role's region tree's lists and Ifs
+        # (the tree outlives them: its ids stay its own)
+        ctx["bars"], ctx["defs"] = {}, {}
         for tr in _role(k, tree, role.name, warps[0], len(warps), ctx, role.gate):
             name = _name(pol["family"], role.name, tr, warps)
             facts.roles.append({"name": name, "w0": tr.w0, "warps": tr.nw,
@@ -1967,25 +1863,10 @@ def _name(family: str, role: str, tr, warps) -> str:
 
 def _role(k, tree, name: str, w0: int, nw: int, ctx: dict, gate=None) -> list:
     """The translators of one role, after splitting it into warp ranges (translate.py
-    _role, without the P0 prologues; `gate`: cfg.Role.gate)."""
-    out, todo = [], [(w0, nw)]
-    while todo:
-        a, n = todo.pop(0)
-        tr = _Nb(k, tree, a, n, name, ctx, (w0, nw))
-        try:
-            if gate is None:
-                tr.run(tree.body)
-            else:
-                tr.run_gated(tree.body, gate)
-            tr.flush()
-        except interp.SplitWarps as s:
-            todo = s.groups + todo
-            continue
-        except interp.Unsupported:
-            raise
-        except Exception as e:  # a bug of the core (an ExprError, ...): refused there
-            tr.fail(tr.cur, f"{type(e).__name__}: {e}", "error")
-        out.append(tr)
+    split_role, without the P0 prologues; `gate`: cfg.Role.gate), their region keys
+    signed (_sign)."""
+    out = T.split_role(lambda a, n: _Nb(k, tree, a, n, name, ctx, (w0, nw)), tree, w0,
+                       nw, gate)  # fmt: skip
     _sign(out)
     return out
 
@@ -1993,18 +1874,16 @@ def _role(k, tree, name: str, w0: int, nw: int, ctx: dict, gate=None) -> list:
 def _sign(trs: list) -> None:
     """The keys of the keyed nb_rep regions of the roles split from one role (module doc
     "Repeated regions"): where those regions' path signatures for one key differ, each
-    key gets `#n`, n the rank of its signature among that key's; the end event takes its
-    begin's key."""
+    key gets `#n`, n the rank of its signature among that key's; an end event keeps the
+    key it was emitted with (Lean reads the key of a begin event only). A translator
+    keeps the keyed regions of its statements only (restore drops those of the
+    statements it drops)."""
     recs, sigs = [], {}
     for tr in trs:
-        if not tr.track:
-            continue
-        live = {id(s) for s in _events(tr.stmts)}
         for ev, spec in tr.keyed:
-            if id(ev) in live:
-                sig = tr.signature(spec)
-                recs.append((ev, sig))
-                sigs.setdefault(ev["key"], set()).add(sig)
+            sig = tr.signature(spec)
+            recs.append((ev, sig))
+            sigs.setdefault(ev["key"], set()).add(sig)
     rank = {k: {s: n for n, s in enumerate(sorted(v), 1)} for k, v in sigs.items()
             if len(v) > 1}  # fmt: skip
     if not rank:
@@ -2012,27 +1891,3 @@ def _sign(trs: list) -> None:
     for ev, sig in recs:
         if ev["key"] in rank:
             ev["key"] = f"{ev['key']}#{rank[ev['key']][sig]}"
-    for tr in trs:
-        _pair_keys(tr.stmts)
-
-
-def _events(stmts):
-    """The nb_rep begin events of a statement list, nested statements included."""
-    for s in stmts:
-        if s.get("ev") == "nb_rep" and s["begin"]:
-            yield s
-        for k in ("then", "else", "body"):
-            yield from _events(s.get(k, ()))
-
-
-def _pair_keys(stmts) -> None:
-    """Every nb_rep end event takes the key of its begin (kir.py: they nest per list)."""
-    open_ = []
-    for s in stmts:
-        if s.get("ev") == "nb_rep":
-            if s["begin"]:
-                open_.append(s)
-            elif open_:
-                s["key"] = open_.pop()["key"]
-        for k in ("then", "else", "body"):
-            _pair_keys(s.get(k, ()))

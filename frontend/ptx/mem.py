@@ -97,7 +97,7 @@ import re
 from pathlib import Path
 
 from . import cluster, expr as E, ops, sync, tma
-from .interp import Data, LOCAL, Translator, Unsupported
+from .interp import Data, LOCAL, shared_write, Translator, Unsupported
 from .parse import type_bytes
 
 # Mnemonics of global loads and stores (a generic one by its address).
@@ -264,7 +264,7 @@ class Memory:
 
     # ---------------------------------------------------------------- dispatch
     def execute(self, tr: Translator, i, mn: str) -> None:  # noqa: C901 (one case per op family)
-        if mn.startswith(tma.SHARED_WRITES):  # (tma.py: tensormap staging buffers)
+        if shared_write(mn) in tma.CLOSE_ALL:  # (tma.py: tensormap staging buffers)
             self.tma.close_staging(tr)
         if mn == "ld.param":
             return self._ld_param(tr, i)
@@ -846,13 +846,14 @@ class Memory:
         for (
             u
         ) in uses:  # a select between two arrays: `if c { event A } else { event B }`
-            if u.else_event is not None:
+            if u.select is not None:
+                cond, other = u.select
                 if "n" in u.event:
-                    u.else_event["n"] = u.event["n"]
+                    other["n"] = u.event["n"]
                 then = dict(u.event)
                 u.event.clear()
-                u.event.update({"op": "if", "cond": u.cond, "then": [then],
-                                "else": [u.else_event], "loc": then["loc"]})  # fmt: skip
+                u.event.update({"op": "if", "cond": cond, "then": [then],
+                                "else": [other], "loc": then["loc"]})  # fmt: skip
         return [
             {"name": names[(s, a)], "count": c, "num": {"e": "const", "w": 32, "v": n}}
             for s, a, n, c, _k in arrays
@@ -945,7 +946,7 @@ def _select_arms(tr: Translator, a):
     if s is None:
         return None
     c = tr.uniform(s[0])
-    return None if c is None or E.thread_varying(c) else (c, s[1], s[2])
+    return None if c is None else (c, s[1], s[2])
 
 
 def _pick_bases(tr: Translator, e):
@@ -1132,28 +1133,31 @@ def _split(arrays: list, uses: list, profiles: dict) -> list:
 def _resolve(u, arrays: list, names: dict) -> None:
     """Set the event's bar and idx: the array holding the constant part c of its
     offset, idx = (c - start) / 8 + the rest / 8 (BarrierUse.rest); if no array holds c,
-    the one holding the constant counting its induction variables' entry constants
-    (BarrierUse.alt: LLVM's strength-reduced `start + 8 * i`), with its rest."""
-    c, rest = u.const, u.rest
+    the first other reading of the offset (BarrierUse.readings) whose constants all are in
+    arrays: the constant counting its induction variables' entry constants (LLVM's
+    strength-reduced `start + 8 * i`), with its rest, or a select between two arrays."""
 
     def holding(c):
         return next(
             (x for x in arrays if x[0] == u.sym and x[1] <= c < x[1] + 8 * x[2]), None
         )
 
-    arr = holding(c)
-    if arr is None and u.alt is not None and holding(u.alt[0]) is not None:
-        (c, rest), arr = u.alt, holding(u.alt[0])
-    if arr is None and u.arms is not None and all(holding(x[0]) for x in u.arms[1:]):
-        # a select between two arrays (BarrierUse.arms): the event for the first arm, a
-        # copy for the second, wrapped in `if` the condition by Memory.barriers
-        (c, rest), (c2, rest2) = u.arms[1:]
-        u.else_event, u.cond = dict(u.event), u.arms[0]
-        _set_slot(u, u.else_event, holding(c2), c2, rest2, names)
-        arr = holding(c)
-    if arr is None:
-        raise _err(u, f"{u.sym}+{c} is not an initialized mbarrier")
-    _set_slot(u, u.event, arr, c, rest, names)
+    readings: tuple = ((None, ((u.const, u.rest),)), *u.readings)
+    for reading in readings:
+        arrs = [holding(c) for c, _rest in reading[1]]
+        if all(arrs):
+            break
+    else:
+        raise _err(u, f"{u.sym}+{u.const} is not an initialized mbarrier")
+    cond, arms = reading
+    if cond is not None:
+        # a select between two arrays: the event for the first arm, a copy for the
+        # second, wrapped in `if` the condition by Memory.barriers
+        u.select = (cond, dict(u.event))
+        c, rest = arms[1]
+        _set_slot(u, u.select[1], arrs[1], c, rest, names)
+    c, rest = arms[0]
+    _set_slot(u, u.event, arrs[0], c, rest, names)
 
 
 def _set_slot(u, event: dict, arr, c: int, rest, names: dict) -> None:

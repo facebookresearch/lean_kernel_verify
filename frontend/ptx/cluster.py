@@ -108,7 +108,7 @@ import math
 from dataclasses import dataclass
 
 from . import expr as E
-from .interp import BarrierUse, Data, Translator
+from .interp import BarrierUse, Data, Translator, write_bytes
 
 PEER_BIT = 1 << 24  # the CTA-pair bit of a shared::cluster address (module doc)
 CLUSTER_BAR = "cluster_barrier"  # the legacy frontend's names (frontend/cute/interp.py)
@@ -185,7 +185,7 @@ def own_cta(tr: Translator, i, k: int, what: str) -> None:
 
 def pair(tr: Translator, i, mn: str) -> None:
     """A cta_group::2 instruction runs on a CTA pair: the cluster has an even size."""
-    if math.prod(tr.k.cluster) % 2:
+    if tr.k.ncta % 2:
         tr.fail(
             i, f"{mn} without a cluster of CTA pairs (cluster {tuple(tr.k.cluster)})"
         )
@@ -322,7 +322,7 @@ def load_slot(tr: Translator, i) -> tuple:
     v = _address(tr, i.operands[2])
     fields: dict = {}
     if isinstance(v, Remote):  # TLX: mapa to the pair leader (module doc)
-        n = math.prod(tr.k.cluster)
+        n = tr.k.ncta
         ranks = per_rank(tr, v.cta)
         own = ranks == list(range(n))
         if not own and not (group2 and ranks == [r & ~1 for r in range(n)]):
@@ -356,15 +356,7 @@ def bulk_s2cluster(tr: Translator, i) -> None:
     complete_tx::bytes.op.type (same operands): complete_tx(n) on the slot of mbar's CTA,
     which must be dst's."""
     _several(tr, i, "a shared::cluster bulk copy")
-    dst, bar = _address(tr, i.operands[0]), _address(tr, i.operands[3])
-    if not (isinstance(dst, Remote) and isinstance(bar, Remote)):
-        tr.fail(i, "shared::cluster bulk copy whose destination and mbarrier are not mapa "
-                   "results")  # fmt: skip
-    same = tr.uniform(E.cmp("eq", dst.cta, bar.cta))
-    if same is None or not E.is_const(same, 1):
-        tr.fail(
-            i, "shared::cluster bulk copy into one CTA completing on another's mbarrier"
-        )
+    bar = _dst_mbarrier(tr, i, "shared::cluster bulk copy", 3)
     n = tr.as_int(tr.operand(i, 2, 32), "the bulk copy size")
     _one_lane(tr, i, "shared::cluster bulk copy")
     sym, off = _symbol_offset(tr, i, bar.addr)
@@ -378,21 +370,24 @@ def async_store(tr: Translator, i, mn: str) -> None:
     (or reduces into) another CTA's shared memory and completes its bytes on mbar, which
     must be in dst's CTA: a complete_tx of the access's bytes (vector width x element
     size) per executing thread on that CTA's slot. The data is Data (shared memory)."""
-    from .mem import _elem_bits, _vec  # mem.py imports this module (through sync.py)
-
     what = mn.split(".")[0]
     _several(tr, i, what)
-    dst, bar = _address(tr, i.operands[0]), _address(tr, i.operands[2])
+    bar = _dst_mbarrier(tr, i, what, 2)
+    sym, off = _symbol_offset(tr, i, bar.addr)
+    tr.barrier_event("complete_tx", sym, off, "thread",
+                     bytes=E.const(write_bytes(i.opcode), 32), cta=bar.cta)  # fmt: skip
+
+
+def _dst_mbarrier(tr: Translator, i, what: str, k: int) -> Remote:
+    """The mbarrier operand k of a write of another CTA's shared memory at operand 0, both
+    mapa results of one CTA (the destination's), else refused."""
+    dst, bar = _address(tr, i.operands[0]), _address(tr, i.operands[k])
     if not (isinstance(dst, Remote) and isinstance(bar, Remote)):
         tr.fail(i, f"{what} whose destination and mbarrier are not mapa results")
     same = tr.uniform(E.cmp("eq", dst.cta, bar.cta))
     if same is None or not E.is_const(same, 1):
         tr.fail(i, f"{what} into one CTA completing on another's mbarrier")
-    n = _vec(i.opcode) * _elem_bits(i.opcode) // 8
-    sym, off = _symbol_offset(tr, i, bar.addr)
-    tr.barrier_event(
-        "complete_tx", sym, off, "thread", bytes=E.const(n, 32), cta=bar.cta
-    )
+    return bar
 
 
 # ----------------------------------------------------------- after the roles
@@ -406,7 +401,7 @@ def barriers(translators: list) -> list:
     ):
         return []
     k = translators[0].k
-    count = k.block[0] * math.prod(k.cluster)
+    count = k.block[0] * k.ncta
     return [{"name": CLUSTER_BAR, "count": {"e": "const", "w": 32, "v": count},
              "num": {"e": "const", "w": 32, "v": 1}}]  # fmt: skip
 
@@ -470,7 +465,7 @@ def _slot(tr: Translator, i, op) -> tuple:
 
 def _cta(tr: Translator, i, cta) -> dict:
     """{"cta": cta}, or {} in a cluster of one CTA (cta must be 0 there)."""
-    if math.prod(tr.k.cluster) > 1:
+    if tr.k.ncta > 1:
         return {"cta": cta}
     if not _is_own(tr, cta):
         tr.fail(
@@ -482,7 +477,7 @@ def _cta(tr: Translator, i, cta) -> dict:
 
 def _is_own(tr: Translator, cta) -> bool:
     """cta is the issuing CTA's rank (in every thread of the role)."""
-    if math.prod(tr.k.cluster) == 1:
+    if tr.k.ncta == 1:
         return E.is_const(cta, 0)
     same = tr.uniform(E.cmp("eq", cta, tr.sreg("%cluster_ctarank")))
     return same is not None and E.is_const(same, 1)
@@ -490,7 +485,7 @@ def _is_own(tr: Translator, cta) -> bool:
 
 def _several(tr: Translator, i, what: str) -> None:
     """The KIR forms cta_mask and complete_tx need a cluster of several CTAs."""
-    if math.prod(tr.k.cluster) == 1:
+    if tr.k.ncta == 1:
         tr.fail(i, f"{what} outside a cluster of several CTAs")
 
 

@@ -272,6 +272,15 @@ def build(fn, check_exits=True):
     """The shape-checked CFG of a parsed function; CfgError outside the shape. With
     `check_exits` False the loops' exits are not checked (proto.py finds its regions on
     that CFG, then the rewritten function is built again with the check)."""
+    cfg = _graph(fn, *_blocks(fn))
+    _check_shape(cfg, check_exits)
+    return cfg
+
+
+def _blocks(fn):
+    """({name: Block} in text order, {name: successors}): the basic blocks of fn (module
+    doc) before reachability, with a trap block's successor rewired (build's first part;
+    nbar.py splits nodes between the parts)."""
     blocks, alias, cur = {}, {}, None
     for x in fn.body:
         if isinstance(x, parse.Label):
@@ -302,11 +311,19 @@ def build(fn, check_exits=True):
                 raise CfgError(f"{fn.name}: trap at line {last.line} is not reached by "
                                "one conditional branch")  # fmt: skip
             succ[n] = (other.pop(),)
-    rpo = _rpo(fn, names[0], succ)
+    return blocks, succ
+
+
+def _graph(fn, blocks, succ):
+    """The Cfg of the blocks reachable from the first one under `succ` (their succs and
+    preds set), with dominators and natural loops, without the shape check; CfgError if a
+    cycle is entered other than through its header."""
+    rpo = _rpo(fn, next(iter(blocks)), succ)
     reach = set(rpo)
-    blocks = {n: blocks[n] for n in names if n in reach}
+    blocks = {n: b for n, b in blocks.items() if n in reach}
     for n, b in blocks.items():
-        b.succs = succ[n]
+        b.succs, b.preds = succ[n], []
+    for n, b in blocks.items():
         for s in dict.fromkeys(b.succs):
             blocks[s].preds.append(n)
     cfg = Cfg(fn, blocks, _idom(blocks, rpo), {})
@@ -321,7 +338,6 @@ def build(fn, check_exits=True):
                     f"{cfg.where(s)} enters a cycle other than through its header"
                 )
             cfg.loops.setdefault(s, set()).update(_natural_loop(blocks, s, b))
-    _check_shape(cfg, check_exits)
     return cfg
 
 
@@ -491,17 +507,10 @@ def _warp_specialized(cfg, h, ld, arms, nwarps):
     blocks = cfg.blocks
     db, D, wid, default, worker = _entry(cfg, h, nwarps)
     smem, K = _state_base(cfg, h, ld, wid)
-    ret = next(
-        b
-        for b, blk in blocks.items()
-        if blk.instrs and blk.instrs[-1].base in ("ret", "exit")
-    )
+    ret = _ret(cfg)
     pre, side, dflt, gate = _parts(cfg, h, db, default, worker, ret)
     warps, E = _state_map(cfg, smem, K, D, nwarps, arms, default, dflt, ret, gate)
-    first = {b: blocks[b].succs for b in dflt}
-    out = [
-        Role("default", tuple(range(D)), cfg.entry, _flow(cfg, pre, db, default, first))
-    ]
+    out = [_default_role(cfg, D, pre, db, default, dflt)]
     padding = []
     for k in sorted(set(warps.values())):
         path, t = arms[k]
@@ -509,12 +518,9 @@ def _warp_specialized(cfg, h, ld, arms, nwarps):
         pad = all(_syncs_only(i) for u in region for i in blocks[u].instrs)
         if pad:
             padding.append(k)
-        rest = {u: blocks[u].succs for u in side}
-        rest.update(zip(path, [(u,) for u in path[1:] + (t,)]))
-        rest[ret] = ()
-        rest.update({u: _to(blocks[u].succs, h, ret) for u in region})
         mine = tuple(w for w, s in warps.items() if s == k)
-        succs = _flow(cfg, pre, db, worker, rest)
+        own = {u: _to(blocks[u].succs, h, ret) for u in region}
+        succs = _worker_flow(cfg, pre, db, worker, side, path, t, own, ret)
         out.append(Role(f"partition{k}", mine, cfg.entry, succs, pad,
                         t if gate is not None else None))  # fmt: skip
     cut = (gate.g, gate.full) if gate is not None else None
@@ -647,15 +653,11 @@ def _direct_link(cfg, b, path):
 def _direct_roles(cfg, h, db, D, default, worker, arms):
     """The roles of a direct dispatch and its Dispatch (module doc, items forks)."""
     blocks = cfg.blocks
-    ret = next(b for b, blk in blocks.items()
-               if blk.instrs and blk.instrs[-1].base in ("ret", "exit"))  # fmt: skip
+    ret = _ret(cfg)
     pre = _forks(cfg, cfg.entry, {default, worker}, "before the dispatch")
     side = _forks(cfg, worker, {h}, "on the worker side") if worker != h else {}
     dflt = _forks(cfg, default, set(), "in the default")
-    if db not in pre or not (cfg.dominates(db, default) and cfg.dominates(db, worker)):
-        raise _no(cfg, "entry", f"{cfg.where(db)} does not dominate both sides")
-    if any(_nforks(cfg, b) for b in [*pre, *side]):
-        raise _no(cfg, "forks", "a fork barrier before the dispatch header")
+    _check_sides(cfg, db, default, worker, pre, side, "dispatch header")
     if dflt.get(ret) != 2:
         n = dflt.get(ret, "no")
         raise _no(
@@ -688,19 +690,13 @@ def _direct_roles(cfg, h, db, D, default, worker, arms):
             raise _no(cfg, "chain", f"warps {ws} reach the partition at {cfg.where(t)} "
                                     "through different links")  # fmt: skip
     order = sorted(arms, key=lambda a: (a[0] in pad, min(arms[a])))
-    first = {b: blocks[b].succs for b in dflt}
-    out = [
-        Role("default", tuple(range(D)), cfg.entry, _flow(cfg, pre, db, default, first))
-    ]
+    out = [_default_role(cfg, D, pre, db, default, dflt)]
     warps = {}
     for k, (t, path) in enumerate(order):
         ws = arms[t, path]
         warps.update(dict.fromkeys(ws, k))
-        rest = {u: blocks[u].succs for u in side}
-        rest.update(zip(path, [(u,) for u in path[1:] + (t,)]))
-        rest.update({u: blocks[u].succs for u in regions[t]})
-        rest[ret] = ()
-        succs = _flow(cfg, pre, db, worker, rest)
+        own = {u: blocks[u].succs for u in regions[t]}
+        succs = _worker_flow(cfg, pre, db, worker, side, path, t, own, ret)
         out.append(Role(f"partition{k}", tuple(sorted(ws)), cfg.entry, succs, t in pad))
     padding = tuple(k for k, (t, _path) in enumerate(order) if t in pad)
     return out, Dispatch(D, dict(sorted(warps.items())), None, padding, db, h, True)
@@ -727,16 +723,44 @@ def _parts(cfg, h, db, default, worker, ret):
         if set(x) & set(y):
             shared = cfg.where(min(set(x) & set(y)))
             raise _no(cfg, "entry", f"the {a} and {c} code share {shared}")
-    if db not in pre or not (cfg.dominates(db, default) and cfg.dominates(db, worker)):
-        raise _no(cfg, "entry", f"{cfg.where(db)} does not dominate both sides")
-    if any(_nforks(cfg, b) for b in [*pre, *side]):
-        raise _no(cfg, "forks", "a fork barrier before the switch loop header")
+    _check_sides(cfg, db, default, worker, pre, side, "switch loop header")
     if gate is None and dflt.get(ret) != 4:
         n = dflt.get(ret, "no")
         raise _no(
             cfg, "forks", f"the default reaches ret after {n} fork barriers, not 4"
         )
     return pre, side, dflt, gate
+
+
+def _ret(cfg):
+    """The block of the kernel's one ret (or exit)."""
+    return next(b for b, blk in cfg.blocks.items()
+                if blk.instrs and blk.instrs[-1].base in ("ret", "exit"))  # fmt: skip
+
+
+def _check_sides(cfg, db, default, worker, pre, side, header):
+    """Items entry and forks (both dispatches): the dispatch block db, pre-dispatch code,
+    dominates both sides; no fork barrier runs before the `header`."""
+    if db not in pre or not (cfg.dominates(db, default) and cfg.dominates(db, worker)):
+        raise _no(cfg, "entry", f"{cfg.where(db)} does not dominate both sides")
+    if any(_nforks(cfg, b) for b in [*pre, *side]):
+        raise _no(cfg, "forks", f"a fork barrier before the {header}")
+
+
+def _default_role(cfg, D, pre, db, default, dflt):
+    """The default's Role (both dispatches): warps 0..D-1, its blocks dflt."""
+    succs = _flow(cfg, pre, db, default, {b: cfg.blocks[b].succs for b in dflt})
+    return Role("default", tuple(range(D)), cfg.entry, succs)
+
+
+def _worker_flow(cfg, pre, db, worker, side, path, t, own, ret):
+    """A worker role's successors (both dispatches): the worker side, the links of
+    `path` resolved each to the next and the last to t, its region `own` and ret."""
+    rest = {u: cfg.blocks[u].succs for u in side}
+    rest.update(zip(path, [(u,) for u in path[1:] + (t,)]))
+    rest.update(own)
+    rest[ret] = ()
+    return _flow(cfg, pre, db, worker, rest)
 
 
 @dataclass
@@ -1008,13 +1032,7 @@ def _entry(cfg, h, nwarps):
     ):
         raise _no(cfg, "entry", f"the branch at line {br.line} is not on wid < D")
     wid = _def(cfg, *pp, p.operands[1][1])
-    shfl = _instr(cfg, wid)
-    if not (
-        shfl
-        and ops.mnemonic(shfl.opcode) == "shfl.sync.idx"
-        and shfl.operands[2:] == (("imm", 0), ("imm", 31), ("imm", -1))
-        and _is_warp_id(cfg, wid, shfl.operands[1])
-    ):
+    if not _is_wid(cfg, wid):
         raise _no(
             cfg,
             "entry",

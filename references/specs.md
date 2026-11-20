@@ -399,8 +399,8 @@ role, so every event is executed by every warp of its role:
   condition is computed from (data and control dependence, a loop's exits for the
   registers it writes; a value held as the role's own instance is a decision no other
   role shares). Where the signatures of one key differ between the roles split from one
-  role, the key gets `#<n>`, and regions whose conditions came by different paths never
-  pair.
+  role, the key (of the begin event; an end event's key is not read) gets `#<n>`, and
+  regions whose conditions came by different paths never pair.
 
 **Decision** (per input and CTA; `KV.runNb`, theorem `KV.Holds .namedBarriers`):
 

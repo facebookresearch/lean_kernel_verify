@@ -13,6 +13,10 @@
     writes(ptx_text, entry, params) -> [tensor] | None
                                                    the tensors a kernel may write, for
                                                    the stale-data checks of a refused one
+    guarded(facts, run), role_warps(role, nwarps), split_role(make, tree, w0, nw, ...)
+                                                   the driver's parts nbar.py's pass
+                                                   shares: refusals, a role's warps, its
+                                                   translation per run of warps
 
 The family assembly code (frontend/ttgir/to_kir.py build, frontend/cute/to_kir.py
 Variant.kir) turns Facts into its KIR with its own naming, inputs and output files: it
@@ -229,11 +233,16 @@ def translate(ptx_text: str, entry: str, launch_records: list, pol: dict,
     facts = Facts(entry)
     run = _translate_gsync if pol.get("gsync") is True else _translate
     try:
-        _refused(facts, run, facts, ptx_text, entry, launch_records, pol, None, module)
+        guarded(
+            facts,
+            lambda: run(facts, ptx_text, entry, launch_records, pol, None, module),
+        )
     except _Handoffs as h:
-        facts = Facts(entry)
-        _refused(facts, run, facts, ptx_text, entry, launch_records, pol, h.channels,
-                 module)  # fmt: skip
+        facts, channels = Facts(entry), h.channels
+        guarded(
+            facts,
+            lambda: run(facts, ptx_text, entry, launch_records, pol, channels, module),
+        )
         if facts.refusals:  # the first refusal, and why the channels did not carry it
             kind = "error" if facts.refusals[0]["kind"] == "error" else h.first.kind
             facts.refusals = [{"kind": kind, "msg": f"{h.first} (translated again "
@@ -245,10 +254,13 @@ def translate(ptx_text: str, entry: str, launch_records: list, pol: dict,
     return facts
 
 
-def _refused(facts, fn, *args) -> None:
-    """fn(*args), its refusal recorded in facts.refusals."""
+def guarded(facts, run) -> bool:
+    """Run `run()`, one variant's translation into `facts` (every pass: nbar.py's too): a
+    refusal (interp.Unsupported, of its kind; a CfgError or RegionError: a gap) or any
+    other exception is appended to facts.refusals, never raised, but _Handoffs (translate
+    the variant again with handoff channels). True if refused."""
     try:
-        fn(*args)
+        run()
     except _Handoffs:
         raise
     except interp.Unsupported as e:
@@ -257,6 +269,7 @@ def _refused(facts, fn, *args) -> None:
         facts.refusals.append({"kind": "gap", "msg": str(e)})
     except Exception as e:  # a PtxSyntaxError, bad inputs or a bug: refused, not raised
         facts.refusals.append({"kind": "error", "msg": f"{type(e).__name__}: {e}"})
+    return bool(facts.refusals)
 
 
 def _translate_gsync(facts, ptx_text, entry, records, pol, handoffs=None,
@@ -304,18 +317,24 @@ def _translate_gsync(facts, ptx_text, entry, records, pol, handoffs=None,
     )
 
 
-def _channels(cands: dict, loads: dict) -> dict:
+def _channels(cands: dict, loads: dict, extern: set) -> dict:
     """The handoff channels of interp.Kernel.handoff_cands: the bytes one role stores that
     overlap no other candidate's and that another role loads after a wait
-    (Kernel.handoff_loads), by name."""
+    (Kernel.handoff_loads), by name: `<region>+<offset>`, the region of the .extern
+    variables (interp._region: their first symbol, `extern` the .extern symbols) named
+    `%extern`, the dynamic shared memory they all start at."""
     out = {}
-    for (region, lo, hi), roles in sorted(cands.items()):
+    named = {
+        ("%extern" if r in extern else r, lo, hi): (r, lo, hi) for r, lo, hi in cands
+    }
+    for (name, lo, hi), (region, _lo, _hi) in sorted(named.items()):
+        roles = cands[region, lo, hi]
         if len(roles) == 1 and not any(
             r == region and a < hi and lo < b and (a, b) != (lo, hi)
             for r, a, b in cands
         ) and any(r == region and lo <= a and b <= hi and readers - roles
                   for (r, a, b), readers in loads.items()):  # fmt: skip
-            out[f"{region}+{lo}"] = (region, lo, hi, next(iter(roles)))
+            out[f"{name}+{lo}"] = (region, lo, hi, next(iter(roles)))
     return out
 
 
@@ -339,7 +358,7 @@ def _translate(
     if "P1-1" in specs and pol["family"] != "cute":
         raise interp.Unsupported("P1", fn.name, "no P1-1 pass for Triton kernels")
     extern = {v.name for v in module.vars + fn.vars if v.space == "shared" and v.extern}
-    p1 = tmem.P1(specs, extern) if specs else None  # interp.Kernel.p1
+    p1 = tmem.P1(specs) if specs else None  # interp.Kernel.p1
     switches = C.lower_switches(fn)
     regions = []
     # work anchors by instruction (the rewrite below keeps the other instructions' objects)
@@ -370,7 +389,7 @@ def _translate(
             "records": records,
             "target": facts.target,
             "shared_align": align,  # cluster.py: the peer-bit mask
-            "shared_extern": extern,  # interp.py: one region (the captures' footprints)
+            "shared_extern": extern,  # interp.py: one region (shared-write footprints)
             # mem.py: generic shared writes (the state bytes of a switch-loop dispatch)
             "dispatch": dispatch is not None and not dispatch.direct,
         },
@@ -394,12 +413,8 @@ def _translate(
         spins = k.gsync.spins if k.gsync.sync or k.gsync.spins else None
     translators, first = [], None
     for role in roles:
-        warps = role.warps or tuple(range(facts.block[0] // 32))
         try:
-            if list(warps) != list(range(warps[0], warps[0] + len(warps))):
-                raise interp.Unsupported(
-                    "role", role.name, f"warps {warps} are not contiguous"
-                )
+            warps = role_warps(role, facts.block[0] // 32)
             tree = R.build(cfg, role, spins)
             got = _role(k, tree, role.name, warps[0], len(warps), pol, role.gate)
         except interp.DataRoot as e:
@@ -421,7 +436,7 @@ def _translate(
         translators += got
     if first is not None:  # (TTGIR partitions: a CuTe role is a range of warps)
         part = pol["roles"] == "partition"
-        channels = _channels(k.handoff_cands, k.handoff_loads) if part else {}
+        channels = _channels(k.handoff_cands, k.handoff_loads, extern) if part else {}
         if not channels:
             raise first
         raise _Handoffs(first, channels)
@@ -484,14 +499,25 @@ def _translate(
             t["metadata"] = False
 
 
-def _role(k, tree, name, w0, nw, pol, gate=None) -> list:
-    """The translators of one role: itself, or (policy "warps") its parts after
-    partition refinement (frontend/cute/to_kir.py Variant.roles). `gate`: a worker of a
-    dispatch that may run no round, its region's first block (cfg.Role.gate)."""
+def role_warps(role, nwarps: int) -> tuple:
+    """The warps of a cfg.Role (every warp of the block for a kernel without .reqntid);
+    refused unless contiguous (every pass: nbar.py's too)."""
+    warps = role.warps or tuple(range(nwarps))
+    if list(warps) != list(range(warps[0], warps[0] + len(warps))):
+        raise interp.Unsupported("role", role.name, f"warps {warps} are not contiguous")
+    return warps
+
+
+def split_role(make, tree, w0: int, nw: int, gate=None, finish=None) -> list:
+    """The translators of one role (every pass: nbar.py's too): translator `make(w0, nw)`
+    runs the role's region tree from the top, again for each run of warps an
+    interp.SplitWarps splits it into, in warp order. `gate`: a worker of a dispatch that
+    may run no round, its region's first block (cfg.Role.gate, run_gated). `finish(out,
+    tr)` after each translation, `out` the translators kept so far: False leaves tr out."""
     out, todo = [], [(w0, nw)]
     while todo:
         a, n = todo.pop(0)
-        tr = interp.Translator(k, tree, a, n, name)
+        tr = make(a, n)
         try:
             if gate is None:
                 tr.run(tree.body)
@@ -505,16 +531,30 @@ def _role(k, tree, name, w0, nw, pol, gate=None) -> list:
             raise
         except Exception as e:  # a bug of the core (an ExprError, ...): refused there
             tr.fail(tr.cur, f"{type(e).__name__}: {e}", "error")
+        if finish is None or finish(out, tr):
+            out.append(tr)
+    return out
+
+
+def _role(k, tree, name, w0, nw, pol, gate=None) -> list:
+    """The translators of one role: itself, or (policy "warps") its parts after
+    partition refinement (frontend/cute/to_kir.py Variant.roles). `gate`: a worker of a
+    dispatch that may run no round, its region's first block (cfg.Role.gate)."""
+
+    def finish(out, tr) -> bool:
         _novalue(k, tr)
         if k.work_mode == "each" and k.work_fields:  # fields are -1 until an anchor
             tr.stmts[:0] = [{"op": "let", "var": f"work_{f}", "expr": {"e": "const", "w": 64, "v": -1}}
                             for f in k.work_fields]  # fmt: skip
         tr.stmts[:0] = cluster.prologue(tr)  # the role's cluster barrier parity
-        if out and _idle(out[-1]) and _idle(tr) and out[-1].w0 + out[-1].nw == a:
-            out[-1].nw += n  # warps that only park, split by LLVM's branches: one role
-            continue
-        out.append(tr)
-    return out
+        if out and _idle(out[-1]) and _idle(tr) and out[-1].w0 + out[-1].nw == tr.w0:
+            # warps that only park, split by LLVM's branches: one role
+            out[-1].nw += tr.nw
+            return False
+        return True
+
+    return split_role(lambda a, n: interp.Translator(k, tree, a, n, name), tree, w0, nw,
+                      gate, finish)  # fmt: skip
 
 
 def _novalue(k, tr) -> None:
