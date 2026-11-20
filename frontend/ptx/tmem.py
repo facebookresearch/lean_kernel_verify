@@ -36,7 +36,11 @@ Events (the CuTe P1 pass's rules, ops_tmem.py, on PTX):
   max of the two). M and N come from the instruction descriptor's known bits (expr._bit:
   N >> 3 at bits 17-22; M >> 4 at bits 24-28, or M >> 7 at bits 27-28 for the block-scaled
   kinds; ISA instruction descriptor). The disable-output-lane mask is ignored (D is taken
-  as all 128 lanes, a superset). An SF address keeps the byte the DSL selects in bits
+  as all 128 lanes, a superset). `.collector::a::fill` and `::discard` read A from its
+  operand as without them; `::use` and `::lastuse` read the copy of A an earlier `::fill`
+  kept in the collector buffer, taken as a read of A's operand at this MMA too: more reads
+  than the hardware makes, so a reuse race on A is never missed, but one the buffer
+  avoids may be reported. An SF address keeps the byte the DSL selects in bits
   30-31 (the descriptor's SF id picks it): those bits are dropped, as the CuTe pass floors
   the SF pointer to its column.
 * cp, shift and mma are issued by one thread of a one-warp role, the elected lane of an

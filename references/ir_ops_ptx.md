@@ -31,7 +31,8 @@ arithmetic, comparison, move or conversion op on any floating-point type is `<op
 `.sem.scope` is dropped (`.release.cta` for arrive, `.acquire.cta` for
 try_wait/test_wait, `.relaxed.cta` for expect_tx/complete_tx), and so is
 `bar`/`barrier`'s optional `.cta` (it does not change the instruction); tcgen05.mma's
-`.scale_vec::1X/2X/4X` is `.block32/.block32/.block16`; `ld`, `st`, `atom` and `red`
+`.scale_vec::1X/2X/4X` is `.block32/.block32/.block16` and its
+`.collector::a::{fill,use,lastuse,discard}` is dropped (the row below); `ld`, `st`, `atom` and `red`
 drop memory ordering and scope (`.weak .relaxed .acquire .release .acq_rel .volatile`,
 `.cta .cluster .gpu .sys`: the model has no weak memory, as the fence rows; but a strong
 or `.cv` load's value is Data, "Global memory"), cache operators (`.ca .cg .cs .lu .cv
@@ -330,7 +331,7 @@ events.
 | `tcgen05.ld/st.sync.aligned.32x32b.xN [taddr]` | `tmem` ld/st, `data` lanes [L, L+32) x columns [C, C+N) | one per issuing warp: every lane active, taddr the same in all lanes; other shapes (`16x64b`, `16x128b`, `16x256b`, `16x32bx2`): refused (R5) |
 | `tcgen05.cp.cta_group::{1,2}.{128x256b, 128x128b, 64x128b.warpx2::01_23/02_13, 32x128b.warpx4} [taddr], desc` | `tmem` cp, `data` write, lanes [0, 128) x 8 columns (256b) or 4 | one thread of a one-warp role (an elected lane or one fixed thread) |
 | `tcgen05.shift.cta_group::{1,2}.down [taddr]` | as a cp writing lanes [0, 128) x [C, C+8) (an over-approximation) | as cp |
-| `tcgen05.mma.cta_group::{1,2}.kind::* [d], a, b, idesc, ...` | `tmem` mma: `d` write 128 lanes x N columns (N / 2 for M = 128 with cta_group::2); `a` read 8 columns when A is in TMEM; block-scaled kinds: `sf` reads SFA 4 columns, SFB 4 per 128 rows of N | as cp; M and N from the known bits of idesc (N >> 3 at bits 17-22; M >> 4 at bits 24-28, block-scaled M >> 7 at bits 27-28) |
+| `tcgen05.mma.cta_group::{1,2}.kind::* [d], a, b, idesc, ...` | `tmem` mma: `d` write 128 lanes x N columns (N / 2 for M = 128 with cta_group::2); `a` read 8 columns when A is in TMEM (also under `.collector::a::use`/`::lastuse`, which read the copy of A an earlier `::fill` kept: an over-approximation of A's reads); block-scaled kinds: `sf` reads SFA 4 columns, SFB 4 per 128 rows of N | as cp; M and N from the known bits of idesc (N >> 3 at bits 17-22; M >> 4 at bits 24-28, block-scaled M >> 7 at bits 27-28) |
 | `tcgen05.wait::ld` / `::st` | `tmem_wait` of the whole role | every thread of the role |
 | `tcgen05.alloc` | the KIR `tmem` allocation | one per issuing warp, once per kernel |
 | `tcgen05.dealloc`, `relinquish_alloc_permit`, `fence::*` | none (lifetime and fences are not checked) | |

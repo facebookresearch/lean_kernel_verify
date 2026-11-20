@@ -11,9 +11,9 @@ through translate() with policy p1 on hand-written PTX.
 Events: tcgen05.ld/st per issuing warp (a `for` over the warps when all issue), wait::ld
 and ::st, cp and shift and mma (dense with a TMEM A, block-scaled with its scale factors,
 an instruction descriptor known only in its shape bits, cta_group::2 with the pair's
-cta_mask) by one thread, named barriers; their order next to the mbarrier events; the
-allocation and the KIR `tmem`; the role split by an mbarrier event part of a role
-issues. Refusals R1, R2, R3, R5, R6, R7 and R10, the Triton family, and the P0 pass
+cta_mask, the .collector::a qualifiers) by one thread, named barriers; their order next
+to the mbarrier events; the allocation and the KIR `tmem`; the role split by an mbarrier
+event part of a role issues. Refusals R1, R2, R3, R5, R6, R7 and R10, the Triton family, and the P0 pass
 unchanged.
 """
 
@@ -202,6 +202,28 @@ class CpMma(unittest.TestCase):
         self.assertEqual(rects(evs[5]), [("data", True, 0, 128, 384, 8)])  # the shift
         self.assertTrue(
             all(e["warp"]["v"] == 0 and "cta_mask" not in e for e in evs[:2])
+        )
+        self.assertEqual(kir_errors(f), [])
+
+    def test_collector(self):
+        # .collector::a::fill keeps A for the next MMA, ::lastuse reads that copy: both
+        # are MMAs reading A from its operand (a TMEM A here: 8 columns at 8)
+        f = p1(
+            """
+    elect.sync %r23|%p13, -1;
+    mov.b32 %r46, 0x8200490;
+    mov.b32 %r42, 0;
+    mov.b32 %r43, 256;
+    @%p13 tcgen05.mma.cta_group::1.kind::f16.collector::a::fill [%r43], [%r42+8], %rd6, %r46, 1;
+    @%p13 tcgen05.mma.cta_group::1.kind::f16.collector::a::lastuse [%r42], [%r42+8], %rd6, %r46, 1;"""
+        )
+        self.assertEqual(f.refusals, [])
+        fill, last = events(f, "tmem")
+        self.assertEqual(
+            rects(fill), [("d", True, 0, 128, 256, 128), ("a", False, 0, 128, 8, 8)]
+        )
+        self.assertEqual(
+            rects(last), [("d", True, 0, 128, 0, 128), ("a", False, 0, 128, 8, 8)]
         )
         self.assertEqual(kir_errors(f), [])
 

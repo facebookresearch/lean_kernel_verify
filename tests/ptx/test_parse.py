@@ -335,6 +335,13 @@ class OpsTest(unittest.TestCase):
                 "tcgen05.mma.cta_group::1.kind::mxf8f6f4.block_scale.block32",
             ),
             (
+                "tcgen05.mma.cta_group::2.kind::f16",
+                "tcgen05.mma.cta_group::2.kind::f16.collector::a::fill",
+                "tcgen05.mma.cta_group::2.kind::f16.collector::a::use",
+                "tcgen05.mma.cta_group::2.kind::f16.collector::a::lastuse",
+                "tcgen05.mma.cta_group::2.kind::f16.collector::a::discard",
+            ),
+            (
                 "cp.async.bulk.tensor.3d.shared::cta.global.tile.mbarrier::complete_tx::bytes.L2::cache_hint",
                 "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_tx::bytes",
             ),

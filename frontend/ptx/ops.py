@@ -36,7 +36,9 @@ Normalization (the spellings of LLVM, NVVM 20 and NVVM 23 meet on one mnemonic):
     (.release.cta for arrive, .acquire.cta for test/try_wait, .relaxed.cta for
     expect_tx/complete_tx) is dropped, and so is bar/barrier's optional .cta (ISA: it
     does not change the instruction's semantics); tcgen05.mma's .scale_vec::1X/2X/4X is
-    .block32/.block32/.block16; tcgen05.cp's .warpx* follows the shape;
+    .block32/.block32/.block16, and its .collector::a::{fill,use,lastuse,discard} (the
+    buffer the tensor core keeps A in between MMAs; tmem.py: every one reads A from its
+    operand) is dropped; tcgen05.cp's .warpx* follows the shape;
   - ld/st/atom/red drop memory ordering, scope, .volatile, cache operators and .noftz,
     and put the state space first (_memory_op); strong(opcode) keeps what a load's
     ordering decides (a strong load's value is never a metadata read, mem.py).
@@ -120,6 +122,9 @@ def _mnemonic(opcode):
                 break
     if base in ("ld", "st", "atom", "red"):
         out = _memory_op(out)
+    # tcgen05.mma: .collector::a::* names where A is kept between MMAs, not what it is.
+    if out[:2] == ["tcgen05", "mma"]:
+        out = [t for t in out if not t.startswith("collector::a::")]
     # tcgen05.cp: LLVM writes .warpx4.32x128b, the ISA (and NVVM) .32x128b.warpx4.
     if out[:2] == ["tcgen05", "cp"]:
         warps = [t for t in out if t.startswith("warpx")]

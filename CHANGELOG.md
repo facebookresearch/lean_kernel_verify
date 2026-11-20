@@ -249,3 +249,8 @@ First public release.
   that stops leaves the results it logged (a stop failed the whole run, unless a P0 KIR
   had failed, and could leave a geometry's P1-2 neither checked nor listed); no
   `report.json` is a pipeline error.
+- PTX translation: `tcgen05.mma`'s `.collector::a::{fill,use,lastuse,discard}` (where the
+  tensor core keeps A between MMAs) has the row of the MMA without it; today's Triton
+  writes `fill`/`lastuse` pairs, which the op table refused (every PTX variant of such a
+  kernel an ERROR). `use` and `lastuse` read the copy of A an earlier `fill` kept: P1-1
+  takes them as reads of A's operand (more reads than the hardware makes).
