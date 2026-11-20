@@ -149,3 +149,7 @@ ledger_cycle ?: cta (0,0,0): not decided on this input: the barrier ledger of th
 ledger_cycle lc.py:25: cta (1,0,0) slot s4[0]: role d (consumer convention, 1 waits) needs 1 completions but the slot completes 0 times
 ledger_confirm ?: cta (0,0,0): not decided on this input: the barrier ledger of this CTA does not converge
 ledger_confirm lcf.py:6: cta (0,0,0) slot s0[0]: role a (consumer convention, 2 waits) needs 4 completions but the slot completes 3 times
+handoff handoff.py:18: cta (0,0,0) role reader: gstore x: 1 lane(s) outside allocation [0, 15]: offsets [16, 17)
+handoff handoff.py:12: cta (0,0,0) role reader: handoff mbox: a read before any wait of the role
+handoff handoff.py:16: cta (0,0,0) role reader: handoff mbox: its putter role recorded no value at its arrive 1 on full[0]
+handoff_group handoff.py:8: cta (0,0,0) role putter_b: handoff mbox: its putter roles recorded different values at their arrive 1 on full[0]

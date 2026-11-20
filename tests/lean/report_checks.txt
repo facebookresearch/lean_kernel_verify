@@ -98,3 +98,8 @@ cluster_lander_shares !TMA bytes land in it
 cluster_lander_shares !bytes landing in it
 cluster_dsmem_relay evaluation error (unexpected): cluster.py:53: cta (0,0,0) role relay: complete_tx: negative byte count -256
 cluster_dsmem_relay UNDECIDED negative_bytes P0-4
+handoff !UNDECIDED paired
+handoff evaluation error (model limit): handoff.py:16: cta (0,0,0): handoff mbox: a putter's next put of the channel (handoff.py:7) follows no wait that pairs with an arrive of the reading role after this read (KIR change 17)
+handoff evaluation error (model limit): handoff.py:16: cta (0,0,0): handoff mbox: the waits of the reading role on the slot of its last wait do not pair with the arrives on it
+handoff UNDECIDED overwritten P0-1
+handoff UNDECIDED other_arrival P0-1

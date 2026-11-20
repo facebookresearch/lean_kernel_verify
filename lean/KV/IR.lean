@@ -174,6 +174,14 @@ inductive Event where
   every lane of warp `warp` in one warp-synchronizing instruction (`tensormap.cp_fenceproxy`,
   P1-2). -/
   | tmap_write (base : String) (addr : Expr) (warp : Expr) (loc : Loc)
+  /-- The role's value of handoff channel `chan` (a shared-memory word another role reads) is
+  now `value` (w=32); each later `arrive` of the role records it for that arrive (KIR change
+  17). -/
+  | handoff_put (chan : String) (value : Expr) (loc : Loc)
+  /-- `var` (w=32) := the value of handoff channel `chan` at the putter role's k-th `arrive`
+  on slot s, where s is the slot of this role's last `wait` and that wait its k-th on s (KIR
+  change 17). -/
+  | handoff_get (chan : String) (var : String) (loc : Loc)
   deriving Repr, Inhabited
 
 inductive Stmt where
@@ -228,6 +236,10 @@ structure Role where
   warps : Nat
   threads_per_issue : Nat
   body : List Stmt
+  /-- KIR change 17: the role this one is a part of (the P1 pass splits a role by warps), or
+  empty. P0 reads the threads of a role as running in lockstep (references/specs.md, the
+  ledger); the handoff checks read the parts of one role so. -/
+  group : String := ""
   deriving Repr
 
 inductive IntType where

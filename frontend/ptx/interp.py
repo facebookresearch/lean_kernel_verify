@@ -120,6 +120,10 @@ class Unsupported(Exception):
         self.op, self.loc, self.why, self.kind = op, loc, why, kind
 
 
+class DataRoot(Unsupported):
+    """A data value reaches a root (the slice soundness error, Translator.as_int)."""
+
+
 class SplitWarps(Exception):
     def __init__(self, groups: list):
         super().__init__(f"split into warp groups {groups}")
@@ -179,6 +183,15 @@ class Kernel:
     # records at G (Translator._gate_if) and each worker's region runs under (run_gated)
     gate_at: tuple | None = None
     gate: tuple | None = None
+    # Handoffs through shared memory (KIR change 17, frontend_ptx.md "Handoffs"): the
+    # bytes (region, lo, hi) a store may put as a channel -> the roles storing them
+    # (Translator._handoff_store, every translation), the bytes a load after a wait may
+    # get -> the roles loading them (Translator._handoff_load, the first translation),
+    # and in the translation with channels (translate.py) each channel's name ->
+    # (region, lo, hi, putter role)
+    handoff_cands: dict = field(default_factory=dict)
+    handoff_loads: dict = field(default_factory=dict)
+    handoffs: dict | None = None
 
 
 # An mbarrier event awaiting its array (mem.Memory.barriers): the KIR event (bar and idx
@@ -286,9 +299,10 @@ class Translator:
 
     def as_int(self, v, use: str):
         if isinstance(v, Data):
-            self.fail(
-                self.cur, f"data value from {v.origin} reaches {use} (slice soundness)"
-            )
+            i = self.cur
+            line = f" (PTX line {i.line})" if i is not None else ""
+            raise DataRoot(i.opcode if i is not None else "role", self.loc(i) + line,
+                           f"data value from {v.origin} reaches {use} (slice soundness)")  # fmt: skip
         if v is None:
             self.fail(self.cur, f"an undefined register reaches {use}")
         return v
@@ -1922,7 +1936,7 @@ class Translator:
             self.k.p1.execute(self, i, mn)
         if C._is_fork(i):  # (cfg.py)
             self.forks += 1
-        if cls == "event" and self.k.captures is not None:
+        if cls == "event" and self._tracked():
             self._capture_writes(i, mn)
         if cls == "drop":
             if mn == "ld.shared" and i.opcode.endswith(".b128"):  # a CLC response
@@ -1930,6 +1944,8 @@ class Translator:
                 return
             self._shared_drop(i, mn)
             if mn == "ld.shared" and self._capture_load(i):
+                return
+            if self._handoff_load(i, mn):
                 return
             for r in R.dests(i):
                 self.env[r] = Data(f"{i.opcode} at {self.loc(i)}")
@@ -1955,7 +1971,10 @@ class Translator:
         """A dropped write of shared memory (st.shared, stmatrix, atom/red.shared)
         closes the tensormap staging buffers it may overlap (tma.py); a st.shared may
         also zero one, unless `maybe` (under a data predicate: it may not happen). It
-        may also write warp-specialize captures (_capture_store)."""
+        may also write warp-specialize captures (_capture_store) and handoff channels
+        (_handoff_store)."""
+        if mn == "st.shared" or mn.startswith("stmatrix"):
+            self._handoff_store(i, maybe)
         if mn == "st.shared":
             self.k.mem.tma.staging_store(self, i, maybe)
             self._capture_store(i, maybe)
@@ -1963,10 +1982,10 @@ class Translator:
             self.k.mem.tma.close_staging(self)
             if self.k.captures is not None:  # each address-giving lane: a 16-byte row
                 a = self.k.mem.address(self, i.operands[0])
-                self._capture_clobber(i, self._footprint(a, 16))
+                self._capture_clobber(i, self._footprint(a, 16), checked=True)
         elif mn.startswith(("atom.shared", "red.shared")):  # as a generic one (mem.py)
             self.k.mem.execute(self, i, mn)
-            if self.k.captures is not None:
+            if self._tracked():
                 op = i.operands[1 if mn.startswith("atom") else 0]
                 a = self.k.mem.address(self, op)
                 self._capture_clobber(i, self._footprint(a, _access_bytes(i.opcode)))
@@ -2029,7 +2048,8 @@ class Translator:
                 vals = self._capture_values(i, len(where))
         if vals is None or where is None:  # no capture: the bytes it may touch
             a = self.k.mem.address(self, mem) if mem else None
-            self._capture_clobber(i, self._footprint(a, _access_bytes(i.opcode)))
+            fp = self._footprint(a, _access_bytes(i.opcode))
+            self._capture_clobber(i, fp, checked=True)
             return
         for k, b in enumerate(where):  # (not over an earlier asynchronous write)
             dirty = any(
@@ -2127,7 +2147,14 @@ class Translator:
         lo, hi = min(r[0] for r in rs), max(r[1] for r in rs)
         return region, lo, hi + nbytes
 
-    def _capture_clobber(self, i, fp, asynchronous: bool = False, remote: bool = False):
+    def _capture_clobber(
+        self,
+        i,
+        fp,
+        asynchronous: bool = False,
+        remote: bool = False,
+        checked: bool = False,
+    ):
         """A shared write that records no capture, with footprint fp (_footprint), for the
         warp-specialize captures: the captured bytes it may touch become unknown, all of
         them if fp is None; if some worker already read a capture and the write may touch
@@ -2137,7 +2164,10 @@ class Translator:
         orders it). An asynchronous or remote write may land after a later store: its
         footprint stays dirty, so the default records no capture over it. A write whose
         offsets have no static bounds keeps the captures, under a KIR assume that it misses
-        them (_capture_assume)."""
+        them (_capture_assume). First the handoff channels (_handoff_clobber), unless the
+        caller `checked` them."""
+        if self.k.handoffs and not checked:
+            self._handoff_clobber(i, fp)
         caps = self.k.captures
         if caps is None or fp == () or (self.forks > 1 and not remote):
             return
@@ -2187,7 +2217,7 @@ class Translator:
         CTAs (multicast), as one into a mapa address does."""
         from . import cluster  # (it imports this module)
 
-        if self.k.captures is not None:
+        if self._tracked():
             remote = remote or isinstance(a, cluster.Remote)
             self._capture_clobber(i, self._footprint(a, nbytes), True, remote)
 
@@ -2242,6 +2272,159 @@ class Translator:
                     i, self._footprint(mem.address(self, ops_[0]), nb)
                 )
         return None
+
+    # ------------------------------------------- handoffs through shared memory
+    def _tracked(self) -> bool:
+        """Every shared write is followed: for the captures or the handoff channels."""
+        return self.k.captures is not None or bool(self.k.handoffs)
+
+    def _handoff_rows(self, i):
+        """The bytes (region, lo, hi) a 32-bit handoff access writes or reads in each warp
+        of the role, the same in every warp (frontend_ptx.md, "Handoffs"): an
+        st/ld.shared.{b,u,s}32 at an address the same in every thread; a stmatrix or
+        ldmatrix .m8n8.x{1,2,4}.shared.b16 (not .trans) whose lanes 0 .. 8x-1 of each
+        warp address 16-byte rows that together are one run of bytes. Else None."""
+        from .mem import peel
+
+        mat = re.fullmatch(r"(ld|st)matrix\.sync\.aligned\.m8n8\.x([124])\.shared\.b16",
+                           i.opcode)  # fmt: skip
+        if mat is None and not re.fullmatch(r"(ld|st)\.shared\.[bsu]32", i.opcode):
+            return None
+        mem = next((x for x in i.operands if x[0] == "mem"), None)
+        a = self.k.mem.address(self, mem) if mem is not None else None
+        p = peel(a) if a is not None and not isinstance(a, Data) else None
+        if p is None or p[0][2][:3] not in ("%s:", "%S:"):
+            return None
+        region, off = self._region(p[0][2][3:]), E.resize(p[1], 32, False)
+        if _has_elect(off):
+            return None
+        if mat is None:
+            u = self.uniform(off)
+            return (region, u[2], u[2] + 4) if u is not None and E.is_const(u) else None
+        lanes, runs = tuple(range(8 * int(mat[2]))), set()
+        for w in range(self.w0, self.w0 + self.nw):
+            rows = self._warp_instances(off, w, lanes)
+            if not all(E.is_const(r) for r in rows):
+                return None
+            lo = min(r[2] for r in rows)
+            if sorted(r[2] for r in rows) != [lo + 16 * k for k in range(len(rows))]:
+                return None
+            runs.add((region, lo, lo + 16 * len(rows)))
+        return runs.pop() if len(runs) == 1 else None
+
+    def _handoff_value(self, i):
+        """The value a 32-bit handoff store writes into every 4-byte word of its bytes:
+        its source register(s) (a stmatrix: a braced list of one per matrix), one value
+        the same in every thread of the role; else None."""
+        if len(i.operands) != 2:
+            return None
+        src = i.operands[1]
+        mat = (
+            re.search(r"\.x([124])\.", i.opcode)
+            if i.opcode.startswith("stmatrix")
+            else None
+        )
+        if (src[0] == "vec") != (mat is not None) or (
+            mat is not None and len(src[1]) != int(mat[1])
+        ):
+            return None
+        out = None
+        for op in src[1] if src[0] == "vec" else (src,):
+            v = self.operand_value(op, 32)
+            if isinstance(v, Data) or v is None:
+                return None
+            v = self.uniform(E.resize(v, 32, False) if E.width(v) != 32 else v)
+            if v is None or _has_elect(v) or (out is not None and v != out):
+                return None
+            out = v
+        return out
+
+    def _handoff_store(self, i, maybe: bool) -> None:
+        """A st.shared or stmatrix (frontend_ptx.md, "Handoffs"). Every translation records
+        the bytes of a store that may put a channel (Kernel.handoff_cands): a 32-bit store
+        of one value the same in every thread of the role, under no mask (`maybe`: under a
+        data predicate), each warp writing the same bytes. In the translation with
+        channels, such a store of exactly a channel's bytes by its putter is a
+        `handoff_put` (KIR change 17); any other store that may touch a channel is
+        refused (_handoff_clobber)."""
+        rows = self._handoff_rows(i)
+        ok = rows is not None and not maybe and E.is_const(self.mask, 1)
+        val = self._handoff_value(i) if ok else None
+        if val is not None:
+            self.k.handoff_cands.setdefault(rows, set()).add(self.name)
+        handoffs = self.k.handoffs
+        if not handoffs:
+            return
+        for name, (region, lo, hi, putter) in handoffs.items():
+            if val is not None and rows == (region, lo, hi) and self.name == putter:
+                self.emit({"op": "event", "ev": "handoff_put", "chan": name,
+                           "value": self.json(val)})  # fmt: skip
+                return
+        mem = next((x for x in i.operands if x[0] == "mem"), None)
+        a = self.k.mem.address(self, mem) if mem is not None else None
+        nb = 16 if i.opcode.startswith("stmatrix") else _access_bytes(i.opcode)
+        self._handoff_clobber(i, self._footprint(a, nb))
+
+    def _handoff_clobber(self, i, fp) -> None:
+        """A shared write other than a handoff put, with footprint fp (_footprint), in the
+        translation with channels: refused if it may touch a channel (fp None: any
+        byte); one whose offsets have no static bounds (fp "dyn") gets a KIR assume per
+        channel of its region that its bytes miss it (change 16)."""
+        if fp == ():
+            return
+        for name, (region, lo, hi, _putter) in (self.k.handoffs or {}).items():
+            if fp is not None and fp[0] == "dyn":
+                if fp[1] == region:
+                    o, n = E.ext(fp[2], 64, True), fp[3]
+                    below = E.cmp(
+                        "sle", E.bin("add", o, E.const(n, 64)), E.const(lo, 64)
+                    )
+                    self.assume(E.bin("or", below, E.cmp("sge", o, E.const(hi, 64))),
+                                f"a shared write misses the handoff channel {name}")  # fmt: skip
+            elif fp is None or (fp[0] == region and fp[1] < hi and lo < fp[2]):
+                self.fail(
+                    i, f"a shared write that may overwrite the handoff channel {name}"
+                )
+
+    def _handoff_load(self, i, mn: str) -> bool:
+        """In the translation with channels: a 32-bit handoff load (_handoff_rows) under no
+        mask of words of a channel, after an mbarrier wait of its own, by a role that puts
+        no channel (KIR change 17: a putter reads none), is a `handoff_get`: every
+        destination register holds the value it binds (an ld.shared.s32 sign-extends it
+        into a wider register). False otherwise (the destinations stay Data). The first
+        translation records such loads (Kernel.handoff_loads)."""
+        if mn != "ld.shared" and not mn.startswith("ldmatrix"):
+            return False
+        handoffs = self.k.handoffs
+        if handoffs and any(p == self.name for _r, _lo, _hi, p in handoffs.values()):
+            return False
+        rows = (
+            self._handoff_rows(i) if E.is_const(self.mask, 1) and self.waited else None
+        )
+        if rows is None:
+            return False
+        if handoffs is None:
+            self.k.handoff_loads.setdefault(rows, set()).add(self.name)
+            return False
+        signed = i.opcode.endswith(".s32")
+        for name, (region, lo, hi, _putter) in handoffs.items():
+            if (
+                rows[0] == region
+                and lo <= rows[1]
+                and rows[2] <= hi
+                and (rows[1] - lo) % 4 == 0
+            ):
+                var = self.fresh("handoff")
+                self.emit(
+                    {"op": "event", "ev": "handoff_get", "chan": name, "var": var}
+                )
+                dst = i.operands[0]
+                for op in dst[1] if dst[0] == "vec" else (dst,):
+                    rw = _reg_width(self.k.fn.regs.get(op[1], "b32"))
+                    v = E.var(var, 32)
+                    self.write(op[1], E.ext(v, rw, signed) if rw > 32 else v)
+                return True
+        return False
 
     def write(self, reg: str, v) -> None:
         """Assign a register at its declared width (a narrower or wider value is extended
@@ -2784,6 +2967,10 @@ def check_capture_barriers(k: Kernel, arrays: list) -> None:
                 raise Unsupported("captures", sym, f"the warp-specialize capture at byte "
                                   f"{b} of {sym} lies in an mbarrier array ({s} + {a}, "
                                   f"{n} entries)")  # fmt: skip
+        for name, (region, lo, hi, _putter) in (k.handoffs or {}).items():
+            if region == _region(k, s) and lo < a + 8 * n and a < hi:
+                raise Unsupported("handoffs", name, f"the handoff channel {name} overlaps "
+                                  f"an mbarrier array ({s} + {a}, {n} entries)")  # fmt: skip
 
 
 _CAPTURE_IV: dict = {}

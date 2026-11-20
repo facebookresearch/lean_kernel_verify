@@ -145,6 +145,27 @@ follow items 1 to 3, 6 and 8.
     It records no event and changes nothing where it holds; IR.lean's `Stmt` gained
     the constructor `assume`. A device `assert` (a certain error where false: every
     spec FAILs) is unchanged.
+17. **Handoffs through shared memory.** Two events pass a 32-bit value one role
+    stores in shared memory to another role that reads it after an mbarrier wait
+    (frontend_ptx.md, "Handoffs"): `handoff_put` {`chan`, `value`}, the putter's new
+    value of channel `chan`, and `handoff_get` {`chan`, `var`}, which binds `var`
+    (w=32, like a `let`) to the value the channel had at the putter's k-th `arrive`
+    on slot s, s the slot of the getter's last `wait` and that wait its k-th on s
+    (counting from 0). Lean runs the putters of a CTA before its other roles; the
+    roles that put a channel are one role or parts of one, and a role that puts a
+    channel reads none (another part of its role may). An
+    optional role field `group` names the role a part belongs to (the P1 pass
+    splits a role by warps). The value is only taken where the run shows it was
+    handed off, else the input is a limit of the model (an evaluation error, every
+    spec undecided): every arrival on s is a plain `arrive` of one role group, each
+    of its roles arriving with one count per event and those counts summing to the
+    slot's, the getter's waits on s alternate parities 0, 1, 0, ..., and each
+    putter's next put of the channel after its k-th arrive follows a wait of it that
+    pairs, the same way, with an arrive of the getter after the get (the roles of a
+    group taken in lockstep, as the P0 ledger takes the threads of a role). A get
+    with no value recorded, or putters that recorded different values, are limits
+    too. IR.lean's `Event` gained `handoff_put` and `handoff_get`, `Role` the field
+    `group`.
 
 ## Top level
 
@@ -240,6 +261,9 @@ follow items 1 to 3, 6 and 8.
 {"name": "load", "warps": 1, "threads_per_issue": 1, "body": [Stmt]}
 ```
 
+Optional `group` (change 17): the role this one is a part of, when the P1 pass split
+a role by warps.
+
 `threads_per_issue`: how many threads of the role execute each event (1 for
 `elect_one`/lane-0 code, warps x 32 when every thread of the role runs it).
 Arrival counts are multiplied by it unless the event says `"per_warp": true`
@@ -334,6 +358,8 @@ Tagged by `"ev"`; all carry `loc`.
 | `bulk_wait` (P1-2)             | `n` (non-negative int), `read` bool: `cp.async.bulk.wait_group{.read} n` of the role: completes the groups of all but the `n` most recent commits                                                                                                                                                                                                                                                                                                                                 |
 | `smem_write` (P1-2)            | `sym`, `offsets` TExpr (byte offsets), `mask` TExpr or null, `bytes` (positive int: bytes at each offset), `warp`, optional `lane` (as `bulk_store`'s), optional `sync` bool (a warp-synchronizing write of every lane of `warp`, no `lane`), optional `async` bool (the landing of an asynchronous copy issued here), optional `cta` (w=32 Expr: another CTA of the cluster), optional `bar` and `idx` (both or neither, only with `async` and without `cta`: the mbarrier slot the copy completes its bytes on, in the issuing CTA or, with the optional bool `leader`, in its pair leader's (a cta_group::2 load, as `tma_load`'s `leader`); its load is the role's next transaction event on that slot, only `gload`s between)                                                                                              |
 | `tmap_write` (P1-2)            | `base` (global buffer), `addr` (Expr: byte offset), `warp` (w=32 Expr): the 128-byte tensormap written by every lane of `warp` in one warp-synchronizing instruction (`tensormap.cp_fenceproxy`)                                                                                                                                                                                                                                                                                 |
+| `handoff_put`                  | `chan` (string), `value` (w=32 Expr): the role's new value of handoff channel `chan` (change 17) |
+| `handoff_get`                  | `chan` (string), `var` (string, bound at w=32): the value of `chan` at the putter's arrive that this role's last wait pairs with (change 17) |
 
 ## Inputs
 

@@ -323,6 +323,12 @@ it names in `elision_flags` the flags that select a mask-elided fast path.
    issued before the store is ordered only through its mbarrier's bytes (a phase
    completes only with its expected bytes landed, an `expect_tx` applies to the phase
    current at its issue: `StoreReuse.landed`), else undecided (U3).
+9. Handoffs through shared memory (kir.md change 17, `frontend_ptx.md` "Handoffs"):
+   the pairing of a getter's k-th wait with the k-th arrive of each role of the
+   arriving group (mbarrier phases; the parts of a role the P1 pass split taken in
+   lockstep, as item 4 takes the threads of a role), and the frontend's write set of
+   the channels (every shared write that may touch one refused, or assumed to miss
+   it by a KIR `assume`).
 
 A verdict covers the inputs in the case file, not all shapes. The report says
 so.

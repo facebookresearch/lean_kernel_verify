@@ -279,7 +279,8 @@ by bit operations). Nothing is emitted for a value until a root needs it: an eve
 operand, a branch condition, an address, a predicate, a barrier field, a work anchor.
 Then each thread-uniform subexpression is bound by a `let` at its instruction's location.
 Data that reaches a root refuses the variant (`data value from <origin> reaches <use>
-(slice soundness)`): the frontend never guesses a dropped value. A node that can stop
+(slice soundness)`): the frontend never guesses a dropped value (a value handed off
+through shared memory: "Handoffs"). A node that can stop
 the evaluation (a metadata load, a division) is never bound ahead of the `select` arm
 that guards it.
 
@@ -296,6 +297,36 @@ bits of `c` that survive the shift (`(n - 2) << 7` may become `(n + 0x1FFFFFE) <
 so the intermediate wrap is judged on the constant closest to 0 with those low bits: the
 rewrite reports no wrap the source does not have (and a hand-written such address with a
 huge `c` is not reported either).
+
+## Handoffs
+
+A value one role stores in shared memory and another reads after an mbarrier wait (a
+mailbox: a work header) is Data to the reader, so a branch on it
+refuses the variant. When the translation is refused that way, the stores of every role
+are looked at (`Kernel.handoff_cands`): a 32-bit store of one value, the same in every
+thread of the role, under no mask, whose bytes are the same in every warp of the role
+(`st.shared.{b,u,s}32` at an address the same in every thread; `stmatrix
+.m8n8.x{1,2,4}.shared.b16`, not `.trans`, whose lanes 0 .. 8x-1 address 16-byte rows that
+are one run of bytes). Bytes stored that way by one role only, overlapping no other such
+bytes, are a channel, named `<region>+<offset>` (`%extern+219392`), and the variant is
+translated again with them (translate.py):
+
+* such a store of exactly a channel's bytes by its putter is a `handoff_put` of the stored
+  value (kir.md change 17). Any other write that may touch a channel (the shared writes
+  the warp-specialize captures follow, `st.shared` and `stmatrix` included, and the
+  mbarrier arrays) refuses the variant; one whose offsets have no static bounds gets a
+  KIR `assume` that its bytes miss the channel;
+* a 32-bit load under no mask of words of a channel by another role after an mbarrier
+  wait of that role (`ld.shared.{b,u,s}32` at an address the same in every thread,
+  `ldmatrix` by the `stmatrix` rule) is a `handoff_get`: its destinations hold the value
+  it binds.
+
+A variant the second translation refuses too keeps the first refusal, with the second's
+reason. Whether the value was handed off is decided per input in Lean (kir.md change 17):
+the get reads the putter's value at the arrive its last wait pairs with, and a run where
+that pairing, or the putter's next put following the get, is not shown is a limit of the
+model. In the P1-2 pass a partition split by warps names its parts' group (KIR `group`),
+whose arrivals Lean takes in lockstep, as the P0 ledger takes the threads of one role.
 
 ## Family conventions
 

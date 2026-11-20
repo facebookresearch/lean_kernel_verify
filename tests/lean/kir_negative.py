@@ -279,7 +279,68 @@ def assume_stmt(k):
     return next(x for x in k["roles"][0]["body"] if x["op"] == "assume")
 
 
+def role(k, name):  # the role of that name
+    return next(r for r in k["roles"] if r["name"] == name)
+
+
+def first_ev(stmts, ev):  # the first `ev` event of stmts (nested blocks included)
+    for s in stmts:
+        if s.get("ev") == ev:
+            return s
+        for key in ("body", "then", "else"):
+            x = first_ev(s.get(key, []), ev)
+            if x is not None:
+                return x
+    return None
+
+
+def put_ev(k):  # handoff: the putter's first put
+    return first_ev(role(k, "putter")["body"], "handoff_put")
+
+
+def get_ev(k):  # handoff: the reader's first get
+    return first_ev(role(k, "reader")["body"], "handoff_get")
+
+
+def split_putter(k):  # handoff: the putter as two parts of one role group
+    b = copy.deepcopy(role(k, "putter"))
+    b["name"] = "putter_b"
+    k["roles"].append(b)
+    for r in k["roles"][2:]:
+        r["group"] = "putter"
+
+
 MUTATIONS = [
+    (
+        "handoff",
+        "a handoff channel put by two roles (KIR change 17)",
+        lambda k: role(k, "default")["body"].append(copy.deepcopy(put_ev(k))),
+        "handoff channel 'mbox' is put by two roles",
+    ),
+    (
+        "handoff",
+        "a handoff channel no role puts",
+        lambda k: get_ev(k).update(chan="other"),
+        "handoff channel 'other' is put by no role",
+    ),
+    (
+        "handoff",
+        "a putter that reads a handoff channel",
+        lambda k: role(k, "putter")["body"].append(copy.deepcopy(get_ev(k))),
+        "a role that puts a handoff channel reads one",
+    ),
+    (
+        "handoff",
+        "a handoff value of width 64",
+        lambda k: put_ev(k).update(value=c(1, 64)),
+        "must have w=32",
+    ),
+    (
+        "handoff",
+        "a role group that is not a string",
+        lambda k: role(k, "putter").update(group=3),
+        "expected a string",
+    ),
     (
         "assume",
         "an assume with an i32 condition (KIR change 16)",
@@ -589,6 +650,7 @@ MUTATIONS = [
 
 # (fixture, description, mutation): valid KIR after the mutation
 ACCEPTED = [
+    ("handoff", "the putters of a channel: the parts of one role group", split_putter),
     ("pipeline_ok", "target sm_103", lambda k: k.update(target="sm_103")),
     (
         "floor_tile_tail",

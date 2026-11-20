@@ -97,6 +97,10 @@ Rules of kir.md beyond its field tables, which lean/KV relies on:
   default false) completes each destination's bytes on its pair leader's slot. They and the
   `complete_tx` event (bar, idx, bytes) need a cluster of more than one CTA, "leader" an
   even cluster size.
+* Handoffs (kir.md, change 17): `handoff_put` {"chan": string, "value": w=32 Expr} and
+  `handoff_get` {"chan": string, "var": string, bound at w=32 like a `let`}. The roles
+  that put a channel are one role or parts of one (the same role "group", an optional
+  string); a role that puts a channel reads none; every read channel has a putter.
 """
 
 import json
@@ -174,6 +178,8 @@ EVENT_FIELDS = {
         {"lane", "sync", "async", "cta", "bar", "idx", "leader"},
     ),
     "tmap_write": ({"base", "addr", "warp"}, set()),
+    "handoff_put": ({"chan", "value"}, set()),
+    "handoff_get": ({"chan", "var"}, set()),
 }
 P1_EVENTS = ("tmem", "tmem_wait", "named_bar")
 NB_EVENTS = ("named_bar", "nb_open", "nb_rep")
@@ -250,6 +256,8 @@ class _Checker:
         self.cluster_size = 1  # CTAs per cluster
         self.few_arrivals = []  # (path, arrivals, warps): arrives no P1 role may have
         self.nbar = False  # a P0-6 KIR (top-level "nbar")
+        self.role_index = None  # index of the role being checked
+        self.handoffs = []  # (role index, put?, channel, path) of each handoff event
 
     def err(self, path, msg):
         self.errors.append(f"{path}: {msg}")
@@ -638,6 +646,8 @@ class _Checker:
                     )
         elif ev in P1_EVENTS:
             self.p1_event(path, ev, s, scope)
+        elif ev in ("handoff_put", "handoff_get"):
+            self.handoff_event(path, ev, s, scope)
         elif ev == "work":
             if isinstance(s["fields"], dict) and s["fields"]:
                 for k, v in s["fields"].items():
@@ -645,6 +655,38 @@ class _Checker:
                     self.work_fields.add(k)
             else:
                 self.err(f"{path}.fields", "expected a non-empty object of Exprs")
+
+    def handoff_event(self, path, ev, s, scope):
+        """handoff_put / handoff_get (kir.md, change 17)."""
+        if self.string(f"{path}.chan", s["chan"]):
+            self.handoffs.append(
+                (self.role_index, ev == "handoff_put", s["chan"], path)
+            )
+        if ev == "handoff_get":
+            self.bind(f"{path}.var", s["var"], 32, scope)
+        elif self.expr(f"{path}.value", s["value"], scope) not in (32, None):
+            self.err(f"{path}.value", "must have w=32")
+
+    def check_handoffs(self, roles):
+        """The putters of a channel: one role or parts of one (a role "group"), which read
+        none; a putter for every read."""
+
+        def group(ri):
+            r = roles[ri] if isinstance(roles[ri], dict) else {}
+            return r.get("group") or r.get("name")
+
+        putters = {}
+        for ri, put, chan, path in self.handoffs:
+            if put and group(putters.setdefault(chan, ri)) != group(ri):
+                self.err(path, f"handoff channel '{chan}' is put by two roles")
+        put_roles = {ri for ri, put, _c, _p in self.handoffs if put}
+        for ri, put, chan, path in self.handoffs:
+            if put:
+                continue
+            if chan not in putters:
+                self.err(path, f"handoff channel '{chan}' is put by no role")
+            elif ri in put_roles:
+                self.err(path, "a role that puts a handoff channel reads one")
 
     def _check_cluster_fields(self, path: str, ev: str, s: dict, scope: dict) -> None:
         """`cta` / `cta_mask` (w=32 Exprs) and tma_load's `leader` (kir.md, change 11)."""
@@ -1052,9 +1094,11 @@ class _Checker:
             for i, r in enumerate(k["roles"]):
                 path = f"$.roles[{i}]"
                 if not self.keys(
-                    path, r, {"name", "warps", "threads_per_issue", "body"}
+                    path, r, {"name", "warps", "threads_per_issue", "body"}, {"group"}
                 ):
                     continue
+                if "group" in r:
+                    self.string(f"{path}.group", r["group"])
                 if self.string(f"{path}.name", r["name"]):
                     if r["name"] in names:
                         self.err(f"{path}.name", f"duplicate role '{r['name']}'")
@@ -1062,11 +1106,13 @@ class _Checker:
                 self.int_field(f"{path}.warps", r["warps"], 1)
                 self.int_field(f"{path}.threads_per_issue", r["threads_per_issue"], 1)
                 self.role_warps = r["warps"] if is_int(r["warps"]) else None
-                self.role_tpi = r["threads_per_issue"]
+                self.role_tpi, self.role_index = r["threads_per_issue"], i
                 self.block(f"{path}.body", r["body"], self.params)
                 self.role_warps = self.role_tpi = None
                 if self.nbar:
                     self.nb_nesting(f"{path}.body", r["body"])
+        if isinstance(k.get("roles"), list):
+            self.check_handoffs(k["roles"])
         for name, t in self.tensors.items():
             seg = t.get("segments")
             if (

@@ -1619,7 +1619,7 @@ def build_ptx(
         raise KirError(facts.refusals[0]["msg"], kind=facts.refusals[0]["kind"])
     if p1 and not facts.p1:
         return None
-    roles = [{k: r[k] for k in ("name", "warps", "threads_per_issue", "body")}
+    roles = [{k: r[k] for k in ("name", "warps", "threads_per_issue", "body", "group") if k in r}
              for r in facts.roles]  # fmt: skip
     metadata = {n for n, t in facts.tensors.items() if t["metadata"]}
     written = set(facts.written)

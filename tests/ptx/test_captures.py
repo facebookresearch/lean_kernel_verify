@@ -190,7 +190,8 @@ def reaches_a_hook(mn: str, cls: str) -> bool:
                            operand=lambda *a: E.const(16, 32),
                            _footprint=lambda *a: ("global_smem", 0, 16),
                            _capture_clobber=lambda *a, **kw: hits.append(mn),
-                           _capture_store=lambda *a: hits.append(mn))  # fmt: skip
+                           _capture_store=lambda *a: hits.append(mn),
+                           _handoff_store=lambda *a: None, _tracked=lambda: True)  # fmt: skip
     tr = cast(interp.Translator, stub)  # only the attributes the two dispatchers read
     i = SimpleNamespace(opcode=mn + ".b32", operands=(("mem", None),) * 3)
     with mock.patch.object(cluster, "_address", lambda *a: smem):

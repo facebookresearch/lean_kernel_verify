@@ -85,7 +85,7 @@ Policy (a dict; `policy()` fills the family defaults):
 
 Facts (refusals non-empty: the variant is refused, everything else empty):
     kernel, target ("sm_100" / "sm_103"), block, cluster
-    roles      [{"name", "w0", "warps", "threads_per_issue", "body"}]: bodies are KIR
+    roles      [{"name", "w0", "warps", "threads_per_issue", "body", "group"?}]: bodies are KIR
                statements (frontend/kir.py), addr marks applied per role (mark_addr,
                frontend/cute/to_kir.py's, plus: the mul.hi and sign-extension
                expansions are not marked)
@@ -194,23 +194,64 @@ class Facts:
     refusals: list = field(default_factory=list)
 
 
+class _Handoffs(Exception):
+    """A data value reached a root, and some stores may put handoff channels: translate
+    again with them (interp.py, frontend_ptx.md "Handoffs")."""
+
+    def __init__(self, first: interp.DataRoot, channels: dict):
+        super().__init__(str(first))
+        self.first, self.channels = first, channels
+
+
 def translate(ptx_text: str, entry: str, launch_records: list, pol: dict) -> Facts:
     facts = Facts(entry)
     try:
-        _translate(facts, ptx_text, entry, launch_records, pol)
-    except interp.Unsupported as e:
-        facts.refusals.append({"kind": e.kind, "msg": str(e)})
-    except (C.CfgError, R.RegionError) as e:
-        facts.refusals.append({"kind": "gap", "msg": str(e)})
-    except Exception as e:  # a PtxSyntaxError, bad inputs or a bug: refused, not raised
-        facts.refusals.append({"kind": "error", "msg": f"{type(e).__name__}: {e}"})
+        _refused(facts, _translate, facts, ptx_text, entry, launch_records, pol)
+    except _Handoffs as h:
+        facts = Facts(entry)
+        _refused(facts, _translate, facts, ptx_text, entry, launch_records, pol,
+                 h.channels)  # fmt: skip
+        if facts.refusals:  # the first refusal, and why the channels did not carry it
+            kind = "error" if facts.refusals[0]["kind"] == "error" else h.first.kind
+            facts.refusals = [{"kind": kind, "msg": f"{h.first} (translated again "
+                               f"with the handoff channel(s) {', '.join(h.channels)}: "
+                               f"{facts.refusals[0]['msg']})"}]  # fmt: skip
     if facts.refusals:
         facts.roles, facts.barriers, facts.tensors, facts.params = [], [], {}, {}
         facts.descs, facts.values, facts.tmem, facts.p1 = {}, [], None, []
     return facts
 
 
-def _translate(facts, ptx_text, entry, records, pol) -> None:
+def _refused(facts, fn, *args) -> None:
+    """fn(*args), its refusal recorded in facts.refusals."""
+    try:
+        fn(*args)
+    except _Handoffs:
+        raise
+    except interp.Unsupported as e:
+        facts.refusals.append({"kind": e.kind, "msg": str(e)})
+    except (C.CfgError, R.RegionError) as e:
+        facts.refusals.append({"kind": "gap", "msg": str(e)})
+    except Exception as e:  # a PtxSyntaxError, bad inputs or a bug: refused, not raised
+        facts.refusals.append({"kind": "error", "msg": f"{type(e).__name__}: {e}"})
+
+
+def _channels(cands: dict, loads: dict) -> dict:
+    """The handoff channels of interp.Kernel.handoff_cands: the bytes one role stores that
+    overlap no other candidate's and that another role loads after a wait
+    (Kernel.handoff_loads), by name."""
+    out = {}
+    for (region, lo, hi), roles in sorted(cands.items()):
+        if len(roles) == 1 and not any(
+            r == region and a < hi and lo < b and (a, b) != (lo, hi)
+            for r, a, b in cands
+        ) and any(r == region and lo <= a and b <= hi and readers - roles
+                  for (r, a, b), readers in loads.items()):  # fmt: skip
+            out[f"{region}+{lo}"] = (region, lo, hi, next(iter(roles)))
+    return out
+
+
+def _translate(facts, ptx_text, entry, records, pol, handoffs=None) -> None:
     if pol.get("ptxas") is None:  # TTGIR: dump.py records it in every LaunchRecord
         got = {r.get("ptxas") for r in records}
         pol = {**pol, "ptxas": got.pop() if len(got) == 1 else None}
@@ -255,21 +296,39 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
                  work_per=dict(work.get("per", {})),
                  srclocs=srclocs, p1=p1, switches=switches,
                  captures={} if dispatch is not None else None,
-                 gate_at=dispatch.gate if dispatch is not None else None)  # fmt: skip
-    translators = []
+                 gate_at=dispatch.gate if dispatch is not None else None,
+                 handoffs=handoffs)  # fmt: skip
+    translators, first = [], None
     for role in roles:
-        tree = R.build(cfg, role)
         warps = role.warps or tuple(range(facts.block[0] // 32))
-        if list(warps) != list(range(warps[0], warps[0] + len(warps))):
-            raise interp.Unsupported(
-                "role", role.name, f"warps {warps} are not contiguous"
-            )
-        got = _role(k, tree, role.name, warps[0], len(warps), pol, role.gate)
+        try:
+            if list(warps) != list(range(warps[0], warps[0] + len(warps))):
+                raise interp.Unsupported(
+                    "role", role.name, f"warps {warps} are not contiguous"
+                )
+            tree = R.build(cfg, role)
+            got = _role(k, tree, role.name, warps[0], len(warps), pol, role.gate)
+        except interp.DataRoot as e:
+            if handoffs is not None:
+                raise
+            # the later roles' stores may put a handoff channel that carries the value
+            first = first or e
+            continue
+        except Exception:
+            if first is not None:  # the first refusal, as without handoffs
+                raise first from None
+            raise
         if role.padding and not any(
             s["op"] == "event" for tr in got for s in _statements(tr.stmts)
         ):
             continue  # padding warps that emit nothing (cfg.py): no role
         translators += got
+    if first is not None:  # (TTGIR partitions: a CuTe role is a range of warps)
+        part = pol["roles"] == "partition"
+        channels = _channels(k.handoff_cands, k.handoff_loads) if part else {}
+        if not channels:
+            raise first
+        raise _Handoffs(first, channels)
     facts.barriers = mem.barriers(translators)
     interp.check_capture_barriers(k, mem.arrays)
     facts.clc = sync.finish(translators)
@@ -290,6 +349,8 @@ def _translate(facts, ptx_text, entry, records, pol) -> None:
         )
         r = {"name": name, "w0": tr.w0, "warps": tr.nw, "threads_per_issue": tr.tpi,
              "body": tr.stmts}  # fmt: skip
+        if k.handoffs and name != tr.name and pol["roles"] == "partition":
+            r["group"] = tr.name  # the parts of a partition (KIR change 17)
         mark_addr({"roles": [r]})
         facts.roles.append(r)
         facts.work_events += tr.work_events

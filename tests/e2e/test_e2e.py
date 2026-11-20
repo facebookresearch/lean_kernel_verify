@@ -153,6 +153,12 @@ EVAL_ERROR_KINDS = {
     ("cluster_launch", "grid3"): "kernel",
     ("cluster_remote_arrive", "rank_outside_cluster"): "kernel",
     ("cluster_dsmem_relay", "negative_bytes"): "unexpected",
+    ("handoff", "overwritten"): "limit",
+    ("handoff", "other_arrival"): "limit",
+    ("handoff", "read_before_wait"): "limit",
+    ("handoff", "no_value"): "limit",
+    ("handoff", "parity_order"): "limit",
+    ("handoff_group", "parts_differ"): "limit",
 }
 
 

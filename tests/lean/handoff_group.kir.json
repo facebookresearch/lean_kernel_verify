@@ -1,0 +1,537 @@
+{
+ "kir_version": 1,
+ "kernel": "handoff_group",
+ "source": "tests/lean/handoff_group.kir.json",
+ "ir": "ptx",
+ "grid": [
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  },
+  {
+   "e": "const",
+   "v": 1,
+   "w": 32
+  }
+ ],
+ "params": [
+  {
+   "name": "N",
+   "type": "i32"
+  },
+  {
+   "name": "MODE",
+   "type": "i32"
+  }
+ ],
+ "tensors": [
+  {
+   "name": "x",
+   "kind": "global",
+   "elem_bytes": 4,
+   "shape": [
+    {
+     "e": "const",
+     "v": 16,
+     "w": 32
+    }
+   ],
+   "strides": [
+    {
+     "e": "const",
+     "v": 1,
+     "w": 32
+    }
+   ],
+   "segments": null,
+   "role": "workspace",
+   "metadata": false
+  }
+ ],
+ "barriers": [
+  {
+   "name": "full",
+   "count": {
+    "e": "const",
+    "v": 32,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  },
+  {
+   "name": "empty",
+   "count": {
+    "e": "const",
+    "v": 32,
+    "w": 32
+   },
+   "num": {
+    "e": "const",
+    "v": 1,
+    "w": 32
+   }
+  }
+ ],
+ "roles": [
+  {
+   "name": "default",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "event",
+     "ev": "bar_init",
+     "loc": "handoff.py:2",
+     "bar": "full",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "count": {
+      "e": "const",
+      "v": 32,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "bar_init",
+     "loc": "handoff.py:3",
+     "bar": "empty",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "count": {
+      "e": "const",
+      "v": 32,
+      "w": 32
+     }
+    }
+   ]
+  },
+  {
+   "name": "reader",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "let",
+     "var": "j",
+     "expr": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "loc": "handoff.py:13"
+    },
+    {
+     "op": "let",
+     "var": "go",
+     "expr": {
+      "e": "const",
+      "v": 1,
+      "w": 1
+     },
+     "loc": "handoff.py:13"
+    },
+    {
+     "op": "while",
+     "cond": {
+      "e": "var",
+      "name": "go",
+      "w": 1
+     },
+     "max_iters": 8,
+     "loc": "handoff.py:14",
+     "body": [
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "handoff.py:15",
+       "bar": "full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "var",
+         "name": "j",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "handoff_get",
+       "loc": "handoff.py:16",
+       "chan": "mbox",
+       "var": "v"
+      },
+      {
+       "op": "if",
+       "cond": {
+        "e": "cmp",
+        "o": "eq",
+        "a": {
+         "e": "var",
+         "name": "v",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": -1,
+         "w": 32
+        },
+        "w": 1
+       },
+       "then": [
+        {
+         "op": "let",
+         "var": "go",
+         "expr": {
+          "e": "const",
+          "v": 0,
+          "w": 1
+         },
+         "loc": "handoff.py:17"
+        }
+       ],
+       "else": [
+        {
+         "op": "event",
+         "ev": "gstore",
+         "loc": "handoff.py:18",
+         "tensor": "x",
+         "offsets": {
+          "t": "splat",
+          "a": {
+           "e": "var",
+           "name": "v",
+           "w": 32
+          },
+          "shape": [
+           1
+          ],
+          "w": 32
+         },
+         "mask": null
+        },
+        {
+         "op": "event",
+         "ev": "arrive",
+         "loc": "handoff.py:19",
+         "bar": "empty",
+         "idx": {
+          "e": "const",
+          "v": 0,
+          "w": 32
+         },
+         "n": 32
+        },
+        {
+         "op": "let",
+         "var": "j",
+         "expr": {
+          "e": "bin",
+          "o": "add",
+          "a": {
+           "e": "var",
+           "name": "j",
+           "w": 32
+          },
+          "b": {
+           "e": "const",
+           "v": 1,
+           "w": 32
+          },
+          "w": 32
+         },
+         "loc": "handoff.py:20"
+        }
+       ],
+       "loc": "handoff.py:17"
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "putter_a",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "k",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "const",
+      "v": 2,
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "loc": "handoff.py:6",
+     "body": [
+      {
+       "op": "event",
+       "ev": "handoff_put",
+       "loc": "handoff.py:7",
+       "chan": "mbox",
+       "value": {
+        "e": "bin",
+        "o": "add",
+        "a": {
+         "e": "var",
+         "name": "N",
+         "w": 32
+        },
+        "b": {
+         "e": "var",
+         "name": "k",
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "handoff.py:8",
+       "bar": "full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "n": 16
+      },
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "handoff.py:9",
+       "bar": "empty",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "var",
+         "name": "k",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      }
+     ]
+    },
+    {
+     "op": "event",
+     "ev": "handoff_put",
+     "loc": "handoff.py:10",
+     "chan": "mbox",
+     "value": {
+      "e": "const",
+      "v": -1,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "handoff.py:11",
+     "bar": "full",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "n": 16
+    }
+   ],
+   "group": "putter"
+  },
+  {
+   "name": "putter_b",
+   "warps": 1,
+   "threads_per_issue": 1,
+   "body": [
+    {
+     "op": "for",
+     "var": "k",
+     "lb": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "ub": {
+      "e": "const",
+      "v": 2,
+      "w": 32
+     },
+     "step": {
+      "e": "const",
+      "v": 1,
+      "w": 32
+     },
+     "loc": "handoff.py:6",
+     "body": [
+      {
+       "op": "event",
+       "ev": "handoff_put",
+       "loc": "handoff.py:7",
+       "chan": "mbox",
+       "value": {
+        "e": "bin",
+        "o": "add",
+        "a": {
+         "e": "bin",
+         "o": "add",
+         "a": {
+          "e": "var",
+          "name": "N",
+          "w": 32
+         },
+         "b": {
+          "e": "var",
+          "name": "k",
+          "w": 32
+         },
+         "w": 32
+        },
+        "b": {
+         "e": "var",
+         "name": "MODE",
+         "w": 32
+        },
+        "w": 32
+       }
+      },
+      {
+       "op": "event",
+       "ev": "arrive",
+       "loc": "handoff.py:8",
+       "bar": "full",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "n": 16
+      },
+      {
+       "op": "event",
+       "ev": "wait",
+       "loc": "handoff.py:9",
+       "bar": "empty",
+       "idx": {
+        "e": "const",
+        "v": 0,
+        "w": 32
+       },
+       "parity": {
+        "e": "bin",
+        "o": "and",
+        "a": {
+         "e": "var",
+         "name": "k",
+         "w": 32
+        },
+        "b": {
+         "e": "const",
+         "v": 1,
+         "w": 32
+        },
+        "w": 32
+       }
+      }
+     ]
+    },
+    {
+     "op": "event",
+     "ev": "handoff_put",
+     "loc": "handoff.py:10",
+     "chan": "mbox",
+     "value": {
+      "e": "const",
+      "v": -1,
+      "w": 32
+     }
+    },
+    {
+     "op": "event",
+     "ev": "arrive",
+     "loc": "handoff.py:11",
+     "bar": "full",
+     "idx": {
+      "e": "const",
+      "v": 0,
+      "w": 32
+     },
+     "n": 16
+    }
+   ],
+   "group": "putter"
+  }
+ ],
+ "case": {
+  "name": "handoff_group",
+  "inputs": [
+   {
+    "name": "parts",
+    "params": {
+     "N": 1,
+     "MODE": 0
+    },
+    "intended_writes": {}
+   },
+   {
+    "name": "parts_differ",
+    "params": {
+     "N": 1,
+     "MODE": 1
+    },
+    "intended_writes": {}
+   }
+  ]
+ }
+}

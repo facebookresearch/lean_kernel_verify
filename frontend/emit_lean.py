@@ -251,6 +251,10 @@ def event(s):
                     lbool(s.get("async", False)), opt_expr(s.get("cta")), slot, loc)  # fmt: skip
     if ev == "tmap_write":
         return ctor(ev, lstr(s["base"]), expr(s["addr"]), expr(s["warp"]), loc)
+    if ev == "handoff_put":
+        return ctor(ev, lstr(s["chan"]), expr(s["value"]), loc)
+    if ev == "handoff_get":
+        return ctor(ev, lstr(s["chan"]), lstr(s["var"]), loc)
     raise AssertionError(ev)
 
 
@@ -376,6 +380,7 @@ def emit(k, src_name):
             f"  warps := {r['warps']}",
             f"  threads_per_issue := {r['threads_per_issue']}",
             f"  body := {body}",
+            *([f"  group := {lstr(r['group'])}"] if "group" in r else []),
             "",
         ]
     out += [

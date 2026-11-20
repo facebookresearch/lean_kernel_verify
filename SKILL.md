@@ -310,6 +310,10 @@ A verdict depends on exactly these items (`design.md`, "Trust base"):
    before the store is ordered only through its mbarrier's bytes (a phase completes
    only with its expected bytes landed, an `expect_tx` applies to the phase current at
    its issue: `StoreReuse.landed`), else undecided (U3).
+9. **Handoffs only** (kir.md change 17): the parts of one role (a role split by warps)
+   arriving in lockstep, as P0 takes the threads of one role; the frontend's write set
+   for a channel (every other shared write that may touch its bytes is refused, or
+   assumed to miss them where its offsets have no static bounds: a KIR `assume`).
 
 The case file decides what is checked: its inputs, and annotations that name
 segments, work items, intended regions and elision flags. Review them like code.

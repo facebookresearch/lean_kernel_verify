@@ -301,3 +301,19 @@ ledger_cycle              hang_elsewhere   PASS FAIL PASS FAIL PASS
 # Bounds and contents stable while a wait's classification still changes is no fixpoint: at the round budget (at_budget) the ledger has not converged (P0-2/P0-4 undecided), one round more (one_more) it has (P0-2 a certain hang, P0-4 PASS).
 ledger_confirm            at_budget        PASS FAIL PASS FAIL PASS
 ledger_confirm            one_more         PASS FAIL PASS PASS PASS
+# handoff (KIR change 17): the putter's values reach the reader through the waits that pair
+# with its arrives (paired; one of them out of bounds: value_oob); a putter that puts again
+# without a wait an arrive of the reader after the read orders (overwritten), an arrival on
+# the full slot from another role (other_arrival), a read before any wait (read_before_wait),
+# a wait that pairs with an arrive before the first put (no_value) and waits out of parity
+# order (parity_order) are limits of the model. handoff_group: the putter split into two parts of one group (parts); parts that
+# record different values (parts_differ) are a limit.
+handoff                   paired           PASS PASS PASS PASS PASS
+handoff                   value_oob        FAIL PASS PASS PASS PASS
+handoff                   overwritten      FAIL FAIL FAIL FAIL FAIL
+handoff                   other_arrival    FAIL FAIL FAIL FAIL FAIL
+handoff                   read_before_wait FAIL FAIL FAIL FAIL FAIL
+handoff                   no_value         FAIL FAIL FAIL FAIL FAIL
+handoff                   parity_order     FAIL FAIL FAIL FAIL FAIL
+handoff_group             parts            PASS PASS PASS PASS PASS
+handoff_group             parts_differ     FAIL FAIL FAIL FAIL FAIL

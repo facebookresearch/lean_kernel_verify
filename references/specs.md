@@ -926,7 +926,10 @@ no counterexample is listed. The error's kind (`Eval.lean` `ErrKind`, printed as
   it is not an error (UNDECIDED): division or remainder by zero (in a tensor
   expression on any lane, including lanes a mask disables: tensor expressions
   evaluate every lane; the GPU computes an unspecified value, which the kernel
-  may never use).
+  may never use); a handoff through shared memory the run does not show (kir.md
+  change 17: no value recorded at the arrive a get's wait pairs with, putters that
+  recorded different values, waits that do not pair with the putters' arrives, or a
+  putter's next put not ordered after the get).
 - `unexpected`: the case or LKV must be fixed, so no spec is decided and it is
   an ERROR: a `while` exceeding `max_iters` (a hang of the kernel, or a budget
   too small for the input), an in-extent metadata `load` at a negative offset

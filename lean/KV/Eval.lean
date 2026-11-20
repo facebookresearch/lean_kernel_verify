@@ -196,6 +196,9 @@ structure Slot where
   cta : Nat := 0
   deriving Inhabited
 
+/-- A slot as a map key: (barrier array, index, rank of its CTA). -/
+def Slot.key (s : Slot) : Nat × Nat × Nat := (s.bar, s.idx, s.cta)
+
 /-- The thread that executes a P1-2 event, in its CTA: lane `lane` of warp `warp`, or with
 `lane = none` the elected lane of a full-warp elect.sync in that warp (one lane, the same
 for every such election: PTX ISA elect.sync elects deterministically). -/
@@ -263,6 +266,11 @@ inductive Ev where
   /-- A tensormap write (P1-2) by every lane of warp `warp` (tensormap.cp_fenceproxy): the
   128 bytes from byte offset `lo` of global buffer `base`. -/
   | tmapWrite (warp : Int) (base : String) (lo : Int)
+  /-- The role's value of handoff channel `chan` changed (KIR change 17, `handoff_put`). -/
+  | handoffPut (chan : String)
+  /-- A `handoff_get` of channel `chan`: the value the putter recorded at its `k`-th arrive on
+  slot `s`, the getter's last wait being its `k`-th on `s` (counting from 0). -/
+  | handoff (chan : String) (s : Slot) (k : Nat)
 
 structure TEvent where
   ev : Ev
@@ -367,10 +375,22 @@ structure Ctx where
   /-- `false` for host-side Exprs (grid, shapes, strides, barrier sizes). -/
   device : Bool
 
+/-- The handoff records of a CTA (KIR change 17): (channel, slot key, k) -> the channel's
+value at its putter role's k-th `arrive` on the slot (counting from 0). -/
+abbrev Handoffs := Std.HashMap (String × (Nat × Nat × Nat) × Nat) Int
+
 structure St where
   env : Std.HashMap String Val
   trace : Array TEvent
   work : Array (String × Int)
+  /-- KIR change 17: the role's values of the handoff channels it puts, its `arrive` and
+  `wait` events so far per slot, the slot of its last wait, and the CTA's handoff records
+  (carried from role to role, `eval`). -/
+  chans : Std.HashMap String Int := {}
+  arrived : Std.HashMap (Nat × Nat × Nat) Nat := {}
+  waited : Std.HashMap (Nat × Nat × Nat) Nat := {}
+  lastWait : Option Slot := none
+  records : Handoffs := {}
 
 abbrev M := ReaderT Ctx (EStateM EvalError St)
 
@@ -636,13 +656,23 @@ def execEvent : Event → M Unit
     let s ← slotOf loc bar idx (← ctaOf loc "arrive" cta)
     let r := (← read).role
     emit loc (.arrive s (n * (if perWarp then r.warps else r.threads_per_issue)) false)
+    let st ← get
+    let k := st.arrived.getD s.key 0
+    for (c, v) in st.chans.toList do
+      if st.records[(c, s.key, k)]?.any (· != v) then
+        throwK loc .limit s!"handoff {c}: its putter roles recorded different values at their arrive {k + 1} on {bar}[{s.idx}] (KIR change 17)"
+    set { st with arrived := st.arrived.insert s.key (k + 1),
+                  records := st.chans.fold (init := st.records) fun m c v => m.insert (c, s.key, k) v }
   | .commit_arrive bar idx mask loc => do
     for c in ← ctasOf loc "commit_arrive" mask do
       emit loc (.arrive (← slotOf loc bar idx c) 1 true)
   | .expect_tx bar idx bytes cta loc => do
     emit loc (.expectTx (← slotOf loc bar idx (← ctaOf loc "expect_tx" cta)) (← txBytes loc "expect_tx" bytes))
   | .wait bar idx parity cta loc => do
-    emit loc (.wait (← slotOf loc bar idx (← ctaOf loc "wait" cta)) (← evalInt loc parity))
+    let s ← slotOf loc bar idx (← ctaOf loc "wait" cta)
+    emit loc (.wait s (← evalInt loc parity))
+    modify fun st => { st with waited := st.waited.insert s.key (st.waited.getD s.key 0 + 1),
+                               lastWait := some s }
   | .tma_load desc coords bar idx mask leader loc => do
     let (t, info, cs) ← tmaAccess loc desc coords
     let bytes := numel info.decl.box * info.decl.elem_bytes
@@ -714,6 +744,22 @@ def execEvent : Event → M Unit
       (os.map fun o => (o, o + bytes)) sl)
   | .tmap_write base addr warp loc => do
     emit loc (.tmapWrite (← evalInt loc warp) base (← evalInt loc addr))
+  | .handoff_put chan value loc => do
+    let v ← evalInt loc value
+    modify fun st => { st with chans := st.chans.insert chan v }
+    emit loc (.handoffPut chan)
+  | .handoff_get chan var loc => do
+    let st ← get
+    let some s := st.lastWait
+      | throwK loc .limit s!"handoff {chan}: a read before any wait of the role (KIR change 17)"
+    let k := st.waited.getD s.key 0 - 1
+    match st.records[(chan, s.key, k)]? with
+    | some v =>
+      set { st with env := st.env.insert var ⟨32, BitVec.ofInt 32 v⟩ }
+      emit loc (.handoff chan s k)
+    | none =>
+      let bar := (((← read).host.barriers[s.bar]?).map (·.decl.name)).getD "?"
+      throwK loc .limit s!"handoff {chan}: its putter role recorded no value at its arrive {k + 1} on {bar}[{s.idx}], which this role's wait {k + 1} on that slot pairs with (KIR change 17)"
 
 def setVar (x : String) (v : Val) : M Unit :=
   modify fun s => { s with env := s.env.insert x v }
@@ -763,8 +809,9 @@ end
 def pidStr (p : Nat × Nat × Nat) : String := s!"({p.1},{p.2.1},{p.2.2})"
 
 def runM {α : Type} (h : Host) (pid : Nat × Nat × Nat) (role : Role) (device : Bool) (act : M α)
-    (rank : Nat := 0) : EStateM.Result EvalError St α :=
-  (act.run { host := h, pid, role, device, rank }).run { env := h.params, trace := #[], work := #[] }
+    (rank : Nat := 0) (records : Handoffs := {}) : EStateM.Result EvalError St α :=
+  (act.run { host := h, pid, role, device, rank }).run
+    { env := h.params, trace := #[], work := #[], records }
 
 /-- Values of host-side Exprs (params only). -/
 def hostInts (h : Host) (es : List Expr) : Except EvalError (Array Int) :=
@@ -773,14 +820,15 @@ def hostInts (h : Host) (es : List Expr) : Except EvalError (Array Int) :=
   | .ok vs _ => .ok (vs.map Val.int).toArray
   | .error e _ => .error { e with context := "host" }
 
-/-- Trace of role `ri` of CTA `pid`; a role that stops (a `metaOob` event, an `assume`
-that does not hold) keeps the events up to it and the reason. -/
-def runRole (h : Host) (pid : Nat × Nat × Nat) (ri : Nat) (role : Role) (rank : Nat := 0) :
-    Except EvalError RoleTrace :=
-  match runM h pid role true (execBlock role.body) rank with
-  | .ok () s => .ok { role := ri, events := s.trace, stopped := false }
+/-- Trace of role `ri` of CTA `pid`, run with the CTA's handoff records `records`, and the
+records after it; a role that stops (a `metaOob` event, an `assume` that does not hold)
+keeps the events up to it and the reason. -/
+def runRole (h : Host) (pid : Nat × Nat × Nat) (ri : Nat) (role : Role) (rank : Nat := 0)
+    (records : Handoffs := {}) : Except EvalError (RoleTrace × Handoffs) :=
+  match runM h pid role true (execBlock role.body) rank records with
+  | .ok () s => .ok ({ role := ri, events := s.trace, stopped := false }, s.records)
   | .error e s =>
-    if e.stop then .ok { role := ri, events := s.trace, stopped := true, why := e.why }
+    if e.stop then .ok ({ role := ri, events := s.trace, stopped := true, why := e.why }, s.records)
     else .error { e with context := s!"cta {pidStr pid} role {role.name}" }
 
 def lookup {α : Type} (xs : List (String × α)) (k : String) : Option α :=
@@ -864,19 +912,191 @@ def Host.rankOf (h : Host) (pid : Nat × Nat × Nat) : Nat :=
 def Host.clusterOf (h : Host) (pid : Nat × Nat × Nat) : Nat × Nat × Nat :=
   (pid.1 / h.cluster.1, pid.2.1 / h.cluster.2.1, pid.2.2 / h.cluster.2.2)
 
-/-- Evaluate every role of every CTA of `k` on `inp` (CTAs in x-fastest order). -/
+/-! ## Handoffs through shared memory (KIR change 17) -/
+
+mutual
+/-- The handoff channels a statement puts (`true`) and gets (`false`). -/
+def Stmt.handoffs : Stmt → List (Bool × String)
+  | .event (.handoff_put c _ _) => [(true, c)]
+  | .event (.handoff_get c _ _) => [(false, c)]
+  | .«for» _ _ _ _ b _ => stmtsHandoffs b
+  | .«while» _ b _ _ => stmtsHandoffs b
+  | .«if» _ t e _ => stmtsHandoffs t ++ stmtsHandoffs e
+  | _ => []
+
+def stmtsHandoffs : List Stmt → List (Bool × String)
+  | [] => []
+  | s :: ss => s.handoffs ++ stmtsHandoffs ss
+end
+
+/-- The role group of role `ri` (`Role.group`, else its name). -/
+def Kernel.groupOf (k : Kernel) (ri : Nat) : String :=
+  match k.roles[ri]? with
+  | some r => if r.group.isEmpty then r.name else r.group
+  | none => ""
+
+/-- The putter roles of each handoff channel and the order the roles of a CTA run in: the
+putters first, so their records exist when another role reads them. Putters of a channel
+that are not one role group, a channel no role puts, and a putter that reads a channel are
+malformed KIR. -/
+def handoffPlan (k : Kernel) : Except EvalError (Std.HashMap String (List Nat) × List Nat) := do
+  let mut putters : Std.HashMap String (List Nat) := {}
+  let mut gets : Array (Nat × String) := #[]
+  for (r, ri) in k.roles.zipIdx do
+    for (put, c) in stmtsHandoffs r.body do
+      if !put then
+        gets := gets.push (ri, c)
+      else
+        let ps := putters.getD c []
+        if ps.any (k.groupOf · != k.groupOf ri) then
+          hostErr s!"handoff channel {c} is put by roles of two groups"
+        unless ps.contains ri do putters := putters.insert c (ps ++ [ri])
+  let isPutter (ri : Nat) : Bool := putters.toList.any (·.2.contains ri)
+  for (ri, c) in gets do
+    if !putters.contains c then hostErr s!"handoff channel {c} is read by role {ri} and put by none"
+    if isPutter ri then hostErr s!"role {ri} puts a handoff channel and reads channel {c}"
+  let all := List.range k.roles.length
+  pure (putters, all.filter isPutter ++ all.filter (!isPutter ·))
+
+/-- What the role traces of a cluster do to the slots of one of its CTAs, per slot key: the
+plain `arrive` events of that CTA's roles (role, trace index, arrivals), whether anything
+else completes a phase or expects bytes on the slot (an async arrival, transaction bytes, an
+arrival from another CTA), and its initial count. -/
+structure SlotUse where
+  arrives : Array (Nat × Nat × Int) := #[]
+  other : Bool := false
+  init : Option Int := none
+
+def slotUses (r : Run) (c : CtaTrace) : Std.HashMap (Nat × Nat × Nat) SlotUse := Id.run do
+  let cl := r.host.clusterOf c.pid
+  let mut m : Std.HashMap (Nat × Nat × Nat) SlotUse := {}
+  for c' in r.ctas do
+    if r.host.clusterOf c'.pid != cl then continue
+    for t in c'.roles do
+      for (e, p) in t.events.zipIdx do
+        let (s, f) : Option Slot × (SlotUse → SlotUse) := match e.ev with
+          | .arrive s n false =>
+            (some s, if c'.pid == c.pid then fun u => { u with arrives := u.arrives.push (t.role, p, n) }
+                     else fun u => { u with other := true })
+          | .barInit s n => (some s, fun u => { u with init := some n, other := u.other || u.init.any (· != n) })
+          | .arrive s _ true | .expectTx s _ | .landTx s _ | .tmaLoad _ _ s _ =>
+            (some s, fun u => { u with other := true })
+          | _ => (none, id)
+        if let some s := s then
+          if s.cta == c.rank then m := m.insert s.key (f (m.getD s.key {}))
+  return m
+
+/-- The phases of a slot (use `u`) and the waits of trace `tw` on it, if every arrival on the
+slot is a plain `arrive` of the roles of one group `g` of the CTA, each role arriving with one
+count per event and those counts summing to the slot's count, and the waits of `tw` on the
+slot wait for parities 0, 1, 0, ... in order. The roles of a group are taken in lockstep, as
+P0 takes the threads of one role (references/specs.md): then phase k completes with the k-th
+arrive of each role of `g`, and the k-th wait of `tw` returns after that (PTX ISA, mbarrier
+phases). Returns `g` and, per wait k of `tw` (while every role of `g` has a k-th arrive), its
+trace index and the trace index of the k-th arrive of each role of `g`. -/
+def pairing (k : Kernel) (u : SlotUse) (s : Slot) (tw : RoleTrace) :
+    Option (String × Array (Nat × Array (Nat × Nat))) := do
+  guard !u.other
+  let cnt ← u.init
+  let (r0, _, _) ← u.arrives[0]?
+  let g := k.groupOf r0
+  guard (u.arrives.all fun (r, _, _) => k.groupOf r == g)
+  let per := (u.arrives.map (·.1)).toList.eraseDups.map fun r => (r, u.arrives.filter (·.1 == r))
+  let ns := per.map fun (_, xs) => (xs[0]?.map (·.2.2)).getD 0
+  guard ((per.zip ns).all fun ((_, xs), n) => xs.all (·.2.2 == n))
+  guard (ns.foldl (· + ·) 0 == cnt)
+  let waits := tw.events.zipIdx.filterMap fun (e, p) => match e.ev with
+    | .wait s' par => if s'.key == s.key then some (p, par) else none
+    | _ => none
+  guard (waits.zipIdx.all fun ((_, par), j) => par == ((j % 2 : Nat) : Int))
+  let m := (per.map (·.2.size)).foldl min (waits.size)
+  return (g, (waits.extract 0 m).zipIdx.map fun ((p, _), j) =>
+    (p, per.toArray.map fun (r, xs) => (r, (xs[j]?.map (·.2.1)).getD 0)))
+
+/-- The handoff checks of run `r` (references/kir.md, change 17): each `handoff` read of a
+role, its k-th wait on slot s, (1) pairs with the k-th arrive on s of every putter role of the
+channel (`pairing`, the putters' group arriving on s), at which the value read was recorded,
+so those arrives happened before the read; (2) is not overwritten before it happens: each
+putter's next put of the channel after that arrive follows a wait of the putter that pairs
+with an arrive of the reading role after the read (`pairing` on that wait's slot, the reading
+role's group arriving on it). A read either is not shown for is a model limit (an evaluation
+error). The pairing of each (role, slot) and the puts of each putter are computed once per
+CTA. -/
+def checkHandoffs (k : Kernel) (r : Run) (putters : Std.HashMap String (List Nat)) :
+    Except EvalError Unit := do
+  for c in r.ctas do
+    let reads := c.roles.flatMap fun t => t.events.zipIdx.filterMap fun (e, p) => match e.ev with
+      | .handoff ch s j => some (t, p, ch, s, j)
+      | _ => none
+    if reads.isEmpty then continue
+    let uses := slotUses r c
+    -- (putter role, channel) -> the trace indices of its puts, ascending
+    let mut puts : Std.HashMap (Nat × String) (Array Nat) := {}
+    for t in c.roles do
+      for (e, i) in t.events.zipIdx do
+        if let .handoffPut ch := e.ev then
+          puts := puts.insert (t.role, ch) ((puts.getD (t.role, ch) #[]).push i)
+    let mut memo : Std.HashMap (Nat × (Nat × Nat × Nat)) (Option (String × Array (Nat × Array (Nat × Nat)))) := {}
+    for (t, p, ch, s, j) in reads do
+      let fail (why : String) : Except EvalError Unit :=
+        .error { msg := s!"handoff {ch}: {why} (KIR change 17)", loc := (t.events[p]?.map (·.loc)).getD "",
+                 context := s!"cta {pidStr c.pid}", kind := .limit }
+      let ps := putters.getD ch []
+      let pr ← match memo[(t.role, s.key)]? with
+        | some x => pure x
+        | none => do
+          let x := pairing k (uses.getD s.key {}) s t
+          memo := memo.insert (t.role, s.key) x
+          pure x
+      let some (g, pairs) := pr
+        | fail "the waits of the reading role on the slot of its last wait do not pair with the arrives on it (another arrival, transaction bytes, counts that do not sum to the slot's, or waits out of parity order)"
+      let some (_, arrs) := pairs[j]?
+        | fail "its wait has no arrive of every role of the arriving group to pair with"
+      unless ps.all (k.groupOf · == g) && ps.all (fun q => arrs.any (·.1 == q)) do
+        fail "the arrives its wait pairs with are not those of every putter role"
+      for q in ps do
+        let some P := c.roles.find? (·.role == q) | fail "no trace of a putter role"
+        let a := ((arrs.find? (·.1 == q)).map (·.2)).getD 0
+        let some n := (puts.getD (q, ch) #[]).find? (· > a) | continue
+        let mut ordered := false
+        for w in [a + 1:n] do
+          if let some (.wait d _) := (P.events[w]?.map (·.ev) : Option Ev) then
+            let pw ← match memo[(q, d.key)]? with
+              | some x => pure x
+              | none => do
+                let x := pairing k (uses.getD d.key {}) d P
+                memo := memo.insert (q, d.key) x
+                pure x
+            if let some (g', ps') := pw then
+              if g' == k.groupOf t.role && ps'.any (fun (w', as') =>
+                  w' == w && as'.any fun (q', a') => q' == t.role && a' > p) then
+                ordered := true
+                break
+        unless ordered do
+          fail s!"a putter's next put of the channel ({(P.events[n]?.map (·.loc)).getD ""}) follows no wait that pairs with an arrive of the reading role after this read"
+
+/-- Evaluate every role of every CTA of `k` on `inp` (CTAs in x-fastest order; in each, the
+roles that put handoff channels first, `handoffPlan`). -/
 def eval (k : Kernel) (inp : Input) : Except EvalError Run := do
   let h ← setupHost k inp
+  let (putters, order) ← handoffPlan k
+  let roles := k.roles.toArray
   let (gx, gy, gz) := h.grid
   let mut ctas := Array.emptyWithCapacity (gx * gy * gz)
   for z in [0:gz] do
     for y in [0:gy] do
       for x in [0:gx] do
         let rank := h.rankOf (x, y, z)
-        let mut roles := #[]
-        for (r, ri) in k.roles.zipIdx do
-          roles := roles.push (← runRole h (x, y, z) ri r rank)
-        ctas := ctas.push { pid := (x, y, z), roles, rank }
-  pure { host := h, ctas }
+        let mut traces := Array.replicate roles.size ({ role := 0, events := #[], stopped := false } : RoleTrace)
+        let mut records : Handoffs := {}
+        for ri in order do
+          if let some role := roles[ri]? then
+            let (t, rs) ← runRole h (x, y, z) ri role rank records
+            traces := traces.set! ri t
+            records := rs
+        ctas := ctas.push { pid := (x, y, z), roles := traces, rank }
+  let r : Run := { host := h, ctas }
+  unless putters.isEmpty do checkHandoffs k r putters
+  pure r
 
 end KV

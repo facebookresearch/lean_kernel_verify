@@ -365,7 +365,8 @@ tensormap staging buffer's zeroing, the CLC response read and a TLX worker's loa
 warp-specialize capture the default stored, `frontend_ptx.md`, "Threads and roles"; a
 shared write still closes the staging buffers it may overlap, `frontend_ptx.md`, "TMA
 descriptors"),
-`ldmatrix`, `stmatrix`, `mma.sync` (register MMA), `createpolicy` (an L2 policy only
+`ldmatrix`, `stmatrix` (these and 32-bit `ld`/`st.shared` except the puts and gets of a
+handoff channel, `frontend_ptx.md`, "Handoffs"), `mma.sync` (register MMA), `createpolicy` (an L2 policy only
 `.L2::cache_hint` operands take), `fence.*`, `membar`, `tcgen05.fence`,
 `griddepcontrol`, `setmaxnreg` (no consistency check across a warpgroup: real kernels
 run it at different points per warp), `prefetch`, `nanosleep` (a scheduling hint), `bar.warp.sync`, the commit/wait
