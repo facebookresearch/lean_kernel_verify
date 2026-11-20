@@ -96,7 +96,8 @@ import KV.Spec.TmemReuse
 
 namespace KV.StoreReuse
 
-open TmemReuse (NamedRole NamedSlot PWait)
+open TmemReuse (NamedRole NamedSlot PWait namedOf mergedWaits blockedWaits saturateWith closuresWith locAt ctxName
+  groupPairs failsUndecided blockedNote withUndecided)
 
 structure Store where
   role : Nat
@@ -161,6 +162,8 @@ structure Ctx where
   waits : Array (Array PWait)
   /-- Per role, its mbarrier waits by ledger slot at their sound phase lower bounds. -/
   ws : WaitsBySlot
+  /-- Per ledger slot, its `TxIndex` (`landingWait`). -/
+  ix : Array TxIndex
   sizes : Array Nat
   stores : Array Store
   writes : Array Write
@@ -187,12 +190,12 @@ def contrib (rs : RoleSlot) (k : Int) : Int :=
 /-- Expect_tx bytes that phases 1..k of the slot surely hold: each role's expect_tx issued
 before the last of its arrivals those phases surely hold, which are `k x count` minus what
 the other roles can contribute to them (`contrib`), or `SlotLedger.needs` if larger (an
-expect_tx applies to the phase current at its issue, at most its role's next arrival's). -/
-def bytesIn (L : SlotLedger) (k : Int) : Int :=
-  L.roles.zipIdx.foldl (init := 0) fun acc (rs, i) =>
+expect_tx applies to the phase current at its issue, at most its role's next arrival's;
+`SlotLedger.bytesNeeded` with that raised need, through the slot's `TxIndex` `ix`). -/
+def bytesIn (L : SlotLedger) (ix : TxIndex) (k : Int) : Int :=
+  L.bytesBefore ix fun i =>
     let others := L.roles.zipIdx.foldl (init := 0) fun n (o, j) => if j == i then n else n + contrib o k
-    let need := max (k * L.count - others) (L.needs i k false)
-    rs.tx.foldl (init := acc) fun acc x => if !x.load && x.arrivedBefore < need then acc + x.bytes else acc
+    max (k * L.count - others) (L.needs i k false)
 
 /-- Lock reading, bytes carry order (module doc): the trace position after the load of `rs`
 on slot `L` that completes its lockstep share of the bytes of phases 1..k, its load bytes
@@ -215,108 +218,51 @@ def loadsCoverLock (L : SlotLedger) (rs : RoleSlot) (k : Int) : Nat := Id.run do
 
 /-- Grow `h` to a fixpoint over the waits inside its `done` prefixes (module doc). -/
 def saturate (named : Array NamedSlot) (exact : Array Bool) (ledger : Array SlotLedger)
-    (waits : Array (Array PWait)) (lockstep : Bool) (h : Hb) (applied : Array Nat) : Hb × Array Nat := Id.run do
-  let mut done := h.done
-  let mut all := h.all
-  let mut applied := applied
-  for _ in [0:waits.foldl (· + ·.size) 1] do
-    let mut changed := false
-    for r in [0:waits.size] do
-      let ws := waits[r]!
-      for i in [applied[r]!:ws.size] do
-        let (p, isNamed, s, k, may) := ws[i]!
-        if p ≥ done[r]! then break
-        applied := applied.modify r (· + 1)
-        changed := true
-        if isNamed then
-          let ns := named[s]!
-          if ns.consistent then
-            for (nr, j) in ns.roles.zipIdx do
-              if exact[s]! then
-                -- phase k is the k-th bar.sync of every participating thread
-                match nr.arrivals[(k - 1).toNat]? with
-                | some (q, _) =>
-                  done := done.modify nr.role (max · (q + 1))
-                  all := all.modify nr.role (max · (q + 1))
-                | none => pure ()
-              else if lockstep then
-                -- not exact: threads outside the roles may take part (the idle warps of a
-                -- Triton warp-specialized kernel join its start and end barrier), so the
-                -- arrivals a phase needs from a role are unknown: the lock reading only
-                let (one, _) := creditArrivals nr.arrivals 1 (fun _ => 1) (ns.needs j k)
-                done := done.modify nr.role (max · one)
-                all := all.modify nr.role (max · one)
-        else
-          let l := ledger[s]!
-          for (rs, j) in l.roles.zipIdx do
-            let m := l.needsWith j k false may
-            let m := if lockstep then max m (l.lockNeeds j k) else m
-            let (one, _) := creditArrivals rs.arrivals 1 (fun _ => 1) m
-            done := done.modify rs.role (max · one)
-            if lockstep then all := all.modify rs.role (max · one)
-          if lockstep then
-            -- bytes carry order (module doc, "Lock reading"): the loads that brought the
-            -- bytes of phases 1..k were issued before the wait returned
-            for rs in l.roles do
-              let q := loadsCoverLock l rs k
-              if q > 0 then
-                done := done.modify rs.role (max · q)
-                all := all.modify rs.role (max · q)
-    if !changed then break
-  return ({ done, all }, applied)
+    (waits : Array (Array PWait)) (lockstep : Bool) (h : Hb) (applied : Array Nat) : Hb × Array Nat :=
+  saturateWith (·.done) (fun h (_, isNamed, s, k, may) => Id.run do
+    let mut done := h.done
+    let mut all := h.all
+    if isNamed then
+      let ns := named[s]!
+      if exact[s]! then
+        -- phase k is the k-th bar.sync of every participating thread
+        (done, all) := ns.exactCredit k done all
+      else if ns.consistent && lockstep then
+        for (nr, j) in ns.roles.zipIdx do
+          -- not exact: threads outside the roles may take part (the idle warps of a
+          -- Triton warp-specialized kernel join its start and end barrier), so the
+          -- arrivals a phase needs from a role are unknown: the lock reading only
+          let (one, _) := creditArrivals nr.arrivals 1 (fun _ => 1) (ns.needs j k)
+          done := done.modify nr.role (max · one)
+          all := all.modify nr.role (max · one)
+    else
+      let l := ledger[s]!
+      for (rs, j) in l.roles.zipIdx do
+        let m := l.needsWith j k false may
+        let m := if lockstep then max m (l.lockNeeds j k) else m
+        let (one, _) := creditArrivals rs.arrivals 1 (fun _ => 1) m
+        done := done.modify rs.role (max · one)
+        if lockstep then all := all.modify rs.role (max · one)
+      if lockstep then
+        -- bytes carry order (module doc, "Lock reading"): the loads that brought the
+        -- bytes of phases 1..k were issued before the wait returned
+        for rs in l.roles do
+          let q := loadsCoverLock l rs k
+          if q > 0 then
+            done := done.modify rs.role (max · q)
+            all := all.modify rs.role (max · q)
+    return { done, all }) waits h applied
 
 /-- Per role in `wanted`, the closures before a point of the role after k of its waits,
-k = 0 .. its waits (incrementally: each starts from the one before). -/
+k = 0 .. its waits (incrementally: each starts from the one before; `closuresWith`). -/
 def closures (named : Array NamedSlot) (exact : Array Bool) (ledger : Array SlotLedger)
-    (waits : Array (Array PWait)) (lockstep : Bool) (wanted : Array Bool) : Array (Array Hb) := Id.run do
-  let n := waits.size
-  let mut out : Array (Array Hb) := Array.replicate n #[]
-  for r in [0:n] do
-    if !wanted.getD r false then continue
-    let mut h : Hb := { done := Array.replicate n 0, all := Array.replicate n 0 }
-    let mut applied := Array.replicate n 0
-    let mut hs : Array Hb := #[]
-    for k in [0:waits[r]!.size + 1] do
-      let start := if k = 0 then 0 else waits[r]![k - 1]!.1 + 1
-      (h, applied) := saturate named exact ledger waits lockstep { h with done := h.done.modify r (max · start) } applied
-      hs := hs.push h
-    out := out.set! r hs
-  return out
+    (waits : Array (Array PWait)) (lockstep : Bool) (wanted : Array Bool) : Array (Array Hb) :=
+  closuresWith { done := Array.replicate waits.size 0, all := Array.replicate waits.size 0 }
+    (fun h r p applied => saturate named exact ledger waits lockstep { h with done := h.done.modify r (max · p) } applied)
+    waits wanted
 
 /-- The closure before position `q` of role `r`: after the role's waits before `q`. -/
-def before (C : Ctx) (H : Array (Array Hb)) (r q : Nat) : Hb :=
-  let k := searchFirst C.waits[r]! (·.1 ≥ q)
-  (H[r]!)[k]!
-
-/-- Named-barrier slots of a cluster's roles (`nr` kernel roles; named barriers are per CTA),
-with each role's bar.sync waits (trace position, slot, phase) (TmemReuse.build's). -/
-def namedOf (croles : Array RoleTrace) (nr : Nat) : Array NamedSlot × Array (Array PWait) := Id.run do
-  let mut named : Array NamedSlot := #[]
-  let mut key : Array (Nat × Int) := #[]
-  let mut nwaits : Array (Array PWait) := Array.replicate croles.size #[]
-  for rt in croles do
-    let r := rt.role
-    let mut syncCount : Array (Int × Nat) := #[]
-    for (e, pos) in rt.events.zipIdx do
-      match e.ev with
-      | .namedBar id count sync threads =>
-        let k := (r / nr, id)
-        let si := (key.findIdx? (· == k)).getD named.size
-        if si == named.size then
-          named := named.push { id, count, consistent := true, roles := #[] }
-          key := key.push k
-        named := named.modify si fun ns =>
-          let ns := if ns.count != count then { ns with consistent := false } else ns
-          match ns.roles.findIdx? (·.role == r) with
-          | some j => { ns with roles := ns.roles.modify j fun x =>
-              { x with arrivals := x.arrivals.push (pos, x.total + threads), syncOnly := x.syncOnly && sync } }
-          | none => { ns with roles := ns.roles.push { role := r, arrivals := #[(pos, threads)], threads, syncOnly := sync } }
-        if sync then
-          let j := ((syncCount.find? (·.1 == id)).map (·.2)).getD 0 + 1
-          syncCount := (syncCount.filter (·.1 != id)).push (id, j)
-          nwaits := nwaits.modify r (·.push (pos, true, si, (j : Int), #[]))
-      | _ => pure ()
-  return (named, nwaits)
+def before (C : Ctx) (H : Array (Array Hb)) (r q : Nat) : Hb := TmemReuse.before C.waits H r q
 
 /-- The stores (with their completing waits) and writes of a cluster's roles; role `g` runs in
 the CTA of rank `g / nr`. -/
@@ -336,7 +282,7 @@ def accessesOf (croles : Array RoleTrace) (nr : Nat) : Array Store × Array Writ
         stores := stores.push { role := r, pos, who, cta := rank, kind, sym, lo, hi, tmap, loc := e.loc,
                                 done := rt.events.size }
       | .bulkCommit => commits := commits + 1
-      | .bulkWait n _ =>
+      | .bulkWait n =>
         -- the groups of all but the n most recent commits are complete
         let keep := pending.filter fun (_, c) => (commits : Int) - c < n + 1
         for (i, c) in pending do
@@ -353,32 +299,23 @@ def accessesOf (croles : Array RoleTrace) (nr : Nat) : Array Store × Array Writ
 
 /-- The P1-2 view of cluster `cl` with its P1 ledger `L`. -/
 def build (cl : ClusterTrace) (L : Array SlotLedger) (nkr : Nat) (ctaThreads : Option Nat) : Ctx :=
-    Id.run do
   let nr := max 1 nkr
   let croles := cl.roles nr
   let n := croles.size
   let (named, nwaits) := namedOf croles nr
   let exact := named.map (·.exact ctaThreads)
   let sizes := croles.map (·.events.size)
-  let merged (bound : WaitRec → Int) : Array (Array PWait) :=
-    let mbar := waitBounds L n bound
-    let may := mayBeforeReturn L mbar sizes
-    (Array.range n).map fun r =>
-      let mine : Array (Array Int) := may[r]!
-      ((mbar[r]!.zipIdx.map fun (xi : WaitPos × Nat) =>
-          let ((p, s, k), i) := xi
-          ((p, false, s, k, mine[i]!) : PWait)) ++ nwaits[r]!).qsort (·.1 < ·.1)
   let (stores, writes) := accessesOf croles nr
   let wanted := (Array.range n).map fun r => stores.any (·.role == r) || writes.any (·.role == r)
-  let blocked := L.foldl (init := #[]) fun acc l => l.roles.foldl (init := acc) fun acc rs =>
-    rs.waits.foldl (init := acc) fun acc w => if w.blocked.isSome then acc.push (rs.role, w.loc) else acc
   let firstBlocked := L.foldl (init := sizes) fun acc l => l.roles.foldl (init := acc) fun acc rs =>
     rs.waits.foldl (init := acc) fun acc w => if w.blocked.isSome then acc.modify rs.role (min · w.pos) else acc
-  let waits := merged (·.minPhase)
-  let ws := WaitsBySlot.of (waitBounds L n (·.minPhase))
-  { pid := cl.cid, roles := croles, ledger := L, named, exact, waits, ws, sizes, stores, writes, blocked, firstBlocked,
+  let mbar := waitBounds L n (·.minPhase)
+  let waits := mergedWaits L sizes nwaits mbar
+  { pid := cl.cid, roles := croles, ledger := L, named, exact, waits, ws := WaitsBySlot.of mbar, ix := L.map (·.txIndex),
+    sizes, stores, writes,
+    blocked := blockedWaits L, firstBlocked,
     sound := closures named exact L waits false wanted,
-    lock := Thunk.mk fun _ => closures named exact L (merged (·.lockPhase)) true wanted }
+    lock := Thunk.mk fun _ => closures named exact L (mergedWaits L sizes nwaits (waitBounds L n (·.lockPhase))) true wanted }
 
 /-! ## Pairs -/
 
@@ -450,7 +387,7 @@ hold. -/
 def landingWait (C : Ctx) (si r p : Nat) (k : Int) : Array Nat × Bool :=
   let L := C.ledger[si]!
   let cuts := returnCuts C.ledger C.ws C.sizes r p
-  (cuts, 0 < k && L.landedBefore cuts ≤ bytesIn L k)
+  (cuts, 0 < k && L.landedBefore C.ix[si]! cuts ≤ bytesIn L C.ix[si]! k)
 
 /-- The waits on ledger slot `si` that the landing test of a store tries (`hb`: the closure
 before the store): per role, its last wait on the slot that surely returned before the store
@@ -648,27 +585,25 @@ def Holds (r : Run) : Prop := HoldsOn (ctxs r r.ledgersP1)
 
 instance (r : Run) : Decidable (Holds r) := by unfold Holds; infer_instance
 
-/-- Every cluster with its conflicting pairs, the clusters in parallel; the decision and the
-report (`analyzeWith`) share them (`holdsOnB_eq`). -/
-def withPairs (Cs : Array Ctx) : Array (Ctx × Array (Nat × Nat × PairKind)) :=
-  parMap (fun C => (C, pairs C)) Cs
+/-- The clusters with their conflicting pairs, and the tensormap pairs of two clusters
+(`crossPairs`). -/
+abbrev ClusterPairs := Array (Ctx × Array (Nat × Nat × PairKind)) × Array (Nat × Nat × Nat × Nat)
+
+/-- Every cluster with its conflicting pairs, the clusters in parallel, and the tensormap pairs of
+two clusters; the decision and the report (`analyzeWith`) share them (`holdsOnB_eq`). -/
+def withPairs (Cs : Array Ctx) : ClusterPairs :=
+  (parMap (fun C => (C, pairs C)) Cs, crossPairs Cs)
 
 /-- `decide (HoldsOn Cs)` from `withPairs Cs` (`holdsOnB_eq`). -/
-def holdsOnB (cps : Array (Ctx × Array (Nat × Nat × PairKind))) : Bool :=
-  (cps.all fun (_, ps) => ps.isEmpty) && (crossPairs (cps.map (·.1))).isEmpty
+def holdsOnB (cps : ClusterPairs) : Bool :=
+  (cps.1.all fun (_, ps) => ps.isEmpty) && cps.2.isEmpty
 
 theorem holdsOnB_eq (Cs : Array Ctx) : holdsOnB (withPairs Cs) = decide (HoldsOn Cs) := by
   rw [Bool.eq_iff_iff, decide_eq_true_iff]
   unfold holdsOnB withPairs HoldsOn
-  simp only [parMap_eq, Array.map_map, Function.comp_def, Array.map_id', Array.all_map,
-    Array.all_eq_true', Bool.and_eq_true]
+  simp only [parMap_eq, Array.all_map, Function.comp_def, Array.all_eq_true', Bool.and_eq_true]
 
 /-! ## Counterexamples and notes -/
-
-def ctxName (h : Host) (C : Ctx) : String :=
-  if h.csize ≤ 1 then s!"cta {pidStr C.pid}" else s!"cluster {pidStr C.pid}"
-
-def locAt (C : Ctx) (r p : Nat) : Loc := ((C.roles[r]?.bind (·.events[p]?)).map (·.loc)).getD "?"
 
 def Store.describe (h : Host) (C : Ctx) (s : Store) : String :=
   let tm := match s.tmap with
@@ -688,10 +623,10 @@ def Write.describe (h : Host) (C : Ctx) (x : Write) : String :=
 def whyNot (h : Host) (C : Ctx) (H : Array (Array Hb)) (s : Store) (x : Write) : String :=
   let rs := h.gRoleName C.pid s.role
   let comp := if s.done < C.sizes[s.role]! then
-      s!"it completes at the wait at {locAt C s.role s.done}, which is not surely before the write in every thread executing it"
+      s!"it completes at the wait at {locAt C.roles s.role s.done}, which is not surely before the write in every thread executing it"
     else s!"no cp.async.bulk.wait_group of {rs} completes it"
   let a := (before C H s.role s.pos).all[x.role]!
-  let prior := if a = 0 then "none" else s!"at {locAt C x.role (a - 1)}"
+  let prior := if a = 0 then "none" else s!"at {locAt C.roles x.role (a - 1)}"
   s!"{comp}; the latest event of role {h.gRoleName C.pid x.role} surely before the store in every thread is {prior}"
 
 def pairIssue (h : Host) (C : Ctx) (i j : Nat) (k : PairKind) (extra : Nat) : Issue :=
@@ -709,22 +644,13 @@ def pairIssue (h : Host) (C : Ctx) (i j : Nat) (k : PairKind) (extra : Nat) : Is
     | .blocked => s!"{x.describe h C} and the {s.describe h C}: unordered even under the lockstep reading, but {if s.pos > C.firstBlocked[s.role]! then "the store" else "the write"} follows a wait the P1 ledger finds blocked (it never returns in the lockstep model: P0-2), so the pair may never run"
   -- an undecided pair is no counterexample, also beside certain ones (a FAIL's lines)
   let tag := if k == .fail then "" else "not decided on this input: "
-  { loc := x.loc, context := s!"{ctxName h C} roles {h.gRoleName C.pid s.role} / {h.gRoleName C.pid x.role}", msg := tag ++ msg ++ more }
+  { loc := x.loc, context := s!"{ctxName h C.pid} roles {h.gRoleName C.pid s.role} / {h.gRoleName C.pid x.role}", msg := tag ++ msg ++ more }
 
 /-- Pairs of kind `k`, one line per distinct (write line, store line) with a count. -/
-def pairIssues (h : Host) (C : Ctx) (ps : Array (Nat × Nat × PairKind)) (k : PairKind) : Array Issue := Id.run do
-  let mut keys : Array (Loc × Loc × Nat × Nat × Nat) := #[]
-  for (i, j, k') in ps do
-    if k' == k then
-      let a := C.writes[j]!.loc
-      let b := C.stores[i]!.loc
-      match keys.findIdx? fun (a', b', _, _, _) => a' == a && b' == b with
-      | some t => keys := keys.modify t fun (a', b', i', j', e) => (a', b', i', j', e + 1)
-      | none => keys := keys.push (a, b, i, j, 0)
-  return keys.map fun (_, _, i, j, e) => pairIssue h C i j k e
+def pairIssues (h : Host) (C : Ctx) (ps : Array (Nat × Nat × PairKind)) (k : PairKind) : Array Issue :=
+  groupPairs ps k (fun i j => (C.writes[j]!.loc, C.stores[i]!.loc)) fun i j e => pairIssue h C i j k e
 
 structure P2Out where
-  ok : Bool
   issues : Array Issue
   notes : Array Issue
   /-- Some issue is a certain counterexample. -/
@@ -742,14 +668,16 @@ stopped-trace line, then per cluster its certain F1/F2 lines (or, with a named b
 with two counts or a ledger that does not converge, a `not decided` line and them), the
 cross-cluster F2 lines, then the U1-U4 lines (each a `not decided` line), after a
 `not decided` head line if nothing is certain. -/
-def analyze (r : Run) (Ls : Ledgers) : P2Out := analyzeWith r ((ctxs r Ls).map fun C => (C, pairs C))
+def analyze (r : Run) (Ls : Ledgers) : P2Out :=
+  let Cs := ctxs r Ls
+  analyzeWith r (Cs.map fun C => (C, pairs C), crossPairs Cs)
 where
-  /-- `analyze` from the clusters with their conflicting pairs (`withPairs`, shared with the
-  decision). -/
-  analyzeWith (r : Run) (cps : Array (Ctx × Array (Nat × Nat × PairKind))) : P2Out := Id.run do
+  /-- `analyze` from the clusters with their conflicting pairs and the tensormap pairs of two
+  clusters (`withPairs`, shared with the decision). -/
+  analyzeWith (r : Run) (cp : ClusterPairs) : P2Out := Id.run do
   let h := r.host
+  let cps := cp.1
   let Cs := cps.map (·.1)
-  let mut ok := true
   let mut issues : Array Issue := #[]
   let mut certain := false
   let mut undec : Array Issue := #[]
@@ -762,18 +690,9 @@ where
   let mut incons : Array Int := #[]
   let mut nblocked := 0
   for (C, ps) in cps do
-    let bad := C.named.filter (!·.consistent)
     let fails := pairIssues h C ps .fail
-    let why : Option String :=
-      if !bad.isEmpty then
-        some s!"named barrier(s) {(bad.map (·.id)).toList} are used with two counts, so they order nothing; the unordered pairs below may be ordered by them"
-      else if !C.ledger.all (·.converged) then
-        some s!"the barrier ledger of this {if h.csize ≤ 1 then "CTA" else "cluster"} does not converge, so the lockstep reading the pairs below are judged under is one round's, not a fixpoint's"
-      else none
-    let und : Array Issue := match why with
-      | some w => if fails.isEmpty then #[] else #[{ loc := "", context := ctxName h C, msg := s!"not decided on this input: {w}" }]
-      | none => #[]
-    ok := ok && ps.isEmpty
+    let (why, und) := failsUndecided h C.pid C.named C.ledger fails
+      "the lockstep reading the pairs below are judged under is one round's, not a fixpoint's"
     certain := certain || (why.isNone && !fails.isEmpty)
     issues := issues ++ und ++ fails
     let u := pairIssues h C ps .lockOnly ++ pairIssues h C ps .maybeSame ++ pairIssues h C ps .landing ++
@@ -783,30 +702,25 @@ where
     -- N1: stores never completed; N2: blocked waits
     for s in C.stores do
       if s.done ≥ C.sizes[s.role]! then
-        notes := notes.push { loc := s.loc, context := s!"{ctxName h C} role {h.gRoleName C.pid s.role}",
+        notes := notes.push { loc := s.loc, context := s!"{ctxName h C.pid} role {h.gRoleName C.pid s.role}",
                               msg := s!"the {s.describe h C} is never completed by a cp.async.bulk.wait_group of its issuing thread before its role ends" }
-    match C.blocked[0]? with
-    | some (role, loc) =>
-      notes := notes.push { loc, context := s!"{ctxName h C} role {h.gRoleName C.pid role}",
-                            msg := s!"the P1 ledger finds {C.blocked.size} wait(s) that never return in the lockstep model (P0-2): happens-before after them is vacuous, so other P1-2 lines may be their consequences" }
-    | none => pure ()
+    notes := notes ++ blockedNote h C.pid C.blocked "P1-2"
     nst := nst + C.stores.size
     nwr := nwr + C.writes.size
     npairs := npairs + ps.size
     nnamed := nnamed + C.named.size
-    incons := incons ++ bad.map (·.id)
+    incons := incons ++ (C.named.filter (!·.consistent)).map (·.id)
     nblocked := nblocked + C.blocked.size
   -- tensormaps shared by two clusters: no happens-before at all (certain, but U4 after a
   -- blocked wait)
-  for (a, i, b, j) in crossPairs Cs do
+  for (a, i, b, j) in cp.2 do
     let C := Cs[a]!
     let D := Cs[b]!
     let s := C.stores[i]!
     let x := D.writes[j]!
-    ok := false
     npairs := npairs + 1
-    let context := s!"{ctxName h C} / {ctxName h D}"
-    let pair := s!"{x.describe h D} (in {ctxName h D}) while the {s.describe h C} (in {ctxName h C}) may still read it: no happens-before across clusters"
+    let context := s!"{ctxName h C.pid} / {ctxName h D.pid}"
+    let pair := s!"{x.describe h D} (in {ctxName h D.pid}) while the {s.describe h C} (in {ctxName h C.pid}) may still read it: no happens-before across clusters"
     if s.pos > C.firstBlocked[s.role]! || x.pos > D.firstBlocked[x.role]! then
       nund := nund + 1
       undec := undec.push { loc := x.loc, context,
@@ -814,19 +728,9 @@ where
     else
       certain := true
       issues := issues.push { loc := x.loc, context, msg := s!"F2: {pair}" }
-  if !undec.isEmpty then
-    let first := undec[0]?
-    let head : Array Issue := if certain then #[] else
-      #[{ loc := (first.map (·.loc)).getD "", context := (first.map (·.context)).getD "",
-          msg := s!"not decided on this input: {nund} conflicting pair(s) of a bulk store and a write are ordered only under the lockstep reading or by a same-thread program order the KIR does not pin down; P1-2 is proved only if sound happens-before orders every pair" }]
-    issues := issues ++ head ++ undec
-  let stops := r.ctas.flatMap fun c => (c.roles.filter (·.stopped)).map fun t => (c.pid, t)
-  match stops[0]? with
-  | some (pid, t) =>
-    issues := #[{ loc := t.stopLoc, context := h.roleCtx pid t.role,
-                  msg := s!"not decided on this input: {stops.size} role trace(s) stop at {stopReasons (stops.map (·.2))}, so their later events are unknown; the lines of this spec that are not `not decided` lines are certain counterexamples" }] ++ issues
-  | none => pure ()
-  return { ok, issues, notes, certain, stores := nst, writes := nwr, pairs := npairs, undecided := nund,
+  issues := withUndecided issues certain undec
+    s!"{nund} conflicting pair(s) of a bulk store and a write are ordered only under the lockstep reading or by a same-thread program order the KIR does not pin down; P1-2 is proved only if sound happens-before orders every pair"
+  return { issues := undecided r ++ issues, notes, certain, stores := nst, writes := nwr, pairs := npairs, undecided := nund,
            named := nnamed, inconsistent := incons, blocked := nblocked }
 
 end KV.StoreReuse

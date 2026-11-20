@@ -408,7 +408,9 @@ role, so every event is executed by every warp of its role:
   certain leaves P0-6 UNDECIDED, and so does one inside a repeated region (it may run no
   pass);
 - a count that is not a positive multiple of 32 or exceeds the CTA's threads is a
-  certain violation (F3; the frontend reports those as certain `nb_open`s), UNDECIDED
+  certain violation (F3; the frontend reports those as certain `nb_open`s, and
+  `frontend/kir.py` rejects a `named_bar` whose count is not a positive multiple of 32, so
+  on a valid KIR only the second check can fire; the decision keeps both), UNDECIDED
   inside a repeated region;
 - the pairing: one operation of each role in turn (lockstep); an instance of barrier b
   opens with the count of its first operation, collects the arriving roles' threads and
@@ -556,8 +558,8 @@ row that may be a barrier or a branch is an ERROR (any other only computes data)
 Decided on a P1 KIR (`<kernel>__<digest>.p1.json`, written by the CuTe
 frontend's second translation pass; `kir.md` change 10) per input, over the
 clusters (a CTA without clusters) whose role traces are all complete.
-`#eval KV.runP1 kernel input` prints the report; the theorem is
-`KV.Holds .tmemReuse kernel input`. P1-1 never changes a
+`#lkv_check_p1 kernel input tmemReuse` prints the report (`KV.runP1 kernel input
+[.tmemReuse]`); the theorem is `KV.Holds .tmemReuse kernel input`. P1-1 never changes a
 P0 verdict, is reported in its own section of report.md, and does not affect
 `lkv.py`'s outcome and exit status with its FAIL and UNDECIDED verdicts unless
 `--p1-strict` (then a P1 translation refused by design counts as UNDECIDED); its
@@ -712,8 +714,8 @@ TTGIR frontend writes `<spec>.p1.json` in the PTX translation, its default, for 
 specialization with a bulk store, and `<spec>@cluster<dims>.p1.json` for a preferred
 cluster geometry, `frontend_ptx.md` "P1-2 pass") per input, over
 the clusters (a CTA without clusters) whose role traces are all complete.
-`#eval KV.runP1 kernel input` prints the report; the theorem is
-`KV.Holds .storeReuse kernel input`. Like P1-1 it never changes a P0 verdict, is
+`#lkv_check_p1 kernel input storeReuse` prints the report (`KV.runP1 kernel input
+[.storeReuse]`); the theorem is `KV.Holds .storeReuse kernel input`. Like P1-1 it never changes a P0 verdict, is
 reported in its own section, and counts toward `lkv.py`'s outcome only with
 `--p1-strict` (its ERRORs always count). The legacy TTGIR translation does not check it
 (its specializations are `not_checked` for P1-2), nor does the CuTe frontend, which has

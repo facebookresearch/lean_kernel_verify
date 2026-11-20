@@ -140,14 +140,15 @@ inductive Event where
   release (PTX ISA `exit`). -/
   | named_bar (id count : Expr) (sync : Bool) (all : Bool) (loc : Loc)
   /-- A named barrier instruction P0-6 cannot count (P0-6 KIR): reached under a condition
-  its participants may not share (`kind`; `certain`: the model admits participants that
-  certainly diverge; `why`), with its id and count where constant. -/
-  | nb_open (kind : String) (certain : Bool) (why : String) (id count : Option Expr)
-      (sync : Bool) (loc : Loc)
+  its participants may not share (`certain`: the model admits participants that certainly
+  diverge; `why`). The KIR's `kind`, and its id and count where constant (`id`, `count`,
+  `sync`), are for audit: P0-6 does not read them, so they are not here. -/
+  | nb_open (certain : Bool) (why : String) (loc : Loc)
   /-- The begin or end of a region of a P0-6 KIR that runs a number of times the model does
   not fix, the same in every warp of the role; `key` (or empty): the region of the role before
-  warp splitting whose condition is uniform over that role, the same in its split roles. -/
-  | nb_rep (isBegin : Bool) (why : String) (key : String) (loc : Loc)
+  warp splitting whose condition is uniform over that role, the same in its split roles (the
+  KIR's `why`, for audit, is not here). -/
+  | nb_rep (isBegin : Bool) (key : String) (loc : Loc)
   /-- A bulk asynchronous store (P1 KIR, P1-2) issued by one thread: lane `lane` of warp
   `warp` (`lane = none`: the elected lane of a full-warp elect.sync), reading `bytes` bytes
   of shared memory symbol `sym` from byte offset `src`, and with `tmap = some (base, addr)`
@@ -157,17 +158,19 @@ inductive Event where
       (bytes : Nat) (tmap : Option (String × Expr)) (loc : Loc)
   /-- cp.async.bulk.commit_group of every thread of the role (P1-2). -/
   | bulk_commit (loc : Loc)
-  /-- cp.async.bulk.wait_group{.read} `n` of every thread of the role (P1-2). -/
-  | bulk_wait (n : Nat) (read : Bool) (loc : Loc)
+  /-- cp.async.bulk.wait_group{.read} `n` of every thread of the role (P1-2, which takes a
+  `.read` wait and a plain one alike: the KIR's `read` is not here). -/
+  | bulk_wait (n : Nat) (loc : Loc)
   /-- A write of shared memory (P1-2) by one thread (lane `lane` of warp `warp`, `none`: the
   elected lane), or with `sync` by every lane of warp `warp` in one warp-synchronizing
-  instruction (`.sync.aligned`): `bytes` bytes at each masked-in byte offset of `offsets` in
+  instruction (`.sync.aligned`): `bytes` bytes at each byte offset of `offsets` (the KIR's
+  `mask` is null) in
   symbol `sym`, in the shared memory of CTA `cta` of the cluster (`none`: the issuing CTA);
   `async`: the landing of an asynchronous copy issued here (it may land later); `slot`: the
   mbarrier (array, index, leader) that the copy completes its bytes on, in the issuing CTA or
   with `leader` in its pair leader's (the even rank of its pair, a cta_group::2 load), its load
   the role's next transaction event on that slot (only global accesses between). -/
-  | smem_write (sym : String) (offsets : TExpr) (mask : Option TExpr) (bytes : Nat) (warp : Expr)
+  | smem_write (sym : String) (offsets : TExpr) (bytes : Nat) (warp : Expr)
       (lane : Option Expr) (sync : Bool) (async : Bool) (cta : Option Expr)
       (slot : Option (String × Expr × Bool)) (loc : Loc)
   /-- A write of the 128-byte tensormap at byte offset `addr` of global buffer `base` by
@@ -299,8 +302,6 @@ structure Kernel where
   /-- Thread-block cluster dims (x, y, z): consecutive CTAs form a cluster; `[1, 1, 1]`
   without clusters. -/
   cluster : List Nat := [1, 1, 1]
-  /-- The P1 specs a P1 KIR is decided for, by label (KIR `p1`; `[]`: P1-1 iff `tmem`). -/
-  p1 : List String := []
   /-- P1-2 KIRs: the CTA's thread count, idle warps included (KIR change 15). -/
   cta_threads : Option Nat := none
   deriving Repr

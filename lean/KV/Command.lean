@@ -40,19 +40,16 @@ namespace KV
 def verdicts (ss : List SpecId) (k : Kernel) (i : Input) : List Bool :=
   ss.map fun s => decide (Holds s k i)
 
-/-- One evaluation of `k` on `i`: the report (`kind` 0 the P0 report, 1 the P1 report, 2 the
-P0-6 report) and the decisions of `ss`, both from the same run and its shared analyses
+/-- One evaluation of `k` on `i`: the report of the specs `ss` (`kind` 0 the P0 report, 1 the P1
+report, 2 the P0-6 report) and their decisions, both from the same run and its shared analyses
 (`Shared`: barrier ledgers, P1 ledgers, P0-1's, P0-3's and P0-5's decisions, P0-6's and P0-7's
 analyses, the P1 pair searches). -/
 def checkAll (ss : List SpecId) (kind : Nat) (k : Kernel) (i : Input) : Report × List Bool :=
   match eval k i with
-  | .error e =>
-    (if kind = 1 then reportP1Of k i (.error e) else if kind = 2 then reportNbOf k i (.error e)
-     else reportOf k i (.error e), ss.map fun _ => false)
+  | .error e => (report kind ss k i (.error e), ss.map fun _ => false)
   | .ok r =>
     let sh := Shared.of r
-    (if kind = 1 then reportP1Of.reportRun k i r sh else if kind = 2 then reportNbOf.reportRun k i r sh
-     else reportOf.reportRun k i r sh, ss.map (·.holdsWith r sh))
+    (report.reportRun kind ss k i r sh, ss.map (·.holdsWith r sh))
 
 theorem decide_runHolds (s : SpecId) (x : Except EvalError Run) :
     decide (RunHolds s x) = (match x with | .ok r => s.holdsB r | .error _ => false) := by

@@ -11,9 +11,10 @@ uses this module, and KV.lean does not import it (scripts/build_lean.sh compiles
 libKV.so, as every module under lean/). `frontend/emit_lean.py --selfcheck` writes, instead of
 `#lkv_check`,
 
-  #eval KV.SelfCheck.run kernel input KIND
+  #eval KV.SelfCheck.run kernel input SPECS
 
-(KIND: `checkAll`'s report kind, 0 P0, 1 P1, 2 P0-6), which checks on that input:
+(SPECS: the specs `#lkv_check` decides for the KIR, e.g. `[.storeReuse]`), which checks on that
+input:
 
 1. the evaluation, twice, the two runs compared event by event:
    * `KV.eval`: the CTAs in parallel tasks (`evalAll`, `parMap`), the lane loops of tensor
@@ -133,7 +134,7 @@ def sameResult (a b : SpecResult) : Bool :=
   a.holds == b.holds && a.certain == b.certain &&
   a.issues.map (·.render) == b.issues.map (·.render) && a.notes.map (·.render) == b.notes.map (·.render)
 
-def run (k : Kernel) (i : Input) (kind : Nat := 0) : IO Unit := do
+def run (k : Kernel) (i : Input) (ss : List SpecId := SpecId.all) : IO Unit := do
   let say (s : String) : IO Unit := IO.println s!"SELFCHECK {i.name} {s}"
   match eval k i, evalRef k i with
   | .error e, .error e' =>
@@ -152,18 +153,14 @@ def run (k : Kernel) (i : Input) (kind : Nat := 0) : IO Unit := do
     if !(samePuts r.host.puts r'.host.puts && sameOrder r.host.claimOrder r'.host.claimOrder) then
       say "DIFF the stores or claimers of the last pass"
       return
-    let events := r.ctas.foldl (fun n c => c.roles.foldl (fun n t => n + t.events.size) n) 0
     let sh := Shared.of r
     let mut lines := 0
-    for s in k.specsOf kind do
+    for s in ss do
       let a := s.resultWith r sh
       if !sameResult a (resultRef s r) then
         say s!"DIFF {s.label} result from the shared analyses"
         return
-      if a.holds != s.holdsWith r sh then
-        say s!"DIFF {s.label} decision"
-        return
       lines := lines + a.issues.size + a.notes.size
-    say s!"OK ({r.ctas.size} CTAs, {events} events, {lines} report lines)"
+    say s!"OK ({r.ctas.size} CTAs, {r.events} events, {lines} report lines)"
 
 end KV.SelfCheck

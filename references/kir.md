@@ -7,8 +7,10 @@ Frontends emit it as JSON; `frontend/kir.py` checks it against this contract
 to one (same names, same field order: table fields, then `w`, then `addr`, then
 `loc`; except a TExpr's `shape` before its `w`, `tmem`'s `cta_mask` before
 `site`, `nb_rep`'s `begin` as `isBegin`, `smem_write`'s `bar`, `idx` and `leader`
-as one `slot` triple, `bulk_store`'s `tmap` object as a pair, and the top-level
-`tmem.base` as `zeroBase`).
+as one `slot` triple, `bulk_store`'s `tmap` object as a pair, the top-level
+`tmem.base` as `zeroBase`, and the fields no spec reads, which IR.lean omits:
+`nb_open`'s `kind`, `id`, `count` and `sync`, `nb_rep`'s `why` (for audit),
+`bulk_wait`'s `read` and `smem_write`'s `mask`, always null).
 
 ## Changes
 
@@ -125,12 +127,14 @@ follow items 1 to 3, 6 and 8.
     thread of the CTA). Change 10's rule holds for a P1-2 KIR too (every `wait`,
     `arrive` and `commit_arrive` of a role of several warps is issued by all its
     warps; the PTX translation splits roles so, a split TTGIR partition's parts
-    named `<partition>_w<first>_<last>`). `emit_lean.py` emits `p1 := [...]`,
+    named `<partition>_w<first>_<last>`). `emit_lean.py` emits
     `cta_threads := some n` and the theorems of the named specs
-    (`KV.Holds .storeReuse` for P1-2); a P0 KIR and a P1 KIR without `p1` emit as
+    (`KV.Holds .storeReuse` for P1-2), the specs it passes to `#lkv_check_p1`
+    (`frontend/kir.py` `labels`); a P0 KIR and a P1 KIR without `p1` emit as
     before. Amended: a landing `smem_write` may name the mbarrier slot of its pair
     leader with `leader` (a cta_group::2 load; IR.lean's `slot` gained the flag);
-    without it nothing changes.
+    without it nothing changes. Amended: `smem_write`'s `mask` must be null (no
+    frontend writes one, and Layer 2 reads none: IR.lean's `smem_write` has no mask).
 16. **`assume` (a model assumption).** A new statement `assume` {`cond`, `msg`}: a
     condition the frontend relies on but could not prove statically (e.g. that a
     write misses the bytes of a warp-specialize capture, frontend_ptx.md). Where it
@@ -373,7 +377,7 @@ Tagged by `"ev"`; all carry `loc`.
 | `bulk_store` (P1-2)            | `kind` (`tensor`, `tensor_reduce`, `bulk`, `bulk_reduce`), `warp` (w=32 Expr) and optional `lane` (w=32 Expr; absent: the elected lane of an `elect.sync` of the full warp): the issuing thread; `sym` (shared symbol) and `src` (Expr: byte offset in it) with `bytes` (positive int): the shared-memory bytes the store reads; optional `tmap` {`base` (global buffer), `addr` (Expr: byte offset)}: the 128-byte tensormap of an in-kernel descriptor it reads. Joins the issuing thread's open bulk async-group |
 | `bulk_commit` (P1-2)           | (no field) `cp.async.bulk.commit_group` of the role (every issuing thread of the role's bulk stores executes it)                                                                                                                                                                                                                                                                                                                                                                   |
 | `bulk_wait` (P1-2)             | `n` (non-negative int), `read` bool: `cp.async.bulk.wait_group{.read} n` of the role: completes the groups of all but the `n` most recent commits                                                                                                                                                                                                                                                                                                                                 |
-| `smem_write` (P1-2)            | `sym`, `offsets` TExpr (byte offsets), `mask` TExpr or null, `bytes` (positive int: bytes at each offset), `warp`, optional `lane` (as `bulk_store`'s), optional `sync` bool (a warp-synchronizing write of every lane of `warp`, no `lane`), optional `async` bool (the landing of an asynchronous copy issued here), optional `cta` (w=32 Expr: another CTA of the cluster), optional `bar` and `idx` (both or neither, only with `async` and without `cta`: the mbarrier slot the copy completes its bytes on, in the issuing CTA or, with the optional bool `leader`, in its pair leader's (a cta_group::2 load, as `tma_load`'s `leader`); its load is the role's next transaction event on that slot, only `gload`s between)                                                                                              |
+| `smem_write` (P1-2)            | `sym`, `offsets` TExpr (byte offsets), `mask` null (change 15), `bytes` (positive int: bytes at each offset), `warp`, optional `lane` (as `bulk_store`'s), optional `sync` bool (a warp-synchronizing write of every lane of `warp`, no `lane`), optional `async` bool (the landing of an asynchronous copy issued here), optional `cta` (w=32 Expr: another CTA of the cluster), optional `bar` and `idx` (both or neither, only with `async` and without `cta`: the mbarrier slot the copy completes its bytes on, in the issuing CTA or, with the optional bool `leader`, in its pair leader's (a cta_group::2 load, as `tma_load`'s `leader`); its load is the role's next transaction event on that slot, only `gload`s between)                                                                                              |
 | `tmap_write` (P1-2)            | `base` (global buffer), `addr` (Expr: byte offset), `warp` (w=32 Expr): the 128-byte tensormap written by every lane of `warp` in one warp-synchronizing instruction (`tensormap.cp_fenceproxy`)                                                                                                                                                                                                                                                                                 |
 | `handoff_put`                  | `chan` (string), `value` (w=32 Expr): the role's new value of handoff channel `chan` (change 17) |
 | `handoff_get`                  | `chan` (string), `var` (string, bound at w=32): the value of `chan` at the putter's arrive that this role's last wait pairs with (change 17) |

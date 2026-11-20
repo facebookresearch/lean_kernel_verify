@@ -6,6 +6,7 @@
 """KIR validator: enforces references/kir.md on a parsed JSON object.
 
     validate(obj) -> list[str]       # empty iff obj is valid KIR; dependency-free
+    labels(obj) -> list[str]         # the specs a valid KIR is decided for (SPECS: all)
 
 CLI: python3 -I kir.py FILE.json...  (prints errors, exit status 1 if any file is invalid)
 
@@ -81,7 +82,7 @@ Rules of kir.md beyond its field tables, which lean/KV relies on:
   bulk_reduce; w=32 `warp`, optional w=32 `lane` (absent: the elected lane); `sym` a string,
   `src` an Expr, `bytes` a positive int; optional `tmap` {"base": string, "addr": Expr}),
   `bulk_commit`, `bulk_wait` (`n` a non-negative int, `read` a boolean), `smem_write` (`sym`,
-  `offsets` TExpr and `mask` TExpr or null as gstore's, `bytes` a positive int, w=32 `warp`,
+  `offsets` TExpr of byte offsets, `mask` null, `bytes` a positive int, w=32 `warp`,
   optional w=32 `lane`, optional boolean `sync` (no `lane` with it), optional boolean
   `async` (the landing of an asynchronous copy), optional `cta`, optional `bar` and w=32
   `idx`, both or neither, only with `async` and without `cta`: the mbarrier the copy
@@ -205,6 +206,22 @@ NB_KINDS = ("lane", "cond", "loop", "operand", "dispatch")
 # P1-2 "async store sources reuse ordered" events (kir.md, change 15)
 P1_2_EVENTS = ("bulk_store", "bulk_commit", "bulk_wait", "smem_write", "tmap_write")
 BULK_KINDS = ("tensor", "tensor_reduce", "bulk", "bulk_reduce")
+# The specs (references/specs.md), in report order: label -> (Lean `KV.SpecId`, title).
+SPECS = {
+    "P0-1": ("bounds", "global accesses in bounds"),
+    "P0-2": ("tripCount", "role trip-count agreement"),
+    "P0-3": ("coverage", "output coverage exactly once"),
+    "P0-4": ("barrier", "mbarrier protocol"),
+    "P0-5": ("maskElision", "mask-elision soundness"),
+    "P0-6": ("namedBarriers", "named barriers convergent"),
+    "P0-7": ("gwait", "global waits reached, co-residency"),
+    "P1-1": ("tmemReuse", "TMEM reuse ordered"),
+    "P1-2": ("storeReuse", "async store sources reuse ordered"),
+}
+P0_LABELS = ["P0-1", "P0-2", "P0-3", "P0-4", "P0-5"]
+NB_LABELS = ["P0-6"]
+# P0-7: decided after the P0 specs on a P0 KIR with sync tensors (change 18)
+GLOBAL_LABELS = ["P0-7"]
 P1_LABELS = ("P1-1", "P1-2")
 TMEM_INSTS = ("ld", "st", "cp", "mma")
 RECT_USES = ("data", "d", "a", "sf")
@@ -394,6 +411,11 @@ class _Checker:
         elif kind == "load":
             self._check_load(path, e, scope, device)
         return w
+
+    def expr_w(self, path, e, scope, widths=(32,)):
+        """Check an Expr of one of `widths` bits."""
+        if self.expr(path, e, scope) not in (*widths, None):
+            self.err(path, f"must have w={' or '.join(map(str, widths))}")
 
     def _same_width(self, path, w, wa, wb):
         for side, wx in (("a", wa), ("b", wb)):
@@ -679,8 +701,7 @@ class _Checker:
             self.sync_event(path, ev, s, scope)
         elif ev in ("rput", "rget"):
             self.string(f"{path}.chan", s["chan"])
-            if self.expr(f"{path}.ord", s["ord"], scope) not in (32, 64, None):
-                self.err(f"{path}.ord", "must have w=32 or 64")
+            self.expr_w(f"{path}.ord", s["ord"], scope, (32, 64))
             self.int_field(f"{path}.field", s["field"], 0)
             if ev == "rput":
                 self.expr(f"{path}.value", s["value"], scope)
@@ -704,8 +725,8 @@ class _Checker:
             )
         if ev == "handoff_get":
             self.bind(f"{path}.var", s["var"], 32, scope)
-        elif self.expr(f"{path}.value", s["value"], scope) not in (32, None):
-            self.err(f"{path}.value", "must have w=32")
+        else:
+            self.expr_w(f"{path}.value", s["value"], scope)
 
     def check_handoffs(self, roles):
         """The putters of a channel: one role or parts of one (a role "group"), which read
@@ -776,8 +797,8 @@ class _Checker:
         if named and self.cluster_size <= 1:
             self.err(path, f"{', '.join(named)} without a cluster of more than one CTA")
         for f in CLUSTER_FIELDS:
-            if f in s and self.expr(f"{path}.{f}", s[f], scope) not in (32, None):
-                self.err(f"{path}.{f}", "must have w=32")
+            if f in s:
+                self.expr_w(f"{path}.{f}", s[f], scope)
         if "leader" in s:
             self.bool_field(f"{path}.leader", s["leader"])
             if s["leader"] is True and self.cluster_size % 2:
@@ -793,8 +814,7 @@ class _Checker:
                 self.err(f"{rp}.use", f"must be one of {RECT_USES}")
             self.bool_field(f"{rp}.write", r["write"])
             for f in ("lane", "col"):
-                if self.expr(f"{rp}.{f}", r[f], scope) not in (32, None):
-                    self.err(f"{rp}.{f}", "must have w=32")
+                self.expr_w(f"{rp}.{f}", r[f], scope)
             if r["nlanes"] not in (16, 32, 64, 128) or isinstance(r["nlanes"], bool):
                 self.err(f"{rp}.nlanes", "must be 16, 32, 64 or 128")
             if not (is_int(r["ncols"]) and 1 <= r["ncols"] <= 512):
@@ -831,8 +851,11 @@ class _Checker:
                 self.expr(f"{path}.{f}", e, scope)
 
     def named_bar(self, path, s, scope):
+        """A named_bar event (P1 KIR, P0-6 KIR); `all` only in a P0-6 KIR."""
         self.bool_field(f"{path}.sync", s["sync"])
-        if "all" in s:
+        if "all" in s and not self.nbar:
+            self.err(f"{path}.all", "only in a P0-6 KIR (top-level 'nbar')")
+        elif "all" in s:
             self.bool_field(f"{path}.all", s["all"])
             if s["all"] is True and s["sync"] is not True:
                 self.err(
@@ -872,8 +895,8 @@ class _Checker:
     def _who(self, path: str, s: dict, scope: dict) -> None:
         """The issuing thread of a P1-2 event: w=32 `warp`, optional w=32 `lane`."""
         for f in ("warp", "lane"):
-            if f in s and self.expr(f"{path}.{f}", s[f], scope) not in (32, None):
-                self.err(f"{path}.{f}", "must have w=32")
+            if f in s:
+                self.expr_w(f"{path}.{f}", s[f], scope)
 
     def p1_2_event(self, path, ev, s, scope):
         """bulk_store / bulk_commit / bulk_wait / smem_write / tmap_write (kir.md, change 15)."""
@@ -887,25 +910,18 @@ class _Checker:
         self._who(path, s, scope)
         if ev == "tmap_write":
             self.string(f"{path}.base", s["base"])
-            if self.expr(f"{path}.addr", s["addr"], scope) not in (32, 64, None):
-                self.err(f"{path}.addr", "must have w=32 or 64")
+            self.expr_w(f"{path}.addr", s["addr"], scope, (32, 64))
             return
         self.string(f"{path}.sym", s["sym"])
         self.int_field(f"{path}.bytes", s["bytes"], 1)
         if ev == "bulk_store":
             if s["kind"] not in BULK_KINDS:
                 self.err(f"{path}.kind", f"must be one of {BULK_KINDS}")
-            if self.expr(f"{path}.src", s["src"], scope) not in (32, 64, None):
-                self.err(f"{path}.src", "must have w=32 or 64")
+            self.expr_w(f"{path}.src", s["src"], scope, (32, 64))
             t = s.get("tmap")
             if t is not None and self.keys(f"{path}.tmap", t, {"base", "addr"}):
                 self.string(f"{path}.tmap.base", t["base"])
-                if self.expr(f"{path}.tmap.addr", t["addr"], scope) not in (
-                    32,
-                    64,
-                    None,
-                ):
-                    self.err(f"{path}.tmap.addr", "must have w=32 or 64")
+                self.expr_w(f"{path}.tmap.addr", t["addr"], scope, (32, 64))
             return
         self._check_cluster_fields(path, ev, s, scope)
         if "async" in s:
@@ -922,8 +938,8 @@ class _Checker:
                     "bar and idx name the mbarrier of an async landing in the issuing CTA or "
                     "(leader) its pair leader's (both, async, no cta)",
                 )
-            elif self.expr(f"{path}.idx", s["idx"], scope) not in (32, None):
-                self.err(f"{path}.idx", "must have w=32")
+            else:
+                self.expr_w(f"{path}.idx", s["idx"], scope)
         if "sync" in s:
             self.bool_field(f"{path}.sync", s["sync"])
             if s["sync"] is True and "lane" in s:
@@ -932,11 +948,7 @@ class _Checker:
         if off is not None and off[1] not in (32, 64):
             self.err(f"{path}.offsets", "byte offsets must have w=32 or 64")
         if s["mask"] is not None:
-            m = self.texpr(f"{path}.mask", s["mask"], scope)
-            if m is not None and m[1] != 1:
-                self.err(f"{path}.mask", "mask must have w=1")
-            if m is not None and off is not None and m[0] != off[0]:
-                self.err(f"{path}.mask", f"mask shape {m[0]} != offsets shape {off[0]}")
+            self.err(f"{path}.mask", "must be null (Layer 2 reads no smem_write mask)")
 
     def p1_event(self, path, ev, s, scope):
         """tmem / tmem_wait / named_bar events of a P1 KIR (kir.md, change 10)."""
@@ -949,27 +961,7 @@ class _Checker:
             self.bool_field(f"{path}.ld", s["ld"])
             return
         if ev == "named_bar":
-            self.bool_field(f"{path}.sync", s["sync"])
-            if "all" in s:
-                self.err(f"{path}.all", "only in a P0-6 KIR (top-level 'nbar')")
-            for f in ("id", "count"):
-                e = s[f]
-                if not (isinstance(e, dict) and e.get("e") == "const"):
-                    self.err(
-                        f"{path}.{f}", "named barrier id and count must be const Exprs"
-                    )
-                else:
-                    self.expr(f"{path}.{f}", e, scope)
-            c = s["count"]
-            if (
-                isinstance(c, dict)
-                and is_int(c.get("v"))
-                and (c["v"] <= 0 or c["v"] % 32)
-            ):
-                self.err(
-                    f"{path}.count",
-                    "named barrier count must be a positive multiple of 32",
-                )
+            self.named_bar(path, s, scope)
             return
         if "site" in s:
             self.string(f"{path}.site", s["site"])
@@ -977,8 +969,7 @@ class _Checker:
         if inst not in TMEM_INSTS:
             self.err(f"{path}.inst", f"must be one of {TMEM_INSTS}")
             return
-        if self.expr(f"{path}.warp", s["warp"], scope) not in (32, None):
-            self.err(f"{path}.warp", "must have w=32")
+        self.expr_w(f"{path}.warp", s["warp"], scope)
         rects = s["rects"]
         if not (isinstance(rects, list) and rects):
             self.err(f"{path}.rects", "expected a non-empty list")
@@ -1416,6 +1407,20 @@ class _Checker:
                         p,
                         f"expected one of {INTENDED_NAMED} or a list of [lo, hi] row ranges",
                     )
+
+
+def labels(k):
+    """The specs a valid KIR is decided for: its top-level "p1" (kir.md change 15), else P1-1
+    for a P1 KIR with a "tmem" (change 10), P0-6 for a P0-6 KIR (change 14), else the P0
+    specs, and P0-7 for one with sync tensors (change 18)."""
+    if "p1" in k:
+        return k["p1"]
+    if "tmem" in k:
+        return ["P1-1"]
+    if "nbar" in k:
+        return NB_LABELS
+    sync = any(t.get("sync") for t in k.get("tensors", []))
+    return P0_LABELS + (GLOBAL_LABELS if sync else [])
 
 
 def validate(obj):

@@ -120,7 +120,7 @@ def build (r : Run) (Ls : Ledgers) : G := Id.run do
         match e.ev with
         | .gsig w v => sigs := sigs.push { g, pos, w, v }
         | .gwait w tag => waits := waits.push { g, pos, w, tag }
-        | .namedBar id count sync threads =>
+        | .namedBar id count sync _ threads =>
           let bi := namedKey.getD (ci, id) named.size
           if bi == named.size then
             named := named.push { id, count, roles := #[] }

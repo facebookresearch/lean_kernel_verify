@@ -55,11 +55,6 @@ import KV.Spec.Global
 
 namespace KV
 
-/-- The specs of a P0 KIR: the five P0 specs, then P0-7 if it has sync tensors (KIR change
-18). -/
-def specsOf (k : Kernel) : List SpecId :=
-  if k.tensors.any (·.sync.isSome) then SpecId.all ++ SpecId.global else SpecId.all
-
 def SpecId.Holds : SpecId → Run → Prop
   | .bounds, r => r.complete ∧ Bounds.Holds r
   | .tripCount, r => r.complete ∧ TripCount.Holds r
@@ -119,9 +114,10 @@ structure Shared where
   covLedgers : Thunk (Array Coverage.Ledger)
   covOk : Thunk Bool
   named : Thunk NamedBarriers.Out
-  /-- The P1 CTAs (P1-1) and contexts (P1-2) with their conflicting pairs. -/
+  /-- The P1 CTAs (P1-1) and contexts (P1-2) with their conflicting pairs (P1-2: and the
+  tensormap pairs of two clusters). -/
   tmem : Thunk (Array (TmemReuse.P1Cta × Array (Nat × Nat × TmemReuse.PairKind)))
-  store : Thunk (Array (StoreReuse.Ctx × Array (Nat × Nat × StoreReuse.PairKind)))
+  store : Thunk StoreReuse.ClusterPairs
   /-- P0-7's analysis (`Global.analyze` with the barrier ledgers). -/
   global : Thunk Global.Outcome
 
@@ -207,21 +203,6 @@ structure SpecResult where
   every spec is certain iff the error is a `kernel` error. -/
   certain : Bool
 
-/-- Why P0-2..P0-6 (P0-1 too after an `assume` stop) are undecided on `r`: the first role
-trace that stops (an out-of-bounds metadata load, an assumption that does not hold; none
-if every trace is complete), with every reason a trace stopped for. -/
-def undecided (r : Run) : Array Issue :=
-  let stops := r.ctas.flatMap fun c => (c.roles.filter (·.stopped)).map fun t => (c.pid, t)
-  match stops[0]? with
-  | none => #[]
-  | some (pid, t) =>
-    #[{ loc := t.stopLoc, context := r.host.roleCtx pid t.role,
-        msg := s!"not decided on this input: {stops.size} role trace(s) stop at {stopReasons (stops.map (·.2))}, so their later events are unknown; the lines of this spec that are not `not decided` lines are certain counterexamples" }]
-
-/-- The stopped role traces of `r`. -/
-def Run.stops (r : Run) : Array RoleTrace :=
-  r.ctas.flatMap fun c => c.roles.filter (·.stopped)
-
 /-- The trace stopped at an `assume` that does not hold. -/
 def RoleTrace.assumeStop (t : RoleTrace) : Bool :=
   t.stopped && match t.why with
@@ -254,24 +235,42 @@ theorem Run.certainPart_eq_self (r : Run) (h : r.assumeStopped = false) : r.cert
   unfold Run.certainPart
   simp [hbad]
 
+/-- Spec `s`'s result with verdict `holds` and its part of the P1 summary line (P1-1: accesses,
+conflicting pairs, named barriers, blocked waits; P1-2: bulk stores, writes, unordered pairs), from
+one analysis of the shared pair searches `sh` (`s` is `.tmemReuse` or `.storeReuse`). -/
+def SpecId.p1Part (s : SpecId) (r : Run) (sh : Shared) (holds : Bool) : SpecResult × String :=
+  let slots (named : Nat) (incons : Array Int) (blocked : Nat) : String :=
+    s!"{named} named-barrier slot(s)" ++
+      (if incons.isEmpty then "" else s!" (inconsistent: ids {incons.toList})") ++ s!", {blocked} blocked wait(s)"
+  if s matches .tmemReuse then
+    let o := TmemReuse.analyze.analyzeWith r sh.tmem.get
+    ({ spec := s, holds, issues := o.issues, notes := o.notes, certain := o.certain },
+     s!"{o.accesses} TMEM accesses, {o.pairs} conflicting pair(s) classified ({o.lockOnly} ordered only under the lockstep contents), " ++
+       slots o.named o.inconsistent o.blocked)
+  else
+    let o := StoreReuse.analyze.analyzeWith r sh.store.get
+    ({ spec := s, holds, issues := o.issues, notes := o.notes, certain := o.certain },
+     s!"P1-2: {o.stores} bulk store(s), {o.writes} write(s), {o.pairs} unordered conflicting pair(s) ({o.undecided} undecided), " ++
+       slots o.named o.inconsistent o.blocked)
+
 /-- Verdict, counterexamples and notes of spec `s` on run `r` from the shared analyses `sh`
-(`Shared.of r`); the same decision as `s.Holds r`. -/
+(`Shared.of r`); the verdict is the decision `s.holdsWith r sh` (`holdsWith_of`: `s.Holds r`'s). -/
 def SpecId.resultWith (s : SpecId) (r : Run) (sh : Shared) : SpecResult :=
+  let holds := s.holdsWith r sh
   let un := undecided r
   -- `un` and `undec` (P0-2, P0-4: clusters whose ledger did not converge; P0-4: slots whose
   -- landers' bytes balance only if a landing completes a later phase than its issue order
   -- shows) are the only issues of a P0 spec that are not certain counterexamples.
-  let p0 (holds : Bool) (own nts : Array Issue) (undec : Array Issue := #[]) : SpecResult :=
-    { spec := s, holds := holds, issues := un ++ undec ++ own, notes := nts, certain := !own.isEmpty }
+  let p0 (own nts : Array Issue) (undec : Array Issue := #[]) : SpecResult :=
+    { spec := s, holds, issues := un ++ undec ++ own, notes := nts, certain := !own.isEmpty }
   match s with
   | .bounds =>
     let own := Bounds.issues r.certainPart
-    { spec := s, holds := r.complete && sh.bounds r,
-      issues := (if r.assumeStopped || r.hangs then un else #[]) ++ own, notes := Bounds.notes r,
+    { spec := s, holds, issues := (if r.assumeStopped || r.hangs then un else #[]) ++ own, notes := Bounds.notes r,
       certain := !own.isEmpty }
   | .tripCount =>
     let Ls := sh.ledgers.get
-    p0 (r.complete && decide (TripCount.HoldsWith Ls)) (TripCount.issues r.host Ls) (TripCount.notes r.host Ls) (unconverged r.host Ls)
+    p0 (TripCount.issues r.host Ls) (TripCount.notes r.host Ls) (unconverged r.host Ls)
   | .coverage =>
     -- `Coverage.issues r.certainPart` and `Coverage.notes r` from the shared targets and
     -- ledgers: `r.certainPart` is `r` unless a trace stopped at an `assume`
@@ -280,11 +279,10 @@ def SpecId.resultWith (s : SpecId) (r : Run) (sh : Shared) : SpecResult :=
       else if r.assumeStopped then Coverage.okIssues r.certainPart
       else Coverage.okIssuesWith sh.covTargets.get sh.covLedgers.get r
     let notes := if r.elided then #[] else Coverage.okNotesWith sh.covTargets.get r
-    p0 (r.complete && sh.coverage r) issues notes
+    p0 issues notes
   | .barrier =>
     let Ls := sh.ledgers.get
-    p0 (r.complete && decide (Barrier.HoldsWith Ls)) (Barrier.issues r.host Ls) (Barrier.notes r.host Ls)
-      (unconverged r.host Ls ++ Barrier.undecided r.host Ls)
+    p0 (Barrier.issues r.host Ls) (Barrier.notes r.host Ls) (unconverged r.host Ls ++ Barrier.undecided r.host Ls)
   | .maskElision =>
     -- `MaskElision.issues r.certainPart` and `MaskElision.notes r` from the shared targets and
     -- ledgers, as for P0-3
@@ -292,24 +290,14 @@ def SpecId.resultWith (s : SpecId) (r : Run) (sh : Shared) : SpecResult :=
       else if r.assumeStopped then MaskElision.issues r.certainPart
       else Bounds.eventsIssues r ++ Coverage.okIssuesWith sh.covTargets.get sh.covLedgers.get r
     let notes := if !r.elided then #[] else Bounds.eventsNotes r ++ Coverage.okNotesWith sh.covTargets.get r
-    p0 (r.complete && sh.maskElision r) issues notes
+    p0 issues notes
   | .namedBarriers =>
     let o := sh.named.get
-    { spec := s, holds := r.complete && o.ok, issues := un ++ o.certain ++ o.undecided,
-      notes := #[], certain := !o.certain.isEmpty }
-  | .tmemReuse =>
-    let o := TmemReuse.analyze.analyzeWith r sh.tmem.get
-    { spec := s, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }
-  | .storeReuse =>
-    let o := StoreReuse.analyze.analyzeWith r sh.store.get
-    { spec := s, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }
+    { spec := s, holds, issues := un ++ o.certain ++ o.undecided, notes := #[], certain := !o.certain.isEmpty }
+  | .tmemReuse | .storeReuse => (s.p1Part r sh holds).1
   | .gwait =>
     let o := sh.global.get
-    { spec := s, holds := r.complete && o.ok, issues := o.issues, notes := #[], certain := o.certain }
-
-/-- `s.resultWith` with the barrier ledgers `Ls = r.ledgers`. -/
-def SpecId.result (s : SpecId) (r : Run) (Ls : Ledgers) : SpecResult :=
-  s.resultWith r (Shared.ofLedgers r (Thunk.pure Ls))
+    { spec := s, holds, issues := o.issues, notes := #[], certain := o.certain }
 
 structure Report where
   kernel : String
@@ -321,103 +309,67 @@ structure Report where
 /-- " in clusters (2,1,1)" for a cluster launch, else "". -/
 def clusterStr (h : Host) : String := if h.csize ≤ 1 then "" else s!" in clusters {pidStr h.cluster}"
 
-/-- The report of kernel `k` on input `i` from its evaluation `x` (`eval k i`; `checkAll` shares
-one evaluation and its analyses between the report and the theorems, Command.lean). -/
-def reportOf (k : Kernel) (i : Input) (x : Except EvalError Run) : Report :=
+/-- The report of kind `kind` (0 the P0 report, 1 the P1 report, 2 the P0-6 report) on the
+specs `ss` (those the KIR is decided for, frontend/kir.py `labels`: the P0 specs `SpecId.all`
+and with sync tensors P0-7, the P1 specs its `p1` names, or `SpecId.nb`) of kernel `k` on input
+`i` from its evaluation `x` (`eval k i`; `checkAll` shares
+one evaluation and its analyses between the report and the theorems, Command.lean): the summary
+line, then each spec's verdict, counterexamples and notes. The summary line names the grid, the
+CTAs and the roles, then
+* P0: the events, the role traces that stop (blocked forever at a take, `Run.hangs`), the
+  elision flags the input sets, and with sync tensors the stores, takes and claims
+  (`Global.summary`);
+* P1 (references/specs.md, "P1-1", "P1-2"): the events, per P1 spec its counts (`SpecId.p1Part`),
+  the role traces that stop;
+* P0-6 (references/specs.md, "P0-6"): named barrier operations, `nb_open` events, `nb_rep` regions
+  reached, the arrivals the warp-ahead reading holds. -/
+def report (kind : Nat) (ss : List SpecId) (k : Kernel) (i : Input) (x : Except EvalError Run) : Report :=
   match x with
   | .error e =>
     { kernel := k.kernel, input := i, error := some e, summary := "",
-      results := (specsOf k).map fun s =>
+      results := ss.map fun s =>
         { spec := s, holds := false, issues := #[], notes := #[], certain := e.kind == .kernel } }
-  | .ok r => reportRun k i r (Shared.of r)
+  | .ok r => reportRun kind ss k i r (Shared.of r)
 where
   /-- The report of a run from the shared analyses `sh` (`Shared.of r`). -/
-  reportRun (k : Kernel) (i : Input) (r : Run) (sh : Shared) : Report :=
-    let events := r.ctas.foldl (fun n c => c.roles.foldl (fun n t => n + t.events.size) n) 0
+  reportRun (kind : Nat) (specs : List SpecId) (k : Kernel) (i : Input) (r : Run) (sh : Shared) : Report :=
     let stops := r.stops
-    { kernel := k.kernel, input := i, error := none,
-      summary := s!"grid {pidStr r.host.grid}{clusterStr r.host}: {r.ctas.size} CTA(s) x {k.roles.length} role(s), {events} events" ++
-        (if stops.isEmpty then ""
-         else if r.hangs then s!"; {stops.size} role trace(s) are blocked forever at a take of a tagged word, so P0-1..P0-5 are not decided"
-         else s!"; {stops.size} role trace(s) stop at {stopReasons stops (detail := false)}, so {if r.assumeStopped then "P0-1" else "P0-2"}..P0-5 are not decided") ++
-        (match i.elisions with
-         | [] => ""
-         | fs => s!"; elision flag(s) {", ".intercalate fs} set: the P0-1 and P0-3 checks of this input are reported under P0-5") ++
-        (if r.host.hasSync then s!"; global sync: {Global.summary r}" else ""),
-      results := (specsOf k).map (·.resultWith r sh) }
+    let stopped (what : String) : String :=
+      if stops.isEmpty then "" else s!"; {stops.size} role trace(s) stop at {stopReasons stops (detail := false)}, so {what} not decided"
+    let head := s!"grid {pidStr r.host.grid}{clusterStr r.host}: {r.ctas.size} CTA(s) x {k.roles.length} role(s)"
+    let (summary, results) :=
+      if kind = 1 then
+        let parts := specs.map fun s => s.p1Part r sh (s.holdsWith r sh)
+        (s!"{head}, {r.events} events; P1: " ++ "; ".intercalate (parts.map (·.2)) ++
+           stopped s!"{", ".intercalate (specs.map (·.label))} {if specs.length = 1 then "is" else "are"}",
+         parts.map (·.1))
+      else if kind = 2 then
+        let (ops, opens, reps) := NamedBarriers.counts r
+        let held := sh.named.get.held
+        let heldStr := if held == 0 then "" else s!", {held} arrival(s) held under the warp-ahead reading"
+        (s!"{head}; P0-6: {ops} named barrier operation(s), {opens} not counted (nb_open), {reps} repeated region(s) reached{heldStr}",
+         specs.map (·.resultWith r sh))
+      else
+        (s!"{head}, {r.events} events" ++
+           (if !stops.isEmpty && r.hangs then
+              s!"; {stops.size} role trace(s) are blocked forever at a take of a tagged word, so P0-1..P0-5 are not decided"
+            else stopped s!"{if r.assumeStopped then "P0-1" else "P0-2"}..P0-5 are") ++
+           (match i.elisions with
+            | [] => ""
+            | fs => s!"; elision flag(s) {", ".intercalate fs} set: the P0-1 and P0-3 checks of this input are reported under P0-5") ++
+           (if r.host.hasSync then s!"; global sync: {Global.summary r}" else ""),
+         specs.map (·.resultWith r sh))
+    { kernel := k.kernel, input := i, error := none, summary, results }
 
-def runCase (k : Kernel) (i : Input) : Report := reportOf k i (eval k i)
+/-- The P0 report of the specs `ss` of a P0 KIR (P0-1..P0-5, and P0-7 with sync tensors:
+frontend/kir.py `labels`). -/
+def runCase (k : Kernel) (i : Input) (ss : List SpecId := SpecId.all) : Report :=
+  report 0 ss k i (eval k i)
 
-/-- The P1 specs a P1 KIR is decided for: those its `p1` names, else P1-1 iff it has a TMEM
-allocation (KIR change 10). -/
-def Kernel.p1Specs (k : Kernel) : List SpecId :=
-  if k.p1.isEmpty then (if k.tmem.isSome then [.tmemReuse] else [])
-  else SpecId.p1.filter fun s => k.p1.contains s.label
+/-- The P1 report of the P1 specs `ss` of a P1 KIR. -/
+def runP1 (k : Kernel) (i : Input) (ss : List SpecId) : Report := report 1 ss k i (eval k i)
 
-/-- The specs `checkAll` decides for a KIR of kind `kind` (0 P0, 1 P1, 2 P0-6; KV/Profile.lean,
-KV/SelfCheck.lean). -/
-def Kernel.specsOf (k : Kernel) (kind : Nat) : List SpecId :=
-  if kind = 1 then k.p1Specs else if kind = 2 then SpecId.nb else KV.specsOf k
-
-/-- P1 specs of a P1 KIR (references/specs.md, "P1-1", "P1-2") on input `i` from its
-evaluation `x`: the P1 summary line (P1-1: accesses, conflicting pairs, named barriers,
-blocked waits; P1-2: bulk stores, writes, unordered pairs), then each P1 spec's verdict,
-counterexamples and notes. -/
-def reportP1Of (k : Kernel) (i : Input) (x : Except EvalError Run) : Report :=
-  match x with
-  | .error e =>
-    { kernel := k.kernel, input := i, error := some e, summary := "",
-      results := k.p1Specs.map fun s =>
-        { spec := s, holds := false, issues := #[], notes := #[], certain := e.kind == .kernel } }
-  | .ok r => reportRun k i r (Shared.of r)
-where
-  /-- The P1 report of a run from the shared analyses `sh` (`Shared.of r`). -/
-  reportRun (k : Kernel) (i : Input) (r : Run) (sh : Shared) : Report := Id.run do
-    let specs := k.p1Specs
-    let events : Nat := r.ctas.foldl (fun n c => c.roles.foldl (fun n t => n + t.events.size) n) 0
-    let stops := r.stops
-    let mut summary := s!"grid {pidStr r.host.grid}{clusterStr r.host}: {r.ctas.size} CTA(s) x {k.roles.length} role(s), {events} events; P1: "
-    let mut res : List SpecResult := []
-    let mut stats : List String := []
-    if specs.contains .tmemReuse then
-      let o := TmemReuse.analyze.analyzeWith r sh.tmem.get
-      res := res ++ [{ spec := .tmemReuse, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }]
-      stats := stats ++ [s!"{o.accesses} TMEM accesses, {o.pairs} conflicting pair(s) classified ({o.lockOnly} ordered only under the lockstep contents), {o.named} named-barrier slot(s)" ++
-        (if o.inconsistent.isEmpty then "" else s!" (inconsistent: ids {o.inconsistent.toList})") ++
-        s!", {o.blocked} blocked wait(s)"]
-    if specs.contains .storeReuse then
-      let o := StoreReuse.analyze.analyzeWith r sh.store.get
-      res := res ++ [{ spec := .storeReuse, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }]
-      stats := stats ++ [s!"P1-2: {o.stores} bulk store(s), {o.writes} write(s), {o.pairs} unordered conflicting pair(s) ({o.undecided} undecided), {o.named} named-barrier slot(s)" ++
-        (if o.inconsistent.isEmpty then "" else s!" (inconsistent: ids {o.inconsistent.toList})") ++
-        s!", {o.blocked} blocked wait(s)"]
-    summary := summary ++ "; ".intercalate stats ++
-      (if stops.isEmpty then "" else s!"; {stops.size} role trace(s) stop at {stopReasons stops (detail := false)}, so {", ".intercalate (specs.map (·.label))} {if specs.length = 1 then "is" else "are"} not decided")
-    return { kernel := k.kernel, input := i, error := none, summary, results := res }
-
-/-- P0-6 on a P0-6 KIR (references/specs.md, "P0-6") on input `i` from its evaluation `x`:
-the summary line (named barrier operations, `nb_open` events, `nb_rep` regions reached), then
-the P0-6 verdict and its counterexamples. -/
-def reportNbOf (k : Kernel) (i : Input) (x : Except EvalError Run) : Report :=
-  match x with
-  | .error e =>
-    { kernel := k.kernel, input := i, error := some e, summary := "",
-      results := SpecId.nb.map fun s =>
-        { spec := s, holds := false, issues := #[], notes := #[], certain := e.kind == .kernel } }
-  | .ok r => reportRun k i r (Shared.of r)
-where
-  /-- The P0-6 report of a run from the shared analyses `sh` (`Shared.of r`). -/
-  reportRun (k : Kernel) (i : Input) (r : Run) (sh : Shared) : Report :=
-    let (ops, opens, reps) := NamedBarriers.counts r
-    let held := NamedBarriers.heldArrivals r
-    let heldStr := if held == 0 then "" else s!", {held} arrival(s) held under the warp-ahead reading"
-    { kernel := k.kernel, input := i, error := none,
-      summary := s!"grid {pidStr r.host.grid}{clusterStr r.host}: {r.ctas.size} CTA(s) x {k.roles.length} role(s); P0-6: {ops} named barrier operation(s), {opens} not counted (nb_open), {reps} repeated region(s) reached{heldStr}",
-      results := SpecId.nb.map (·.resultWith r sh) }
-
-def runNb (k : Kernel) (i : Input) : Report := reportNbOf k i (eval k i)
-
-def runP1 (k : Kernel) (i : Input) : Report := reportP1Of k i (eval k i)
+def runNb (k : Kernel) (i : Input) : Report := report 2 SpecId.nb k i (eval k i)
 
 /-- Counterexample lines, and note lines, printed per spec beyond one per loc. -/
 def maxShown : Nat := 12

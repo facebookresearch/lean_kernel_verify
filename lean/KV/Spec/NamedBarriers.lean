@@ -99,10 +99,12 @@ structure Inst where
   anyAll : Bool
 
 /-- Findings of one CTA (or a run): certain violations, and the findings that leave P0-6
-undecided. -/
+undecided; and the arrivals the warp-ahead reading holds or may hold in the pairing of the CTAs
+whose traces are complete (`pair`; the summary line). -/
 structure Out where
   certain : Array Issue := #[]
   undecided : Array Issue := #[]
+  held : Nat := 0
 
 def Out.ok (o : Out) : Bool := o.certain.isEmpty && o.undecided.isEmpty
 
@@ -110,15 +112,14 @@ def Out.add (o : Out) (cert : Bool) (i : Issue) : Out :=
   if cert then { o with certain := o.certain.push i } else { o with undecided := o.undecided.push i }
 
 def Out.append (a b : Out) : Out :=
-  { certain := a.certain ++ b.certain, undecided := a.undecided ++ b.undecided }
+  { certain := a.certain ++ b.certain, undecided := a.undecided ++ b.undecided, held := a.held + b.held }
 
 def items (t : RoleTrace) : Array Op := Id.run do
   let mut out : Array Op := #[]
   let mut nest : List String := []
   for e in t.events do
     match e.ev with
-    | .namedBar id count sync _ => out := out.push { id, count, sync, all := false, loc := e.loc, nest }
-    | .namedBarAll id count sync _ => out := out.push { id, count, sync, all := true, loc := e.loc, nest }
+    | .namedBar id count sync all _ => out := out.push { id, count, sync, all, loc := e.loc, nest }
     | .nbRep b k => nest := if b then k :: nest else nest.drop 1
     | _ => pure ()
   return out
@@ -128,10 +129,10 @@ def undecidedMsg (m : String) : String := s!"not decided on this input: {m}"
 /-- The threads of kernel role `r`: 32 per warp. -/
 def roleThreads (h : Host) (r : Nat) : Int := 32 * (((h.kernel.roles[r]?).map (·.warps)).getD 0 : Nat)
 
-/-- The barriers several roles use inside a repeated region without a key: (role, barrier,
-loc, other role), once per (role, barrier). -/
-def sharedRepeated (c : CtaTrace) : Array (Nat × Int × Loc × Nat) := Id.run do
-  let ops := c.roles.map fun t => (t.role, items t)
+/-- The barriers several roles use inside a repeated region without a key (`ops`: the `items`
+of each role of CTA `c`): (role, barrier, loc, other role), once per (role, barrier). -/
+def sharedRepeated (c : CtaTrace) (ops : Array (Array Op)) : Array (Nat × Int × Loc × Nat) := Id.run do
+  let ops := (c.roles.map (·.role)).zip ops
   let mut out : Array (Nat × Int × Loc × Nat) := #[]
   for (r, os) in ops do
     for o in os do
@@ -157,14 +158,23 @@ def potential (h : Host) (roleOf : Array Nat) (ops : Array (Array Op)) (pos : Ar
 def usesLater (ops : Array (Array Op)) (pos : Array Nat) (j : Nat) (id : Int) : Bool :=
   ((ops[j]!).extract pos[j]! (ops[j]!).size).any (·.id == id)
 
-/-- The pairing (module doc) of the CTA's roles: the finding that stops it, if any, with
-whether it is certain, and how many arrivals the warp-ahead reading holds or may hold. -/
-def pair (h : Host) (c : CtaTrace) : Option (Bool × Issue) × Nat := Id.run do
-  let ops := c.roles.map items
+/-- The roles other than `k` could complete `inst` without it: its arrivals and the threads
+they may still add before they block on it (`potential`) reach its count. -/
+def othersComplete (h : Host) (roleOf : Array Nat) (ops : Array (Array Op)) (pos : Array Nat) (inst : Inst)
+    (k : Nat) : Bool :=
+  inst.arrived + ((List.range ops.size).filter (· != k)).foldl (fun a j => a + potential h roleOf ops pos inst j) 0 ≥ inst.count
+
+/-- The pairing (module doc) of the roles of CTA `c` (`ops`: the `items` of each): the finding
+that stops it, if any, with whether it is certain, and how many arrivals the warp-ahead reading
+holds or may hold. -/
+def pair (h : Host) (c : CtaTrace) (ops : Array (Array Op)) : Option (Bool × Issue) × Nat := Id.run do
   let roleOf : Array Nat := c.roles.map (·.role)
   let n := ops.size
   let ctx (k : Nat) : String := h.roleCtx c.pid roleOf[k]!
   let name (k : Nat) : String := h.roleName roleOf[k]!
+  -- role `j` has ended: neither blocked nor held, every operation paired
+  let ended (blocked held : Array (Option Int)) (pos : Array Nat) (j : Nat) : Bool :=
+    blocked[j]!.isNone && held[j]!.isNone && pos[j]! ≥ (ops[j]!).size
   let mut pos : Array Nat := Array.replicate n 0
   let mut blocked : Array (Option Int) := Array.replicate n none
   let mut held : Array (Option Int) := Array.replicate n none
@@ -185,84 +195,65 @@ def pair (h : Host) (c : CtaTrace) : Option (Bool × Issue) × Nat := Id.run do
         let w := roleThreads h roleOf[k]!
         let arr := arrives || !o.sync
         let certain (nests : List (List String)) : Bool := !arr && nests.all (·.isEmpty)
-        match insts.find? (·.id == o.id) with
-        | none =>
-          pos := pos.set! k (p + 1)
-          progress := true
-          arrives := arr
-          if w > o.count then
-            return (some (false, { loc := o.loc, context := ctx k, msg := undecidedMsg s!"barrier {o.id}: role {name k} arrives with {w} threads on an instance of count {o.count}: which warps complete each instance depends on timing" }), nheld)
-          if w == o.count then
-            if let some j := (List.range n).find? fun j => j != k && usesLater ops pos j o.id then
-              return (some (false, { loc := o.loc, context := ctx k, msg := undecidedMsg s!"barrier {o.id}: role {name k} completes an instance of count {o.count} alone, and role {name j} uses the barrier too: which warps complete each instance depends on timing" }), nheld)
-            continue
-          let inst : Inst := { id := o.id, count := o.count, arrived := w, roles := #[k],
-                               waiting := if o.sync then #[k] else #[], loc := o.loc, nest := o.nest,
-                               all := o.all, anyAll := o.all }
-          insts := insts.push inst
+        -- the open instance of the barrier, else a new one (no roles yet)
+        let inst := (insts.find? (·.id == o.id)).getD
+          { id := o.id, count := o.count, arrived := 0, roles := #[], waiting := #[], loc := o.loc, nest := o.nest,
+            all := true, anyAll := false }
+        if inst.nest != o.nest then
+          return (some (false, { loc := o.loc, context := ctx k, msg := undecidedMsg s!"barrier {o.id}: role {name k} joins an instance opened at {inst.loc} from another nest of repeated regions ({o.nest} vs {inst.nest}): how the instances pair over the regions' passes is not known" }), nheld)
+        if inst.count != o.count then
+          let m := s!"barrier {o.id}: role {name k} arrives with count {o.count} on an instance that roles {inst.roles.toList.map name} opened with count {inst.count} at {inst.loc}: the counts differ between warps that meet"
+          let cert := certain [o.nest, inst.nest]
+          return (some (cert, { loc := o.loc, context := ctx k, msg := if cert then m else undecidedMsg m }), nheld)
+        if inst.roles.contains k && othersComplete h roleOf ops pos inst k then
+          held := held.set! k (some o.id)  -- the warp-ahead reading (module doc)
+          continue
+        pos := pos.set! k (p + 1)
+        progress := true
+        arrives := arr
+        let a := inst.arrived + w
+        if a > o.count then
+          let m := if inst.roles.isEmpty then s!"barrier {o.id}: role {name k} arrives with {w} threads on an instance of count {o.count}: which warps complete each instance depends on timing"
+            else s!"barrier {o.id}: {a} threads arrive on an instance of count {o.count} (opened at {inst.loc}): which warps complete it depends on timing"
+          return (some (false, { loc := o.loc, context := ctx k, msg := undecidedMsg m }), nheld)
+        if a == o.count then
+          let roles := inst.roles.push k
+          if let some j := (List.range n).find? fun j => !roles.contains j && usesLater ops pos j o.id then
+            let m := if inst.roles.isEmpty then s!"barrier {o.id}: role {name k} completes an instance of count {o.count} alone, and role {name j} uses the barrier too: which warps complete each instance depends on timing"
+              else s!"barrier {o.id}: roles {(roles.toList.map name).eraseDups} complete an instance of count {o.count} (opened at {inst.loc}), and role {name j} uses the barrier too: which warps complete each instance depends on timing"
+            return (some (false, { loc := o.loc, context := ctx k, msg := undecidedMsg m }), nheld)
+          for x in inst.waiting do
+            blocked := blocked.set! x none
+          held := held.map fun hb => if hb == some o.id then none else hb
+          insts := insts.filter (·.id != o.id)
+        else
+          let inst := { inst with arrived := a, roles := inst.roles.push k,
+                                  waiting := if o.sync then inst.waiting.push k else inst.waiting,
+                                  all := inst.all && o.all, anyAll := inst.anyAll || o.all }
+          insts := match insts.findIdx? (·.id == o.id) with
+            | some t => insts.set! t inst
+            | none => insts.push inst
           if o.sync then
             blocked := blocked.set! k (some o.id)
             waitLoc := waitLoc.set! k o.loc
             waitNest := waitNest.set! k o.nest
-          else if usesLater ops pos k o.id &&
-              inst.arrived + ((List.range n).filter (· != k)).foldl (fun a j => a + potential h roleOf ops pos inst j) 0 ≥ inst.count then
+          else if usesLater ops pos k o.id && othersComplete h roleOf ops pos inst k then
             nheld := nheld + 1  -- the warp-ahead reading decides where its next operation lands
-        | some inst =>
-          if inst.nest != o.nest then
-            return (some (false, { loc := o.loc, context := ctx k, msg := undecidedMsg s!"barrier {o.id}: role {name k} joins an instance opened at {inst.loc} from another nest of repeated regions ({o.nest} vs {inst.nest}): how the instances pair over the regions' passes is not known" }), nheld)
-          if inst.count != o.count then
-            let m := s!"barrier {o.id}: role {name k} arrives with count {o.count} on an instance that roles {inst.roles.toList.map name} opened with count {inst.count} at {inst.loc}: the counts differ between warps that meet"
-            let cert := certain [o.nest, inst.nest]
-            return (some (cert, { loc := o.loc, context := ctx k, msg := if cert then m else undecidedMsg m }), nheld)
-          if inst.roles.contains k then
-            let others := (List.range n).filter (· != k)
-            let pot := others.foldl (fun a j => a + potential h roleOf ops pos inst j) 0
-            if inst.arrived + pot ≥ inst.count then
-              held := held.set! k (some o.id)  -- the warp-ahead reading (module doc)
-              continue
-          pos := pos.set! k (p + 1)
-          progress := true
-          arrives := arr
-          let a := inst.arrived + w
-          if a > o.count then
-            return (some (false, { loc := o.loc, context := ctx k, msg := undecidedMsg s!"barrier {o.id}: {a} threads arrive on an instance of count {o.count} (opened at {inst.loc}): which warps complete it depends on timing" }), nheld)
-          if a == o.count then
-            let roles := inst.roles.push k
-            if let some j := (List.range n).find? fun j => !roles.contains j && usesLater ops pos j o.id then
-              return (some (false, { loc := o.loc, context := ctx k, msg := undecidedMsg s!"barrier {o.id}: roles {(roles.toList.map name).eraseDups} complete an instance of count {o.count} (opened at {inst.loc}), and role {name j} uses the barrier too: which warps complete each instance depends on timing" }), nheld)
-            for x in inst.waiting do
-              blocked := blocked.set! x none
-            held := held.map fun hb => if hb == some o.id then none else hb
-            insts := insts.filter (·.id != o.id)
-          else
-            let inst' := { inst with arrived := a, roles := inst.roles.push k,
-                                     waiting := if o.sync then inst.waiting.push k else inst.waiting,
-                                     all := inst.all && o.all, anyAll := inst.anyAll || o.all }
-            insts := insts.map fun x => if x.id == o.id then inst' else x
-            if o.sync then
-              blocked := blocked.set! k (some o.id)
-              waitLoc := waitLoc.set! k o.loc
-              waitNest := waitNest.set! k o.nest
-            else if usesLater ops pos k o.id &&
-                inst'.arrived + ((List.range n).filter (· != k)).foldl (fun a j => a + potential h roleOf ops pos inst' j) 0 ≥ inst'.count then
-              nheld := nheld + 1  -- the warp-ahead reading decides where its next operation lands
     if !progress then
       -- threads that exit release an instance whose operations all name no thread count
-      let ended (j : Nat) : Bool := blocked[j]!.isNone && held[j]!.isNone && pos[j]! ≥ (ops[j]!).size
-      match insts.find? fun i => i.all && (List.range n).all fun j => i.roles.contains j || ended j with
+      match insts.find? fun i => i.all && (List.range n).all fun j => i.roles.contains j || ended blocked held pos j with
       | some i =>
         for x in i.waiting do
           blocked := blocked.set! x none
         insts := insts.filter (·.id != i.id)
       | none => break
   let anyHeld := held.any (·.isSome)
-  let ended (j : Nat) : Bool := blocked[j]!.isNone && held[j]!.isNone && pos[j]! ≥ (ops[j]!).size
-  if let some k := (List.range n).find? fun j => blocked[j]!.isNone && held[j]!.isNone && !ended j then
+  if let some k := (List.range n).find? fun j => blocked[j]!.isNone && held[j]!.isNone && !ended blocked held pos j then
     return (some (false, { loc := "", context := ctx k, msg := undecidedMsg "the pairing did not finish" }), nheld)
   -- every blocked role waits outside the repeated regions, and no instance that names no
   -- thread count in some operations (threads that exit may release it) waits only for roles that ended
   let outside := (List.range n).all fun j => blocked[j]!.isNone || waitNest[j]!.isEmpty
-  let exitMay := insts.any fun i => i.anyAll && (List.range n).all fun j => i.roles.contains j || ended j
+  let exitMay := insts.any fun i => i.anyAll && (List.range n).all fun j => i.roles.contains j || ended blocked held pos j
   for k in [0:n] do
     if let some id := blocked[k]! then
       let inst := insts.find? (·.id == id)
@@ -287,7 +278,8 @@ metadata load, an `assume` that does not hold; `CtaTrace.complete` false) only t
 of single events that ran (certain whatever comes later): the repeated regions and the
 pairing need every role's whole trace, so they are not evaluated there (Check.lean's
 `not decided` line covers the CTA), as the ledger specs skip such clusters
-(`Run.clusters`). -/
+(`Run.clusters`). A complete CTA is paired, its held arrivals counted (`Out.held`), even when
+a finding before the pairing decides it. -/
 def ctaOut (h : Host) (c : CtaTrace) : Out := Id.run do
   let mut out : Out := {}
   let threads : Int := c.roles.foldl (fun a t => a + roleThreads h t.role) 0
@@ -298,12 +290,15 @@ def ctaOut (h : Host) (c : CtaTrace) : Out := Id.run do
     for e in t.events do
       match e.ev with
       | .nbRep b _ => depth := if b then depth + 1 else depth - 1
-      | .nbOpen _ cert why _ _ _ =>
+      | .nbOpen cert why =>
         unless seen.contains (e.loc, why) do
           seen := seen.push (e.loc, why)
           let cert := cert && depth == 0
           out := out.add cert { loc := e.loc, context := ctx, msg := if cert then why else undecidedMsg why }
-      | .namedBar id count _ _ | .namedBarAll id count _ _ =>
+      | .namedBar id count _ _ _ =>
+        -- frontend/kir.py rejects a count that is not a positive multiple of 32 (the barrier
+        -- pass makes such a site an `nb_open`), so on a valid KIR only the second check fires;
+        -- the decision keeps both
         let bad := if count ≤ 0 || count % 32 != 0 then
             some s!"barrier {id}: count {count} is not a positive multiple of 32: no set of warps meets it"
           else if count > threads then
@@ -312,12 +307,16 @@ def ctaOut (h : Host) (c : CtaTrace) : Out := Id.run do
         if let some m := bad then
           out := out.add (depth == 0) { loc := e.loc, context := ctx, msg := if depth == 0 then m else undecidedMsg m }
       | _ => pure ()
-  if !out.ok || !c.complete then return out
-  for (r, id, loc, s) in sharedRepeated c do
+  if !c.complete then return out
+  let ops := c.roles.map items
+  let (found, held) := pair h c ops
+  out := { out with held }
+  if !out.ok then return out
+  for (r, id, loc, s) in sharedRepeated c ops do
     out := out.add false { loc, context := h.roleCtx c.pid r,
                            msg := undecidedMsg s!"barrier {id}: role {h.roleName r} uses it in a region repeated a number of times the model does not fix, and role {h.roleName s} uses it too: how many instances each takes part in is not known" }
   if !out.ok then return out
-  match (pair h c).1 with
+  match found with
   | some (cert, i) => return out.add cert i
   | none => return out
 
@@ -329,15 +328,10 @@ def Holds (r : Run) : Prop := (analyze r).ok = true
 
 instance (r : Run) : Decidable (Holds r) := by unfold Holds; infer_instance
 
-/-- Arrivals the warp-ahead reading holds or may hold (`pair`), over the run's CTAs whose
-traces are complete (the ones `ctaOut` pairs; the summary line). -/
-def heldArrivals (r : Run) : Nat :=
-  r.ctas.foldl (fun a c => if c.complete then a + (pair r.host c).2 else a) 0
-
 /-- Operations, open and repeated-region events of a run (the summary line). -/
 def counts (r : Run) : Nat × Nat × Nat :=
   r.forEvents (0, 0, 0) fun (a, b, c) _ _ e => match e.ev with
-    | .namedBar .. | .namedBarAll .. => (a + 1, b, c)
+    | .namedBar .. => (a + 1, b, c)
     | .nbOpen .. => (a, b + 1, c)
     | .nbRep true _ => (a, b, c + 1)
     | _ => (a, b, c)

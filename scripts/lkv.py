@@ -149,39 +149,20 @@ import kir  # noqa: E402
 # with buck2. None for a copy outside a checkout, where only `check` works.
 FBCODE = next((p for p in SKILL.parents if p.name == "fbcode"), None)
 TARGETS = f"fbcode//{SKILL.relative_to(FBCODE)}" if FBCODE else None
-SPECS = {
-    "bounds": "P0-1",
-    "tripCount": "P0-2",
-    "coverage": "P0-3",
-    "barrier": "P0-4",
-    "maskElision": "P0-5",
-    "namedBarriers": "P0-6",
-    "tmemReuse": "P1-1",
-    "storeReuse": "P1-2",
-    "gwait": "P0-7",
-}
+# The specs: their labels by Lean `KV.SpecId` name, their titles (frontend/kir.py `SPECS`).
+SPECS = {name: label for label, (name, _) in kir.SPECS.items()}
 EXPORT_MARK = "LKV_EXPORT.json"
-TITLES = {
-    "P0-1": "global accesses in bounds",
-    "P0-2": "role trip-count agreement",
-    "P0-3": "output coverage exactly once",
-    "P0-4": "mbarrier protocol",
-    "P0-5": "mask-elision soundness",
-    "P0-6": "named barriers convergent",
-    "P1-1": "TMEM reuse ordered",
-    "P1-2": "async store sources reuse ordered",
-    "P0-7": "global waits reached, co-residency",
-}
-LABELS = ["P0-1", "P0-2", "P0-3", "P0-4", "P0-5"]
+TITLES = {label: title for label, (_, title) in kir.SPECS.items()}
+LABELS = kir.P0_LABELS
 # P1 specs: decided on the P1 KIR (`<kernel>__<digest>.p1.json`, `<spec>.p1.json`) and
 # reported in their own section; their FAIL and UNDECIDED change the exit status only with
 # --p1-strict, their ERRORs always.
-LABELS_P1 = ["P1-1", "P1-2"]
+LABELS_P1 = list(kir.P1_LABELS)
 # P0-6: decided on the P0-6 KIR (`.nb.json`) of every variant, reported with the P0 specs.
-LABELS_NB = ["P0-6"]
+LABELS_NB = kir.NB_LABELS
 # P0-7: decided on a P0 KIR with sync tensors (kir.md change 18), reported with the P0 specs
 # (their columns appear once a checked KIR has sync tensors: labels_p0).
-LABELS_GLOBAL = ["P0-7"]
+LABELS_GLOBAL = kir.GLOBAL_LABELS
 GLOBAL_ON: list = []
 # kir.md change 18: a KIR whose top-level `representative` names "claims" (the claiming CTAs
 # claim in turn) was evaluated on one feasible schedule: every spec may depend on which work
@@ -200,17 +181,6 @@ def labels_p0(nb=False):
 def has_sync(k):
     """The KIR has sync tensors (kir.md change 18): P0-7 applies."""
     return any(t.get("sync") for t in k.get("tensors", []))
-
-
-def kir_labels(k):
-    """The specs a KIR is decided for: its top-level "p1" (kir.md change 15), else P1-1
-    for a P1 KIR with a "tmem" (change 10), P0-6 for a P0-6 KIR (change 14), else the P0
-    specs, and P0-7 for one with sync tensors (change 18)."""
-    if "p1" in k:
-        return k["p1"]
-    if "tmem" in k:
-        return ["P1-1"]
-    return LABELS_NB if "nbar" in k else LABELS + (LABELS_GLOBAL if has_sync(k) else [])
 
 
 # Outcomes of a verdict and of a run (module doc), and the run's exit status.
@@ -655,7 +625,7 @@ def parse_lean(text, k, status):
     report does not list and on an `UNDECIDED` proved theorem."""
     names = [i["name"] for i in k["case"]["inputs"]]
     inputs = parse_report(text, names)
-    labels = kir_labels(k)
+    labels = kir.labels(k)
     theorems = theorem_verdicts(text, names, labels, status)
     for n, inp in inputs.items():
         for label in labels:
@@ -724,7 +694,7 @@ def check_kir(path, lean_dir, sources, timeout, threads=2):
         input_names=[i.get("name") for i in k.get("case", {}).get("inputs", [])],
     )
     if entry["p1"]:
-        entry["p1_specs"] = kir_labels(k)
+        entry["p1_specs"] = kir.labels(k)
     if "nbar" in k and isinstance(k["nbar"], dict):
         entry["nb_sites"] = k["nbar"].get("sites", [])
     errors = kir.validate(k)

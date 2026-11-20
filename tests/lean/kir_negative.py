@@ -25,14 +25,9 @@ def c(v, w=32):
     return {"e": "const", "v": v, "w": w}
 
 
-def fixture(name):
-    with open(os.path.join(HERE, f"{name}.kir.json")) as f:
-        return json.load(f)
-
-
-# Global-synchronization fixtures (tests/lean/gsync, references/kir.md change 18)
-def gs(name):
-    with open(os.path.join(HERE, "gsync", f"{name}.kir.json")) as f:
+def load(sub, name):
+    """Fixture `name` of tests/lean/`sub` ("": tests/lean; p1, p1_2, nb, gsync)."""
+    with open(os.path.join(HERE, sub, f"{name}.kir.json")) as f:
         return json.load(f)
 
 
@@ -126,18 +121,6 @@ GSYNC_MUTATIONS = [
 ]
 
 
-# P1 KIR fixtures (tests/lean/p1, references/kir.md change 10)
-def p1(name):
-    with open(os.path.join(HERE, "p1", f"{name}.kir.json")) as f:
-        return json.load(f)
-
-
-# P0-6 KIR fixtures (tests/lean/nb, references/kir.md change 14)
-def nb(name):
-    with open(os.path.join(HERE, "nb", f"{name}.kir.json")) as f:
-        return json.load(f)
-
-
 def nb_body(k):
     return k["roles"][0]["body"]
 
@@ -215,51 +198,6 @@ NB_MUTATIONS = [
         "only 1-D metadata tensors",
     ),  # fmt: skip
     (
-        "meta_stop",
-        "a gload in a P0-6 KIR",
-        lambda k: nb_body(k).append(
-            {
-                "op": "event",
-                "ev": "gload",
-                "tensor": "meta",
-                "offsets": c(0),
-                "mask": None,
-                "loc": "x.py:1",
-            }
-        ),  # fmt: skip
-        "gload in a P0-6 KIR",
-    ),
-    (
-        "meta_stop",
-        "a gstore in a P0-6 KIR",
-        lambda k: nb_body(k).append(
-            {
-                "op": "event",
-                "ev": "gstore",
-                "tensor": "meta",
-                "offsets": c(0),
-                "mask": None,
-                "loc": "x.py:1",
-            }
-        ),  # fmt: skip
-        "gstore in a P0-6 KIR",
-    ),
-    (
-        "meta_stop",
-        "a gatomic in a P0-6 KIR",
-        lambda k: nb_body(k).append(
-            {
-                "op": "event",
-                "ev": "gatomic",
-                "tensor": "meta",
-                "offsets": c(0),
-                "mask": None,
-                "loc": "x.py:1",
-            }
-        ),  # fmt: skip
-        "gatomic in a P0-6 KIR",
-    ),
-    (
         "uniform",
         "a P0-6 KIR naming P1 specs",
         lambda k: k.update(p1=["P1-2"]),
@@ -277,13 +215,24 @@ NB_MUTATIONS = [
         lambda k: nb_body(k)[0].update(sync=False),
         "always names a thread count",
     ),
+] + [
+    (
+        "meta_stop",
+        f"a {ev} in a P0-6 KIR",
+        lambda k, ev=ev: nb_body(k).append(
+            {
+                "op": "event",
+                "ev": ev,
+                "tensor": "meta",
+                "offsets": c(0),
+                "mask": None,
+                "loc": "x.py:1",
+            }
+        ),
+        f"{ev} in a P0-6 KIR",
+    )
+    for ev in ("gload", "gstore", "gatomic")
 ]
-
-
-# P1-2 KIR fixtures (tests/lean/p1_2, references/kir.md change 15)
-def p1_2(name):
-    with open(os.path.join(HERE, "p1_2", f"{name}.kir.json")) as f:
-        return json.load(f)
 
 
 def drop(e, *fields):  # the event without `fields`
@@ -917,76 +866,49 @@ P1_2_MUTATIONS = [
 ]
 
 
+# The mutation tables, with the directory of their fixtures
+TABLES = (
+    ("", MUTATIONS),
+    # P1 KIR fixtures (tests/lean/p1, references/kir.md change 10)
+    ("p1", P1_MUTATIONS),
+    # P1-2 KIR fixtures (tests/lean/p1_2, references/kir.md change 15)
+    ("p1_2", P1_2_MUTATIONS),
+    # P0-6 KIR fixtures (tests/lean/nb, references/kir.md change 14)
+    ("nb", NB_MUTATIONS),
+    # Global-synchronization fixtures (tests/lean/gsync, references/kir.md change 18)
+    ("gsync", GSYNC_MUTATIONS),
+)
+
+
 def main():
     failed = 0
-    for name, what, mutate, expect in P1_2_MUTATIONS:
-        k = copy.deepcopy(p1_2(name))
-        assert not kir.validate(k), f"p1_2/{name} must be valid before mutation"
-        mutate(k)
-        errors = kir.validate(k)
-        if not any(expect in e for e in errors):
-            failed += 1
-            print(
-                f"kir_negative: NOT REJECTED as expected: p1_2/{name}: {what}: want {expect!r}, got {errors}"
-            )
-    k = copy.deepcopy(fixture("pipeline_ok"))
+    for sub, table in TABLES:
+        where = f"{sub}/" if sub else ""
+        for name, what, mutate, expect in table:
+            k = copy.deepcopy(load(sub, name))
+            assert not kir.validate(k), f"{where}{name} must be valid before mutation"
+            mutate(k)
+            errors = kir.validate(k)
+            if not any(expect in e for e in errors):
+                failed += 1
+                print(
+                    f"kir_negative: NOT REJECTED as expected: {where}{name}: {what}: want {expect!r}, got {errors}"
+                )
+    k = copy.deepcopy(load("", "pipeline_ok"))
     p1_event_in_p0(k)
     if not any("without a top-level 'tmem'" in e for e in kir.validate(k)):
         failed += 1
         print(
             "kir_negative: NOT REJECTED as expected: pipeline_ok: a P1 event in a P0 KIR"
         )
-    for name, what, mutate, expect in P1_MUTATIONS:
-        k = copy.deepcopy(p1(name))
-        assert not kir.validate(k), f"p1/{name} must be valid before mutation"
-        mutate(k)
-        errors = kir.validate(k)
-        if not any(expect in e for e in errors):
-            failed += 1
-            print(
-                f"kir_negative: NOT REJECTED as expected: p1/{name}: {what}: want {expect!r}, got {errors}"
-            )
-    for name, what, mutate, expect in NB_MUTATIONS:
-        k = copy.deepcopy(nb(name))
-        assert not kir.validate(k), f"nb/{name} must be valid before mutation"
-        mutate(k)
-        errors = kir.validate(k)
-        if not any(expect in e for e in errors):
-            failed += 1
-            print(
-                f"kir_negative: NOT REJECTED as expected: nb/{name}: {what}: want {expect!r}, got {errors}"
-            )
-    for name, what, mutate, expect in GSYNC_MUTATIONS:
-        k = copy.deepcopy(gs(name))
-        assert not kir.validate(k), f"gsync/{name} must be valid before mutation"
-        mutate(k)
-        errors = kir.validate(k)
-        if not any(expect in e for e in errors):
-            failed += 1
-            print(
-                f"kir_negative: NOT REJECTED as expected: gsync/{name}: {what}: want {expect!r}, got {errors}"
-            )
     for name, what, mutate in ACCEPTED:
-        k = copy.deepcopy(fixture(name))
+        k = copy.deepcopy(load("", name))
         mutate(k)
         errors = kir.validate(k)
         if errors:
             failed += 1
             print(f"kir_negative: REJECTED but valid: {name}: {what}: {errors}")
-    for name, what, mutate, expect in MUTATIONS:
-        k = copy.deepcopy(fixture(name))
-        assert not kir.validate(k), f"{name} must be valid before mutation"
-        mutate(k)
-        errors = kir.validate(k)
-        if not any(expect in e for e in errors):
-            failed += 1
-            print(
-                f"kir_negative: NOT REJECTED as expected: {name}: {what}: want {expect!r}, got {errors}"
-            )
-    nmut = (
-        len(MUTATIONS) + len(P1_MUTATIONS) + len(P1_2_MUTATIONS) + len(NB_MUTATIONS)
-        + len(GSYNC_MUTATIONS) + 1
-    )  # fmt: skip
+    nmut = sum(len(table) for _, table in TABLES) + 1
     print(
         f"kir_negative: {nmut + len(ACCEPTED) - failed}/{nmut + len(ACCEPTED)} as expected"
         f" ({nmut} invalid KIR variants rejected with the expected error, {len(ACCEPTED)} valid ones accepted)"

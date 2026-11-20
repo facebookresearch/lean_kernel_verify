@@ -208,6 +208,24 @@ def segIssue (c : SegCtx) (rows : Array Int) : Option String :=
 /-- The input sets an elision flag: P0-1 and P0-3 violations of the run are P0-5's. -/
 def Run.elided (r : Run) : Bool := !r.host.input.elisions.isEmpty
 
+/-- The events of every role trace of `r` (the summary lines). -/
+def Run.events (r : Run) : Nat := r.ctas.foldl (fun n c => c.roles.foldl (fun n t => n + t.events.size) n) 0
+
+/-- The stopped role traces of `r`. -/
+def Run.stops (r : Run) : Array RoleTrace :=
+  r.ctas.flatMap fun c => c.roles.filter (·.stopped)
+
+/-- Why P0-2..P0-6, P1-1 and P1-2 (P0-1 too after an `assume` stop) are undecided on `r`: the
+first role trace that stops (an out-of-bounds metadata load, an assumption that does not hold;
+none if every trace is complete), with every reason a trace stopped for. -/
+def undecided (r : Run) : Array Issue :=
+  let stops := r.ctas.flatMap fun c => (c.roles.filter (·.stopped)).map fun t => (c.pid, t)
+  match stops[0]? with
+  | none => #[]
+  | some (pid, t) =>
+    #[{ loc := t.stopLoc, context := r.host.roleCtx pid t.role,
+        msg := s!"not decided on this input: {stops.size} role trace(s) stop at {stopReasons (stops.map (·.2))}, so their later events are unknown; the lines of this spec that are not `not decided` lines are certain counterexamples" }]
+
 /-- Every event of every role of every CTA, with its CTA and role. -/
 def Run.forEvents {α : Type} (r : Run) (init : α) (f : α → Nat × Nat × Nat → Nat → TEvent → α) : α :=
   r.ctas.foldl (init := init) fun acc c =>

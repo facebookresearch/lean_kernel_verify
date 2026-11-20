@@ -10,9 +10,10 @@ Debug only: where one evaluation spends its time. No theorem, verdict or report 
 KV.lean does not import it (scripts/build_lean.sh compiles it into libKV.so, as every module
 under lean/). `frontend/emit_lean.py --profile LOG[:N]` writes, instead of `#lkv_check`,
 
-  #eval KV.Profile.run kernel input "LOG" N KIND
+  #eval KV.Profile.run kernel input "LOG" N KIND SPECS
 
-(KIND: 0 a P0 KIR, 1 a P1 KIR, 2 a P0-6 KIR, as `checkAll`), which evaluates `kernel` on
+(KIND: 0 a P0 KIR, 1 a P1 KIR, 2 a P0-6 KIR, as `checkAll`; SPECS: the KIR's specs, as
+`#lkv_check`), which evaluates `kernel` on
 `input` as `KV.eval` does, but one CTA after another (`evalCtaWith`, each role run timed; a run
 with sync tensors: its first pass), and appends to LOG, as it goes:
 
@@ -53,7 +54,7 @@ def ms (ns : Nat) : String :=
   s!"{t / 1000}.{toString (t % 1000 + 1000) |>.drop 1}"
 
 def run (k : Kernel) (i : Input) (log : String) (maxCtas : Nat := 0) (kind : Nat := 0)
-    (detail : Nat := 2) : IO Unit := do
+    (ss : List SpecId := SpecId.all) (detail : Nat := 2) : IO Unit := do
   let hd ← IO.FS.Handle.mk log .append
   let say (s : String) : IO Unit := do hd.putStrLn s; hd.flush
   let tAll ← IO.monoNanosNow
@@ -151,18 +152,18 @@ def run (k : Kernel) (i : Input) (log : String) (maxCtas : Nat := 0) (kind : Nat
       let (o, t) ← timed fun _ => Global.analyze r Ls
       say s!"PHASE global {ms t} ok={o.ok} issues={o.issues.size}"
       pure { sh with global := Thunk.pure o }
-  for s in k.specsOf kind do
+  for s in ss do
     let (res, t) ← timed fun _ => s.resultWith r sh
     say s!"PHASE result.{s.label} {ms t} holds={res.holds} issues={res.issues.size} notes={res.notes.size}"
-  for s in k.specsOf kind do
+  for s in ss do
     let (b, t) ← timed fun _ => s.holdsWith r sh
     say s!"PHASE decide.{s.label} {ms t} {b}"
   say s!"PHASE total {ms ((← IO.monoNanosNow) - tAll)}"
 
-/-- Every issue and note of every spec of a KIR of kind `kind` (the report shows a few per spec),
+/-- Every issue and note of every spec `ss` of a KIR (the report shows a few per spec),
 as `checkAll` computes them (`eval`, then `Shared.of`), one line per issue appended to `path`:
 `<spec>\t<issue|note>\t<loc>\t<context>\t<msg>`, then a `PHASE` line per step. For triage. -/
-def dumpIssues (k : Kernel) (i : Input) (path : String) (kind : Nat := 0) : IO Unit := do
+def dumpIssues (k : Kernel) (i : Input) (path : String) (ss : List SpecId := SpecId.all) : IO Unit := do
   let hd ← IO.FS.Handle.mk path .append
   let t0 ← IO.monoNanosNow
   match eval k i with
@@ -171,7 +172,7 @@ def dumpIssues (k : Kernel) (i : Input) (path : String) (kind : Nat := 0) : IO U
     let t1 ← IO.monoNanosNow
     hd.putStrLn s!"PHASE eval {ms (t1 - t0)}"
     let sh := Shared.of r
-    for s in k.specsOf kind do
+    for s in ss do
       let ta ← IO.monoNanosNow
       let res := s.resultWith r sh
       for x in res.issues do

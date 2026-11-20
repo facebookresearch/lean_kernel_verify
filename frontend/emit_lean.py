@@ -20,7 +20,7 @@ one evaluation of the kernel on the input prints the report (verdicts, counterex
 notes with IR loc; lean/KV/Check.lean, Report.render) and proves, per spec, the theorem
 `KV.Holds .<spec> kernel <input>` or its negation, then prints `THEOREM <input> <spec> PASS|FAIL`.
 A P1 KIR (top-level `tmem` or `p1`, file suffix .p1.json; references/kir.md changes 10
-and 15) emits `tmem := some {...}`, `p1 := [...]` and `cta_threads := some n` in the
+and 15) emits `tmem := some {...}` and `cta_threads := some n` in the
 kernel and `#lkv_check_p1` with its P1 specs (`tmemReuse`, `storeReuse`) instead; the output
 for a P0 KIR is unchanged; a P0-6 KIR (top-level `nbar`, file suffix .nb.json; change 14)
 `#lkv_check_nb` with P0-6 (`namedBarriers`). --legacy-theorems writes the earlier form
@@ -47,17 +47,6 @@ import kir  # noqa: E402
 # Lean elaborates long list literals recursively (a few hundred elements exhaust the
 # default limits), so longer lists are split into chunk definitions joined by List.flatten.
 CHUNK = 32
-SPECS = (
-    ("bounds", "P0_1"),
-    ("tripCount", "P0_2"),
-    ("coverage", "P0_3"),
-    ("barrier", "P0_4"),
-    ("maskElision", "P0_5"),
-)
-SPECS_P1 = (("tmemReuse", "P1_1"), ("storeReuse", "P1_2"))
-P1_LABELS = {"P1_1": "P1-1", "P1_2": "P1-2"}
-SPECS_NB = (("namedBarriers", "P0_6"),)
-SPECS_GLOBAL = (("gwait", "P0_7"),)  # a KIR with sync tensors (KIR change 18)
 KEYWORD_CTORS = {"let", "for", "while", "if"}
 
 
@@ -278,11 +267,10 @@ def event(s):
     if ev == "named_bar":
         return ctor(ev, expr(s["id"]), expr(s["count"]), lbool(s["sync"]),
                     lbool(s.get("all", False)), loc)  # fmt: skip
-    if ev == "nb_open":
-        return ctor(ev, lstr(s["kind"]), lbool(s["certain"]), lstr(s["why"]),
-                    opt_expr(s["id"]), opt_expr(s["count"]), lbool(s["sync"]), loc)  # fmt: skip
-    if ev == "nb_rep":
-        return ctor(ev, lbool(s["begin"]), lstr(s["why"]), lstr(s.get("key", "")), loc)
+    if ev == "nb_open":  # its kind, id, count and sync are for audit (IR.lean)
+        return ctor(ev, lbool(s["certain"]), lstr(s["why"]), loc)
+    if ev == "nb_rep":  # its why is for audit (IR.lean)
+        return ctor(ev, lbool(s["begin"]), lstr(s.get("key", "")), loc)
     if ev == "bulk_store":
         t = s.get("tmap")
         tmap = "none" if t is None else f"(some ({lstr(t['base'])}, {expr(t['addr'])}))"
@@ -290,16 +278,15 @@ def event(s):
                     lstr(s["sym"]), expr(s["src"]), str(s["bytes"]), tmap, loc)  # fmt: skip
     if ev == "bulk_commit":
         return ctor(ev, loc)
-    if ev == "bulk_wait":
-        return ctor(ev, str(s["n"]), lbool(s["read"]), loc)
-    if ev == "smem_write":
-        mask = "none" if s["mask"] is None else f"(some {texpr(s['mask'])})"
+    if ev == "bulk_wait":  # P1-2 takes `read` and plain waits alike (IR.lean)
+        return ctor(ev, str(s["n"]), loc)
+    if ev == "smem_write":  # its mask is null (kir.py)
         slot = (
             "none"
             if "bar" not in s
             else f"(some ({lstr(s['bar'])}, {expr(s['idx'])}, {lbool(s.get('leader', False))}))"
         )
-        return ctor(ev, lstr(s["sym"]), texpr(s["offsets"]), mask, str(s["bytes"]),
+        return ctor(ev, lstr(s["sym"]), texpr(s["offsets"]), str(s["bytes"]),
                     expr(s["warp"]), opt_expr(s.get("lane")), lbool(s.get("sync", False)),
                     lbool(s.get("async", False)), opt_expr(s.get("cta")), slot, loc)  # fmt: skip
     if ev == "tmap_write":
@@ -456,24 +443,25 @@ def roles(k, chunks):
     return out, names
 
 
-def debug_evals(inputs, kind, profile, selfcheck):
+def debug_evals(inputs, kind, specs, profile, selfcheck):
     """The per-input `#eval`s that replace the verdicts under --profile (lean/KV/Profile.lean;
     `profile` = (log path, CTA limit), a negative limit: every issue and note of every spec,
     `dumpIssues`) or --selfcheck (lean/KV/SelfCheck.lean); None for neither. `kind` is
-    checkAll's report kind (lean/KV/Command.lean: 0 P0, 1 P1, 2 P0-6)."""
+    checkAll's report kind (lean/KV/Command.lean: 0 P0, 1 P1, 2 P0-6), `specs` the Lean list
+    of the KIR's specs."""
     if profile is not None:
         log, limit = profile
         if limit < 0:
             return [
-                f"#eval KV.Profile.dumpIssues kernel {name} {lstr(log)} {kind}"
+                f"#eval KV.Profile.dumpIssues kernel {name} {lstr(log)} {specs}"
                 for name in inputs
             ]
         return [
-            f"#eval KV.Profile.run kernel {name} {lstr(log)} {limit} {kind}"
+            f"#eval KV.Profile.run kernel {name} {lstr(log)} {limit} {kind} {specs}"
             for name in inputs
         ]
     if selfcheck:
-        return [f"#eval KV.SelfCheck.run kernel {name} {kind}" for name in inputs]
+        return [f"#eval KV.SelfCheck.run kernel {name} {specs}" for name in inputs]
     return None
 
 
@@ -529,11 +517,8 @@ def emit(
         out.append(
             f"  tmem := some {{ cols := {t['cols']}, zeroBase := {lbool(t['base'] == 'zero')} }}"
         )
-    if "p1" in k:
-        out.append(f"  p1 := {llist(map(lstr, k['p1']))}")
     if "cta_threads" in k:
         out.append(f"  cta_threads := some {k['cta_threads']}")
-    labels = k.get("p1", ["P1-1"])
     out.append("")
     inputs = []
     elision = llist(map(lstr, k["case"].get("elision_flags", [])))
@@ -579,31 +564,33 @@ def emit(
             )
         out.append("")
     nb = "nbar" in k
-    specs = (
-        [x for x in SPECS_P1 if P1_LABELS[x[1]] in labels]
-        if p1
-        else SPECS_NB
-        if nb
-        else SPECS + (SPECS_GLOBAL if any("sync" in t for t in k["tensors"]) else ())
-    )
-    debug = debug_evals(inputs, 1 if p1 else 2 if nb else 0, profile, selfcheck)
+    # (Lean name, label) of the KIR's specs (kir.labels), in report order
+    specs = [
+        (spec, label)
+        for label, (spec, _) in kir.SPECS.items()
+        if label in kir.labels(k)
+    ]
+    kind = 1 if p1 else 2 if nb else 0
+    spec_list = llist(f".{spec}" for spec, _ in specs)
+    debug = debug_evals(inputs, kind, spec_list, profile, selfcheck)
     if debug is not None:
         out += debug
     elif legacy:
         run = "KV.runP1" if p1 else "KV.runNb" if nb else "KV.runCase"
-        out += [f"#eval {run} kernel {name}" for name in inputs]
+        extra = "" if nb else f" {spec_list}"
+        out += [f"#eval {run} kernel {name}{extra}" for name in inputs]
         out.append("")
         for name in inputs:
             for spec, label in specs:
                 out.append(
-                    f"theorem {label}_{spec}__{name} : KV.Holds .{spec} kernel {name} := by native_decide"
+                    f"theorem {label.replace('-', '_')}_{spec}__{name} : KV.Holds .{spec} kernel {name} := by native_decide"
                 )
     else:
         cmd = "#lkv_check_p1" if p1 else "#lkv_check_nb" if nb else "#lkv_check"
         names = " ".join(spec for spec, _ in specs)
         out += [f"{cmd} kernel {name} {names}" for name in inputs]
         if with_selfcheck:
-            out += debug_evals(inputs, 1 if p1 else 2 if nb else 0, None, True)
+            out += debug_evals(inputs, kind, spec_list, None, True)
     out += ["", f"end KIR.«{ident(k['kernel'])}»", ""]
     return "\n".join(out)
 

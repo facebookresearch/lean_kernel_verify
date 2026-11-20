@@ -347,14 +347,12 @@ inductive Ev where
   /-- tcgen05.wait::ld (`ld`) or wait::st of the role. -/
   | tmemWait (ld : Bool)
   /-- bar.sync (`sync`) or bar.arrive on named barrier `id` with `count` threads, by all
-  `threads` threads of the role. -/
-  | namedBar (id count : Int) (sync : Bool) (threads : Int)
-  /-- bar.sync or bar.red without a thread count (P0-6 KIR `named_bar` with `all`): named
-  barrier `id` for all `count` threads of the CTA, which threads that exit release, by all
-  `threads` threads of the role. -/
-  | namedBarAll (id count : Int) (sync : Bool) (threads : Int)
+  `threads` threads of the role; with `all`, bar.sync or bar.red without a thread count (P0-6
+  KIR `named_bar` with `all`): named barrier `id` for all `count` threads of the CTA, which
+  threads that exit release. -/
+  | namedBar (id count : Int) (sync : Bool) (all : Bool) (threads : Int)
   /-- A named barrier P0-6 cannot count, reached by the role (P0-6 KIR `nb_open`). -/
-  | nbOpen (kind : String) (certain : Bool) (why : String) (id count : Option Int) (sync : Bool)
+  | nbOpen (certain : Bool) (why : String)
   /-- The begin or end of a region that runs a number of times the model does not fix
   (P0-6 KIR `nb_rep`; `key`: its identity across the roles of one split role, or empty). -/
   | nbRep (isBegin : Bool) (key : String)
@@ -365,7 +363,7 @@ inductive Ev where
   /-- cp.async.bulk.commit_group of every thread of the role. -/
   | bulkCommit
   /-- cp.async.bulk.wait_group{.read} `n` of every thread of the role. -/
-  | bulkWait (n : Int) (read : Bool)
+  | bulkWait (n : Int)
   /-- A shared-memory write (P1-2) by `who` (with `sync`: every lane of `who.warp`, one
   warp-synchronizing instruction) of the byte ranges `[lo, hi)` of symbol `sym` in the
   CTA of rank `cta` of the cluster; `async`: an asynchronous copy's landing, `slot` the
@@ -1009,30 +1007,20 @@ def execEvent : Event → M Unit
     let r := (← read).role
     let i ← evalInt loc id
     let c ← evalInt loc count
-    emit loc (if all then .namedBarAll i c sync (r.warps * 32) else .namedBar i c sync (r.warps * 32))
-  | .nb_open kind certain why id count sync loc => do
-    let i ← match id with
-      | some e => some <$> evalInt loc e
-      | none => pure none
-    let c ← match count with
-      | some e => some <$> evalInt loc e
-      | none => pure none
-    emit loc (.nbOpen kind certain why i c sync)
-  | .nb_rep b _ key loc => emit loc (.nbRep b key)
+    emit loc (.namedBar i c sync all (r.warps * 32))
+  | .nb_open certain why loc => emit loc (.nbOpen certain why)
+  | .nb_rep b key loc => emit loc (.nbRep b key)
   | .bulk_store kind warp lane sym src bytes tmap loc => do
     let who : Who := { warp := ← evalInt loc warp, lane := ← lane.mapM (evalInt loc) }
     let lo ← evalInt loc src
     let tm ← tmap.mapM fun (base, a) => return (base, ← evalInt loc a)
     emit loc (.bulkStore kind who sym lo (lo + bytes) tm)
   | .bulk_commit loc => emit loc .bulkCommit
-  | .bulk_wait n read loc => emit loc (.bulkWait n read)
-  | .smem_write sym offsets mask bytes warp lane sync async cta slot loc => do
+  | .bulk_wait n loc => emit loc (.bulkWait n)
+  | .smem_write sym offsets bytes warp lane sync async cta slot loc => do
     let who : Who := { warp := ← evalInt loc warp, lane := ← lane.mapM (evalInt loc) }
     let offs ← evalTExpr loc offsets
-    let m ← match mask with
-      | none => pure none
-      | some e => some <$> evalTExpr loc e
-    let os ← activeOffsets loc offs m
+    let os ← activeOffsets loc offs none
     let rank := (← read).rank
     let sl ← slot.mapM fun (b, i, leader) => slotOf loc b i (if leader then rank - rank % 2 else rank)
     emit loc (.smemWrite who sync async (← ctaOf loc "smem_write" cta) sym
@@ -1144,9 +1132,9 @@ def Event.locOf : Event → Loc
   | .wait _ _ _ _ l | .tma_load _ _ _ _ _ _ l | .complete_tx _ _ _ _ l | .tma_store _ _ l
   | .tma_reduce _ _ l | .gload _ _ _ l | .gstore _ _ _ l | .gatomic _ _ _ l
   | .work _ l | .tmem _ _ _ _ _ l | .tmem_wait _ l
-  | .named_bar _ _ _ _ l | .nb_open _ _ _ _ _ _ l | .nb_rep _ _ _ l
-  | .bulk_store _ _ _ _ _ _ _ l | .bulk_commit l | .bulk_wait _ _ l
-  | .smem_write _ _ _ _ _ _ _ _ _ _ l | .tmap_write _ _ _ l
+  | .named_bar _ _ _ _ l | .nb_open _ _ l | .nb_rep _ _ l
+  | .bulk_store _ _ _ _ _ _ _ l | .bulk_commit l | .bulk_wait _ l
+  | .smem_write _ _ _ _ _ _ _ _ _ l | .tmap_write _ _ _ l
   | .handoff_put _ _ l | .handoff_get _ _ l | .gsig _ _ _ _ l | .gwait _ _ _ _ l
   | .gclaim _ _ _ _ _ l | .rput _ _ _ _ l | .rget _ _ _ _ _ l => l
 

@@ -178,7 +178,7 @@ rank-0 CTA's k-th try_cancel multicasts the response into the other CTA, whose r
 waits on their response barrier need its bytes, so their k-th releases of the rank-0 CTA's
 empty slot cannot precede the rank-0 CTA's next wait there, and its next try_cancel follows
 their (k-1)-th waits. `returnCuts` asks for both bounds at many cuts and phases: through a
-per-slot `TxIndex` (bisection over prefix sums, the same values).
+per-slot `TxIndex` (bisection over prefix sums).
 -/
 import KV.Spec.Common
 
@@ -422,18 +422,10 @@ def SlotLedger.needs (L : SlotLedger) (i : Nat) (k : Int) (lockstep : Bool) : In
     max anyway credit
   | _, _ => anyway
 
-/-- The expect_tx bytes on the slot that surely precede the completion of phase `k` (module
-doc, "Bytes carry order"): each role's expect_tx issued before the last of its arrivals that
-phase `k` needs (`needs`, run totals, no lockstep credit). -/
-def SlotLedger.bytesNeeded (L : SlotLedger) (k : Int) : Int :=
-  L.roles.zipIdx.foldl (init := 0) fun acc (rs, i) =>
-    let need := L.needs i k false
-    rs.tx.foldl (init := acc) fun acc x => if !x.load && x.arrivedBefore < need then acc + x.bytes else acc
-
 /-- Per entry of a slot's `roles`: the trace positions of its loads and landings (ascending,
 program order) with the prefix sums of their bytes, and the `arrivedBefore` of its
 expect_tx events (non-decreasing in program order) with the prefix sums of theirs; for
-`SlotLedger.landedBefore` and `SlotLedger.bytesNeeded` by bisection (`returnCuts` asks them
+`SlotLedger.landedBefore` and `SlotLedger.bytesBefore` by bisection (`returnCuts` asks them
 for many cuts and phases). -/
 structure TxIndex where
   loadPos : Array (Array Nat)
@@ -452,27 +444,27 @@ def SlotLedger.txIndex (L : SlotLedger) : TxIndex :=
     expectAt := expects.map (·.map (·.arrivedBefore)),
     expectPre := expects.map fun xs => prefixSums (xs.map (·.bytes)) }
 
-/-- `landedBefore` through the slot's `TxIndex`. -/
-def SlotLedger.landedFast (L : SlotLedger) (ix : TxIndex) (cuts : Array Nat) : Int :=
+/-- Bytes of the loads and landings on the slot at trace positions before `cuts[role]`, over
+all roles (through the slot's `TxIndex` `ix`). -/
+def SlotLedger.landedBefore (L : SlotLedger) (ix : TxIndex) (cuts : Array Nat) : Int :=
   L.roles.zipIdx.foldl (init := 0) fun acc (rs, j) =>
     let c := cuts[rs.role]!
     acc + ix.loadPre[j]![searchFirst ix.loadPos[j]! (· ≥ c)]!
 
-/-- `bytesNeeded` through the slot's `TxIndex`. -/
-def SlotLedger.bytesNeededFast (L : SlotLedger) (ix : TxIndex) (k : Int) : Int :=
+/-- The expect_tx bytes of each entry `j` of the slot's `roles` issued before its arrivals reach
+`need j` (through the slot's `TxIndex` `ix`), over all roles. -/
+def SlotLedger.bytesBefore (L : SlotLedger) (ix : TxIndex) (need : Nat → Int) : Int :=
   L.roles.zipIdx.foldl (init := 0) fun acc (_, j) =>
-    let need := L.needs j k false
-    acc + ix.expectPre[j]![searchFirst ix.expectAt[j]! (· ≥ need)]!
+    acc + ix.expectPre[j]![searchFirst ix.expectAt[j]! (· ≥ need j)]!
+
+/-- The expect_tx bytes on the slot that surely precede the completion of phase `k` (module
+doc, "Bytes carry order"): each role's expect_tx issued before the last of its arrivals that
+phase `k` needs (`needs`, run totals, no lockstep credit). -/
+def SlotLedger.bytesNeeded (L : SlotLedger) (ix : TxIndex) (k : Int) : Int := L.bytesBefore ix (L.needs · k false)
 
 /-- Per role the lower of two cut positions (`b` empty: `a`). -/
 def meetCuts (a b : Array Nat) : Array Nat :=
   if b.isEmpty then a else (Array.range a.size).map fun j => min a[j]! (b.getD j a[j]!)
-
-/-- Bytes of the loads and landings on the slot at trace positions before `cuts[role]`, over
-all roles. -/
-def SlotLedger.landedBefore (L : SlotLedger) (cuts : Array Nat) : Int :=
-  L.roles.foldl (init := 0) fun acc rs =>
-    rs.tx.foldl (init := acc) fun acc x => if x.load && x.pos < cuts[rs.role]! then acc + x.bytes else acc
 
 /-- `needs`, raised by `may` (P1-1, `precise`): per entry of `roles`, its arrivals that may
 precede the return of the wait (`mayBeforeReturn`). The completion of phase `k` before the
@@ -575,8 +567,8 @@ def WaitsBySlot.of (waits : Array (Array WaitPos)) : WaitsBySlot :=
 event surely follows that return. Initially `role`'s own suffix from the wait; a wait of a
 role joins (with the rest of its role) when the arrivals on its slot before the cuts cannot
 complete its phase bound, or (`bytes`) the bytes landing on it before the cuts cannot fill
-the expect_tx bytes that phase needs (module doc, "Bytes carry order"), since it cannot
-return before the wait does. The phase bounds of
+the expect_tx bytes that phase needs (module doc, "Bytes carry order"; through the slots'
+`TxIndex` `ix`), since it cannot return before the wait does. The phase bounds of
 a role's waits on one slot do not decrease in program order, so the first such wait per
 (role, slot) is found by binary search. Each round but the last lowers some cut to an
 earlier wait, so `waits + 1` rounds reach the fixpoint (stopping earlier would only leave
@@ -584,11 +576,6 @@ cuts higher, which is still sound). -/
 def returnCuts (L : Array SlotLedger) (ws : WaitsBySlot) (sizes : Array Nat) (role pos : Nat)
     (bytes : Bool := false) (own : Nat → Nat → Array Nat := fun _ _ => #[])
     (ix : Array TxIndex := #[]) : Array Nat := Id.run do
-  -- the slot's landed and needed bytes, through its `TxIndex` if given (same values)
-  let landedAt (s : Nat) (c : Array Nat) : Int :=
-    match ix[s]? with | some i => L[s]!.landedFast i c | none => L[s]!.landedBefore c
-  let neededAt (s : Nat) (k : Int) : Int :=
-    match ix[s]? with | some i => L[s]!.bytesNeededFast i k | none => L[s]!.bytesNeeded k
   let mut cuts := sizes.modify role fun _ => pos
   for _ in [0:ws.foldl (fun n r => r.foldl (fun n x => n + x.2.size) n) 1] do
     let mut changed := false
@@ -598,14 +585,14 @@ def returnCuts (L : Array SlotLedger) (ws : WaitsBySlot) (sizes : Array Nat) (ro
         let before := l.arrivedBefore cuts
         -- with `bytes`: nor the bytes its phase needs (module doc, "Bytes carry order");
         -- both bounds grow with the phase, so the first wait is still found by bisection
-        let landed := if bytes then landedAt s cuts else 0
-        let first := searchFirst xs fun (_, k) => before < k * l.count || (bytes && landed < neededAt s k)
+        let landed := if bytes then l.landedBefore ix[s]! cuts else 0
+        let first := searchFirst xs fun (_, k) => before < k * l.count || (bytes && landed < l.bytesNeeded ix[s]! k)
         let i := if !(bytes && l.roles.any (·.lander)) then first else
             -- a lander's slot: only loads that the wait's own return does not surely
             -- precede (`own`) can fill its phase; no longer monotone, so a scan, but only
             -- of the waits before `first` (own cuts only lower the landed bytes)
             ((xs.extract 0 first).findIdx? fun (p, k) =>
-              landedAt s (meetCuts cuts (own r p)) < neededAt s k).getD first
+              l.landedBefore ix[s]! (meetCuts cuts (own r p)) < l.bytesNeeded ix[s]! k).getD first
         match xs[i]? with
         | some (p, _) =>
           if p < cuts[r]! then
