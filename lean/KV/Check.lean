@@ -102,6 +102,100 @@ def Holds (s : SpecId) (k : Kernel) (i : Input) : Prop := RunHolds s (eval k i)
 instance (s : SpecId) (k : Kernel) (i : Input) : Decidable (Holds s k i) :=
   inferInstanceAs (Decidable (RunHolds s (eval k i)))
 
+/-- The analyses of one run that its report and its decisions share (`checkAll`, Command.lean):
+each is computed when first read, at most once (before, the report and every decision computed
+their own: three barrier-ledger computations per P0 input, two P1-ledger computations per P1
+spec, P0-1's, P0-3's and P0-5's decisions twice and P0-3's targets three times, P0-6's analysis,
+P1-1's and P1-2's pair searches twice, and a P0 input with sync tensors its barrier ledgers once
+more and P0-7's analysis twice). -/
+structure Shared where
+  ledgers : Thunk Ledgers
+  ledgersP1 : Thunk Ledgers
+  /-- `decide (Bounds.EventsOk r)` and `decide (Bounds.NoMetaOob r)` (P0-1, P0-5). -/
+  eventsOk : Thunk Bool
+  noMetaOob : Thunk Bool
+  /-- P0-3's targets and their plain-store ledgers, and `decide (Coverage.Ok r)` (P0-3, P0-5). -/
+  covTargets : Thunk (Array Coverage.Target)
+  covLedgers : Thunk (Array Coverage.Ledger)
+  covOk : Thunk Bool
+  named : Thunk NamedBarriers.Out
+  /-- The P1 CTAs (P1-1) and contexts (P1-2) with their conflicting pairs. -/
+  tmem : Thunk (Array (TmemReuse.P1Cta × Array (Nat × Nat × TmemReuse.PairKind)))
+  store : Thunk (Array (StoreReuse.Ctx × Array (Nat × Nat × StoreReuse.PairKind)))
+  /-- P0-7's analysis (`Global.analyze` with the barrier ledgers). -/
+  global : Thunk Global.Outcome
+
+/-- The shared analyses of `r` with its barrier ledgers `Ls` (`r.ledgers`) and P1 ledgers `L1`
+(`r.ledgersP1`). -/
+def Shared.ofLedgers (r : Run) (Ls : Thunk Ledgers) (L1 : Thunk Ledgers := Thunk.mk fun _ => r.ledgersP1Par) :
+    Shared :=
+  let tg : Thunk (Array Coverage.Target) := Thunk.mk fun _ => Coverage.targets r.host
+  let cl : Thunk (Array Coverage.Ledger) := Thunk.mk fun _ => Coverage.ledgers r tg.get
+  { ledgers := Ls, ledgersP1 := L1,
+    eventsOk := Thunk.mk fun _ => Bounds.eventsOkPar r,
+    noMetaOob := Thunk.mk fun _ => Bounds.noMetaOobPar r,
+    covTargets := tg, covLedgers := cl,
+    covOk := Thunk.mk fun _ => Coverage.okWithB tg.get cl.get r,
+    named := Thunk.mk fun _ => NamedBarriers.analyze r,
+    tmem := Thunk.mk fun _ => TmemReuse.withPairs (TmemReuse.cols r) (TmemReuse.p1Ctas r L1.get),
+    store := Thunk.mk fun _ => StoreReuse.withPairs (StoreReuse.ctxs r L1.get),
+    global := Thunk.mk fun _ => Global.analyze r Ls.get }
+
+def Shared.of (r : Run) : Shared := Shared.ofLedgers r (Thunk.mk fun _ => r.ledgersPar)
+
+/-- P0-1's decision from the shared analyses (`Bounds.holdsPar`). -/
+def Shared.bounds (sh : Shared) (r : Run) : Bool := (r.elided || sh.eventsOk.get) && sh.noMetaOob.get
+
+/-- P0-3's decision from the shared analyses (`Coverage.decide_holds`). -/
+def Shared.coverage (sh : Shared) (r : Run) : Bool := r.elided || sh.covOk.get
+
+/-- P0-5's decision from the shared analyses (`MaskElision.decide_holds`). -/
+def Shared.maskElision (sh : Shared) (r : Run) : Bool := !r.elided || (sh.eventsOk.get && sh.covOk.get)
+
+/-- `s.holdsB r` from the shared analyses `sh = Shared.of r` (`holdsWith_of`). -/
+def SpecId.holdsWith (s : SpecId) (r : Run) (sh : Shared) : Bool :=
+  if s matches .bounds then r.complete && sh.bounds r
+  else if s matches .tripCount then r.complete && decide (TripCount.HoldsWith sh.ledgers.get)
+  else if s matches .coverage then r.complete && sh.coverage r
+  else if s matches .barrier then r.complete && decide (Barrier.HoldsWith sh.ledgers.get)
+  else if s matches .maskElision then r.complete && sh.maskElision r
+  else if s matches .namedBarriers then r.complete && sh.named.get.ok
+  else if s matches .tmemReuse then r.complete && TmemReuse.holdsB (TmemReuse.cols r) sh.tmem.get
+  else if s matches .storeReuse then r.complete && StoreReuse.holdsOnB sh.store.get
+  else r.complete && sh.global.get.ok
+
+theorem NamedBarriers.decide_holds (r : Run) :
+    decide (NamedBarriers.Holds r) = (NamedBarriers.analyze r).ok := by
+  rw [Bool.eq_iff_iff, decide_eq_true_iff]; rfl
+
+theorem holdsWith_of (s : SpecId) (r : Run) : s.holdsWith r (Shared.of r) = s.holdsB r := by
+  have hb : (Shared.of r).bounds r = decide (Bounds.Holds r) := by
+    rw [← Bounds.holdsPar_eq]; rfl
+  have hc : (Shared.of r).coverage r = decide (Coverage.Holds r) := by
+    rw [Coverage.decide_holds, ← Coverage.okB_eq]; rfl
+  have hm : (Shared.of r).maskElision r = decide (MaskElision.Holds r) := by
+    rw [MaskElision.decide_holds, ← Coverage.okB_eq, ← Bounds.eventsOkPar_eq]; rfl
+  have ht : TmemReuse.holdsB (TmemReuse.cols r) (Shared.of r).tmem.get = decide (TmemReuse.Holds r) := by
+    show TmemReuse.holdsB (TmemReuse.cols r)
+      (TmemReuse.withPairs (TmemReuse.cols r) (TmemReuse.p1Ctas r r.ledgersP1Par)) = _
+    rw [Run.ledgersP1Par_eq]; exact TmemReuse.holdsB_eq _ _
+  have hs : StoreReuse.holdsOnB (Shared.of r).store.get = decide (StoreReuse.Holds r) := by
+    show StoreReuse.holdsOnB (StoreReuse.withPairs (StoreReuse.ctxs r r.ledgersP1Par)) = _
+    rw [Run.ledgersP1Par_eq]; exact StoreReuse.holdsOnB_eq _
+  have hl : (Shared.of r).ledgers.get = r.ledgers := Run.ledgersPar_eq r
+  have hn : (Shared.of r).named.get = NamedBarriers.analyze r := rfl
+  have hg : (Shared.of r).global.get = Global.analyze r r.ledgers := by
+    show Global.analyze r r.ledgersPar = _
+    rw [Run.ledgersPar_eq]
+  cases s <;> cases h : r.complete <;>
+    simp [SpecId.holdsWith, SpecId.holdsB, h, hb, hc, hm, ht, hs, hl, hn, hg, TripCount.Holds,
+      Barrier.Holds, NamedBarriers.decide_holds, Global.Holds]
+
+theorem decide_holds (s : SpecId) (r : Run) : decide (s.Holds r) = s.holdsB r := by
+  have e : s.Holds r ↔ s.holdsB r = true := by cases s <;> simp [SpecId.holdsB, SpecId.Holds]
+  rw [Bool.eq_iff_iff, decide_eq_true_iff]
+  exact e
+
 structure SpecResult where
   spec : SpecId
   holds : Bool
@@ -148,9 +242,21 @@ def Run.certainPart (r : Run) : Run :=
         { c with roles := c.roles.map fun t => { t with events := #[], stopped := true } }
       else c }
 
-/-- Verdict, counterexamples and notes of spec `s` on run `r` with its barrier ledgers
-`Ls = r.ledgers` (computed once for P0-2 and P0-4); the same decision as `s.Holds r`. -/
-def SpecId.result (s : SpecId) (r : Run) (Ls : Ledgers) : SpecResult :=
+/-- Without a trace stopped at an `assume`, `r.certainPart` is `r` (the report then takes
+P0-3's and P0-5's lines from the shared ledgers, `SpecId.resultWith`). -/
+theorem Run.certainPart_eq_self (r : Run) (h : r.assumeStopped = false) : r.certainPart = r := by
+  have hbad : (r.ctas.filter (·.roles.any (·.assumeStop))) = #[] := by
+    simp only [Run.assumeStopped, Array.any_eq_false] at h
+    apply Array.filter_eq_empty_iff.mpr
+    intro a ha
+    obtain ⟨i, hi, rfl⟩ := Array.getElem_of_mem ha
+    exact h i hi
+  unfold Run.certainPart
+  simp [hbad]
+
+/-- Verdict, counterexamples and notes of spec `s` on run `r` from the shared analyses `sh`
+(`Shared.of r`); the same decision as `s.Holds r`. -/
+def SpecId.resultWith (s : SpecId) (r : Run) (sh : Shared) : SpecResult :=
   let un := undecided r
   -- `un` and `undec` (P0-2, P0-4: clusters whose ledger did not converge; P0-4: slots whose
   -- landers' bytes balance only if a landing completes a later phase than its issue order
@@ -160,28 +266,50 @@ def SpecId.result (s : SpecId) (r : Run) (Ls : Ledgers) : SpecResult :=
   match s with
   | .bounds =>
     let own := Bounds.issues r.certainPart
-    { spec := s, holds := r.complete && decide (Bounds.Holds r),
+    { spec := s, holds := r.complete && sh.bounds r,
       issues := (if r.assumeStopped || r.hangs then un else #[]) ++ own, notes := Bounds.notes r,
       certain := !own.isEmpty }
-  | .tripCount => p0 (r.complete && decide (TripCount.HoldsWith Ls)) (TripCount.issues r.host Ls) (TripCount.notes r.host Ls) (unconverged r.host Ls)
-  | .coverage => p0 (r.complete && decide (Coverage.Holds r)) (Coverage.issues r.certainPart) (Coverage.notes r)
-  | .barrier => p0 (r.complete && decide (Barrier.HoldsWith Ls)) (Barrier.issues r.host Ls) (Barrier.notes r.host Ls)
+  | .tripCount =>
+    let Ls := sh.ledgers.get
+    p0 (r.complete && decide (TripCount.HoldsWith Ls)) (TripCount.issues r.host Ls) (TripCount.notes r.host Ls) (unconverged r.host Ls)
+  | .coverage =>
+    -- `Coverage.issues r.certainPart` and `Coverage.notes r` from the shared targets and
+    -- ledgers: `r.certainPart` is `r` unless a trace stopped at an `assume`
+    -- (`Run.certainPart_eq_self`); then its ledgers differ and are computed apart
+    let issues := if r.elided then #[]
+      else if r.assumeStopped then Coverage.okIssues r.certainPart
+      else Coverage.okIssuesWith sh.covTargets.get sh.covLedgers.get r
+    let notes := if r.elided then #[] else Coverage.okNotesWith sh.covTargets.get r
+    p0 (r.complete && sh.coverage r) issues notes
+  | .barrier =>
+    let Ls := sh.ledgers.get
+    p0 (r.complete && decide (Barrier.HoldsWith Ls)) (Barrier.issues r.host Ls) (Barrier.notes r.host Ls)
       (unconverged r.host Ls ++ Barrier.undecided r.host Ls)
-  | .maskElision => p0 (r.complete && decide (MaskElision.Holds r)) (MaskElision.issues r.certainPart)
-      (MaskElision.notes r)
+  | .maskElision =>
+    -- `MaskElision.issues r.certainPart` and `MaskElision.notes r` from the shared targets and
+    -- ledgers, as for P0-3
+    let issues := if !r.elided then #[]
+      else if r.assumeStopped then MaskElision.issues r.certainPart
+      else Bounds.eventsIssues r ++ Coverage.okIssuesWith sh.covTargets.get sh.covLedgers.get r
+    let notes := if !r.elided then #[] else Bounds.eventsNotes r ++ Coverage.okNotesWith sh.covTargets.get r
+    p0 (r.complete && sh.maskElision r) issues notes
   | .namedBarriers =>
-    let o := NamedBarriers.analyze r
+    let o := sh.named.get
     { spec := s, holds := r.complete && o.ok, issues := un ++ o.certain ++ o.undecided,
       notes := #[], certain := !o.certain.isEmpty }
   | .tmemReuse =>
-    let o := TmemReuse.analyze r r.ledgersP1
+    let o := TmemReuse.analyze.analyzeWith r sh.tmem.get
     { spec := s, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }
   | .storeReuse =>
-    let o := StoreReuse.analyze r r.ledgersP1
+    let o := StoreReuse.analyze.analyzeWith r sh.store.get
     { spec := s, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }
   | .gwait =>
-    let o := Global.analyze r Ls
+    let o := sh.global.get
     { spec := s, holds := r.complete && o.ok, issues := o.issues, notes := #[], certain := o.certain }
+
+/-- `s.resultWith` with the barrier ledgers `Ls = r.ledgers`. -/
+def SpecId.result (s : SpecId) (r : Run) (Ls : Ledgers) : SpecResult :=
+  s.resultWith r (Shared.ofLedgers r (Thunk.pure Ls))
 
 structure Report where
   kernel : String
@@ -194,17 +322,19 @@ structure Report where
 def clusterStr (h : Host) : String := if h.csize ≤ 1 then "" else s!" in clusters {pidStr h.cluster}"
 
 /-- The report of kernel `k` on input `i` from its evaluation `x` (`eval k i`; `checkAll` shares
-one evaluation between the report and the theorems, Command.lean). -/
+one evaluation and its analyses between the report and the theorems, Command.lean). -/
 def reportOf (k : Kernel) (i : Input) (x : Except EvalError Run) : Report :=
   match x with
   | .error e =>
     { kernel := k.kernel, input := i, error := some e, summary := "",
       results := (specsOf k).map fun s =>
         { spec := s, holds := false, issues := #[], notes := #[], certain := e.kind == .kernel } }
-  | .ok r =>
+  | .ok r => reportRun k i r (Shared.of r)
+where
+  /-- The report of a run from the shared analyses `sh` (`Shared.of r`). -/
+  reportRun (k : Kernel) (i : Input) (r : Run) (sh : Shared) : Report :=
     let events := r.ctas.foldl (fun n c => c.roles.foldl (fun n t => n + t.events.size) n) 0
     let stops := r.stops
-    let Ls := r.ledgers
     { kernel := k.kernel, input := i, error := none,
       summary := s!"grid {pidStr r.host.grid}{clusterStr r.host}: {r.ctas.size} CTA(s) x {k.roles.length} role(s), {events} events" ++
         (if stops.isEmpty then ""
@@ -214,7 +344,7 @@ def reportOf (k : Kernel) (i : Input) (x : Except EvalError Run) : Report :=
          | [] => ""
          | fs => s!"; elision flag(s) {", ".intercalate fs} set: the P0-1 and P0-3 checks of this input are reported under P0-5") ++
         (if r.host.hasSync then s!"; global sync: {Global.summary r}" else ""),
-      results := (specsOf k).map (·.result r Ls) }
+      results := (specsOf k).map (·.resultWith r sh) }
 
 def runCase (k : Kernel) (i : Input) : Report := reportOf k i (eval k i)
 
@@ -224,32 +354,39 @@ def Kernel.p1Specs (k : Kernel) : List SpecId :=
   if k.p1.isEmpty then (if k.tmem.isSome then [.tmemReuse] else [])
   else SpecId.p1.filter fun s => k.p1.contains s.label
 
+/-- The specs `checkAll` decides for a KIR of kind `kind` (0 P0, 1 P1, 2 P0-6; KV/Profile.lean,
+KV/SelfCheck.lean). -/
+def Kernel.specsOf (k : Kernel) (kind : Nat) : List SpecId :=
+  if kind = 1 then k.p1Specs else if kind = 2 then SpecId.nb else KV.specsOf k
+
 /-- P1 specs of a P1 KIR (references/specs.md, "P1-1", "P1-2") on input `i` from its
 evaluation `x`: the P1 summary line (P1-1: accesses, conflicting pairs, named barriers,
 blocked waits; P1-2: bulk stores, writes, unordered pairs), then each P1 spec's verdict,
 counterexamples and notes. -/
 def reportP1Of (k : Kernel) (i : Input) (x : Except EvalError Run) : Report :=
-  let specs := k.p1Specs
   match x with
   | .error e =>
     { kernel := k.kernel, input := i, error := some e, summary := "",
-      results := specs.map fun s =>
+      results := k.p1Specs.map fun s =>
         { spec := s, holds := false, issues := #[], notes := #[], certain := e.kind == .kernel } }
-  | .ok r => Id.run do
+  | .ok r => reportRun k i r (Shared.of r)
+where
+  /-- The P1 report of a run from the shared analyses `sh` (`Shared.of r`). -/
+  reportRun (k : Kernel) (i : Input) (r : Run) (sh : Shared) : Report := Id.run do
+    let specs := k.p1Specs
     let events : Nat := r.ctas.foldl (fun n c => c.roles.foldl (fun n t => n + t.events.size) n) 0
     let stops := r.stops
-    let Ls := r.ledgersP1
     let mut summary := s!"grid {pidStr r.host.grid}{clusterStr r.host}: {r.ctas.size} CTA(s) x {k.roles.length} role(s), {events} events; P1: "
     let mut res : List SpecResult := []
     let mut stats : List String := []
     if specs.contains .tmemReuse then
-      let o := TmemReuse.analyze r Ls
+      let o := TmemReuse.analyze.analyzeWith r sh.tmem.get
       res := res ++ [{ spec := .tmemReuse, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }]
       stats := stats ++ [s!"{o.accesses} TMEM accesses, {o.pairs} conflicting pair(s) classified ({o.lockOnly} ordered only under the lockstep contents), {o.named} named-barrier slot(s)" ++
         (if o.inconsistent.isEmpty then "" else s!" (inconsistent: ids {o.inconsistent.toList})") ++
         s!", {o.blocked} blocked wait(s)"]
     if specs.contains .storeReuse then
-      let o := StoreReuse.analyze r Ls
+      let o := StoreReuse.analyze.analyzeWith r sh.store.get
       res := res ++ [{ spec := .storeReuse, holds := r.complete && o.ok, issues := o.issues, notes := o.notes, certain := o.certain }]
       stats := stats ++ [s!"P1-2: {o.stores} bulk store(s), {o.writes} write(s), {o.pairs} unordered conflicting pair(s) ({o.undecided} undecided), {o.named} named-barrier slot(s)" ++
         (if o.inconsistent.isEmpty then "" else s!" (inconsistent: ids {o.inconsistent.toList})") ++
@@ -267,13 +404,16 @@ def reportNbOf (k : Kernel) (i : Input) (x : Except EvalError Run) : Report :=
     { kernel := k.kernel, input := i, error := some e, summary := "",
       results := SpecId.nb.map fun s =>
         { spec := s, holds := false, issues := #[], notes := #[], certain := e.kind == .kernel } }
-  | .ok r =>
+  | .ok r => reportRun k i r (Shared.of r)
+where
+  /-- The P0-6 report of a run from the shared analyses `sh` (`Shared.of r`). -/
+  reportRun (k : Kernel) (i : Input) (r : Run) (sh : Shared) : Report :=
     let (ops, opens, reps) := NamedBarriers.counts r
     let held := NamedBarriers.heldArrivals r
     let heldStr := if held == 0 then "" else s!", {held} arrival(s) held under the warp-ahead reading"
     { kernel := k.kernel, input := i, error := none,
       summary := s!"grid {pidStr r.host.grid}{clusterStr r.host}: {r.ctas.size} CTA(s) x {k.roles.length} role(s); P0-6: {ops} named barrier operation(s), {opens} not counted (nb_open), {reps} repeated region(s) reached{heldStr}",
-      results := SpecId.nb.map (·.result r #[]) }
+      results := SpecId.nb.map (·.resultWith r sh) }
 
 def runNb (k : Kernel) (i : Input) : Report := reportNbOf k i (eval k i)
 

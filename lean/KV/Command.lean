@@ -10,8 +10,9 @@ One evaluation per input. `#lkv_check kernel input s₁ … sₙ` (frontend/emit
 input) evaluates `kernel` on `input` once and decides every spec `sᵢ` from that evaluation:
 
 1. it compiles and runs `checkAll [s₁, …, sₙ] 0 kernel input` (one `eval`, then the report and
-   the decision `decide (Holds sᵢ kernel input)` of every spec from the same run) and prints the
-   report (`Report.render`, as `#eval KV.runCase` prints it);
+   the decision `decide (Holds sᵢ kernel input)` of every spec from the same run, computing the
+   analyses they share, e.g. the run's barrier ledgers, once for all of them: `Shared`,
+   `checkAll_snd`) and prints the report (`Report.render`, as `#eval KV.runCase` prints it);
 2. it adds the axiom `(checkAll [s₁, …, sₙ] 0 kernel input).2 = [b₁, …, bₙ]`, the decisions
    as the compiled evaluator computed them. This is the trust of `native_decide`, which in Lean
    4.34 evaluates its decision with `evalConst` and adds the axiom `e = true` (Lean.Meta.Native):
@@ -40,14 +41,36 @@ def verdicts (ss : List SpecId) (k : Kernel) (i : Input) : List Bool :=
   ss.map fun s => decide (Holds s k i)
 
 /-- One evaluation of `k` on `i`: the report (`kind` 0 the P0 report, 1 the P1 report, 2 the
-P0-6 report) and the decisions of `ss`, both from the same run. -/
+P0-6 report) and the decisions of `ss`, both from the same run and its shared analyses
+(`Shared`: barrier ledgers, P1 ledgers, P0-1's, P0-3's and P0-5's decisions, P0-6's and P0-7's
+analyses, the P1 pair searches). -/
 def checkAll (ss : List SpecId) (kind : Nat) (k : Kernel) (i : Input) : Report × List Bool :=
-  let x := eval k i
-  (if kind = 1 then reportP1Of k i x else if kind = 2 then reportNbOf k i x else reportOf k i x,
-   ss.map fun s => decide (RunHolds s x))
+  match eval k i with
+  | .error e =>
+    (if kind = 1 then reportP1Of k i (.error e) else if kind = 2 then reportNbOf k i (.error e)
+     else reportOf k i (.error e), ss.map fun _ => false)
+  | .ok r =>
+    let sh := Shared.of r
+    (if kind = 1 then reportP1Of.reportRun k i r sh else if kind = 2 then reportNbOf.reportRun k i r sh
+     else reportOf.reportRun k i r sh, ss.map (·.holdsWith r sh))
 
+theorem decide_runHolds (s : SpecId) (x : Except EvalError Run) :
+    decide (RunHolds s x) = (match x with | .ok r => s.holdsB r | .error _ => false) := by
+  cases x with
+  | error _ => rfl
+  | ok r => exact decide_holds s r
+
+/-- The decisions `checkAll` computes from the shared analyses are the specs' decisions
+(`holdsWith_of`). -/
 theorem checkAll_snd (ss : List SpecId) (kind : Nat) (k : Kernel) (i : Input) :
-    (checkAll ss kind k i).2 = verdicts ss k i := rfl
+    (checkAll ss kind k i).2 = verdicts ss k i := by
+  have e : verdicts ss k i = ss.map fun s => match eval k i with
+      | .ok r => s.holdsB r | .error _ => false := by
+    unfold verdicts; exact List.map_congr_left fun s _ => decide_runHolds s (eval k i)
+  rw [e]; unfold checkAll
+  cases eval k i with
+  | error _ => rfl
+  | ok r => exact List.map_congr_left fun s _ => holdsWith_of s r
 
 theorem holds_of_verdicts {ss : List SpecId} {k : Kernel} {i : Input} {bs : List Bool}
     (h : verdicts ss k i = bs) (j : Nat) (s : SpecId) (hs : ss[j]? = some s)

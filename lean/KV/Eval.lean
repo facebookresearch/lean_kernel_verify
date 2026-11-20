@@ -47,7 +47,15 @@ and returns one event trace per (CTA, role).
   the access itself is also a `gload` event, which P0-1 checks. A tensor `select`
   evaluates both operands on every lane.
 * Roles run independently; specs only use per-role order and per-CTA (per-cluster) totals,
-  so no interleaving is explored.
+  so no interleaving is explored. The CTAs are evaluated in parallel Lean tasks (`evalAll`,
+  `parMap`, whose value is `Array.map`'s); the first error in CTA order stands, as in a loop.
+  A run with sync tensors evaluates its passes one after another (`evalSyncPasses`), the CTAs of
+  each in parallel: they read only the stores and claimers of the previous pass.
+* Cost: the `BitVec` operations are KV/BV.lean's, which do not compute `2 ^ w` per operation
+  (each proved equal to the core one: `binBV_eq`, `wraps_eq`, `cmpBV_eq`, `bvInt_eq`), and the
+  lane loops of tensor expressions and masks build no per-lane state (`mapBin`, `cmpLanes`,
+  `bcastData`, `maskedVals`; tests/lean/fast_paths.lean and KV/SelfCheck.lean compare them
+  with the loops they replace, `mapBinRef`, the zips, `bcastDataRef`).
 * Clusters (`Kernel.cluster`): consecutive CTAs form a cluster, a CTA's rank in it is
   `x % cx + (y % cy) * cx + (z % cz) * cx * cy`. A barrier event names a slot of a CTA of its
   cluster by rank (`Slot.cta`); a rank outside the cluster is a kernel error (PTX: undefined),
@@ -55,6 +63,7 @@ and returns one event trace per (CTA, role).
 -/
 import Std.Data.HashMap
 import KV.IR
+import KV.BV
 
 namespace KV
 
@@ -66,7 +75,10 @@ structure Val where
   bv : BitVec w
 
 /-- Integer reading: signed for `w ≥ 2`, 0/1 for i1. -/
-def bvInt {w : Nat} (b : BitVec w) : Int := if w = 1 then b.toNat else b.toInt
+def bvInt {w : Nat} (b : BitVec w) : Int := if w = 1 then b.toNat else BV.toInt b
+
+theorem bvInt_eq {w : Nat} (b : BitVec w) : bvInt b = if w = 1 then (b.toNat : Int) else b.toInt := by
+  simp [bvInt, BV.toInt_eq]
 
 def Val.int (v : Val) : Int := bvInt v.bv
 
@@ -78,9 +90,40 @@ structure TVal where
 
 def numel (shape : List Nat) : Nat := shape.foldl (· * ·) 1
 
-/-- `o` with `BitVec` semantics; `none` on division/remainder by zero. Shift amounts are
-clamped to `w`, which leaves the `BitVec` result unchanged and keeps it cheap. -/
-def binBV {w : Nat} (o : BinOp) (a b : BitVec w) : Option (BitVec w) :=
+/-- `xs.map f` with the elements computed in parallel tasks (`parMap_eq`): independent CTAs,
+cluster ledgers, the CTAs of P0-1's decision and issue lists. `Task.spawn fn` is `⟨fn ()⟩`, so
+the value is the map's; lean's `-j` bounds the threads (scripts/run_lean_check.sh). -/
+def parMap {α β : Type} (f : α → β) (xs : Array α) : Array β :=
+  (xs.map fun x => Task.spawn fun _ => f x).map Task.get
+
+theorem parMap_eq {α β : Type} (f : α → β) (xs : Array α) : parMap f xs = xs.map f := by
+  simp only [parMap, Array.map_map]
+  rfl
+
+theorem decide_forall_mem {α : Type} (xs : Array α) (P : α → Prop) [DecidablePred P] :
+    decide (∀ x ∈ xs, P x) = (xs.map fun x => decide (P x)).all id := by
+  rw [Array.all_map, Bool.eq_iff_iff, Array.all_eq_true']
+  simp
+
+theorem foldl_append_list {β γ : Type} (xs : List β) (F : β → Array γ) (acc : Array γ) :
+    xs.foldl (fun acc x => acc ++ F x) acc = acc ++ xs.foldl (fun acc x => acc ++ F x) #[] := by
+  induction xs generalizing acc with
+  | nil => simp
+  | cons x rest ih =>
+    simp only [List.foldl_cons]
+    rw [ih (acc ++ F x), ih (#[] ++ F x)]
+    simp [Array.append_assoc]
+
+/-- An appending fold from `acc` is `acc` followed by the fold from empty. -/
+theorem foldl_append {β γ : Type} (xs : Array β) (F : β → Array γ) (acc : Array γ) :
+    xs.foldl (fun acc x => acc ++ F x) acc = acc ++ xs.foldl (fun acc x => acc ++ F x) #[] := by
+  rw [← Array.foldl_toList, ← Array.foldl_toList]
+  exact foldl_append_list xs.toList F acc
+
+/-- `o` with `BitVec` semantics (the core operations: `binBVRef`); `none` on division/remainder
+by zero. Shift amounts are clamped to `w`, which leaves the `BitVec` result unchanged and keeps
+it cheap. -/
+def binBVRef {w : Nat} (o : BinOp) (a b : BitVec w) : Option (BitVec w) :=
   let sh := min b.toNat w
   match o with
   | .add => some (a + b)
@@ -101,9 +144,36 @@ def binBV {w : Nat} (o : BinOp) (a b : BitVec w) : Option (BitVec w) :=
   | .umin => some (if a.ult b then a else b)
   | .umax => some (if a.ult b then b else a)
 
+/-- `binBVRef` without computing `2 ^ w` per operation (KV/BV.lean; `binBV_eq`). Inlined: the
+evaluator's loops then build no `Option` per lane. -/
+@[inline] def binBV {w : Nat} (o : BinOp) (a b : BitVec w) : Option (BitVec w) :=
+  let sh := min b.toNat w
+  match o with
+  | .add => some (BV.add a b)
+  | .sub => some (BV.sub a b)
+  | .mul => some (BV.mul a b)
+  | .sdiv => if b = 0 then none else some (a.sdiv b)
+  | .udiv => if b = 0 then none else some (a / b)
+  | .srem => if b = 0 then none else some (a.srem b)
+  | .urem => if b = 0 then none else some (a % b)
+  | .shl => some (BV.shl a sh)
+  | .ashr => some (BV.sshiftRight a sh)
+  | .lshr => some (a >>> sh)
+  | .and => some (a &&& b)
+  | .or => some (a ||| b)
+  | .xor => some (a ^^^ b)
+  | .smin => some (if BV.slt a b then a else b)
+  | .smax => some (if BV.slt a b then b else a)
+  | .umin => some (if a.ult b then a else b)
+  | .umax => some (if a.ult b then b else a)
+
+theorem binBV_eq {w : Nat} (o : BinOp) (a b : BitVec w) : binBV o a b = binBVRef o a b := by
+  cases o <;> simp [binBV, binBVRef, BV.add_eq, BV.sub_eq, BV.mul_eq, BV.shl_eq,
+    BV.sshiftRight_eq, BV.slt_eq]
+
 /-- Signed wrap: the `w`-bit result `r` of add/sub/mul/shl differs from the integer result
 (a shift by `w` or more bits wraps unless `a = 0`). -/
-def wraps {w : Nat} (o : BinOp) (a b r : BitVec w) : Bool :=
+def wrapsRef {w : Nat} (o : BinOp) (a b r : BitVec w) : Bool :=
   match o with
   -- add / sub by the sign rule (the same test as `r.toInt != a.toInt ± b.toInt`, without the
   -- big integers 2^w that dominated the evaluation of address vectors)
@@ -113,21 +183,40 @@ def wraps {w : Nat} (o : BinOp) (a b r : BitVec w) : Bool :=
   | .shl => r.toInt != a.toInt * 2 ^ min b.toNat w
   | _ => false
 
+/-- `wrapsRef` without computing `2 ^ w` (KV/BV.lean; `wraps_eq`). -/
+@[inline] def wraps {w : Nat} (o : BinOp) (a b r : BitVec w) : Bool :=
+  match o with
+  | .add => BV.msb a == BV.msb b && BV.msb r != BV.msb a
+  | .sub => BV.msb a != BV.msb b && BV.msb r != BV.msb a
+  | .mul => BV.toInt r != BV.toInt a * BV.toInt b
+  | .shl => BV.toInt r != BV.toInt a * 2 ^ min b.toNat w
+  | _ => false
+
+theorem wraps_eq {w : Nat} (o : BinOp) (a b r : BitVec w) : wraps o a b r = wrapsRef o a b r := by
+  cases o <;> simp [wraps, wrapsRef, BV.msb_eq, BV.toInt_eq]
+
 /-- Lossy truncation: the `w`-bit value `r = trunc a` reads as a different integer. -/
 def truncLoses {v w : Nat} (a : BitVec v) (r : BitVec w) : Bool := bvInt r != bvInt a
 
-def cmpBV {w : Nat} (o : CmpOp) (a b : BitVec w) : Bool :=
+/-- `o` on `BitVec`s (signed comparisons through `BV.toInt`: `cmpBV_eq`). -/
+@[inline] def cmpBV {w : Nat} (o : CmpOp) (a b : BitVec w) : Bool :=
   match o with
   | .eq => a == b
   | .ne => a != b
-  | .slt => a.slt b
-  | .sle => a.sle b
-  | .sgt => b.slt a
-  | .sge => b.sle a
+  | .slt => BV.slt a b
+  | .sle => BV.sle a b
+  | .sgt => BV.slt b a
+  | .sge => BV.sle b a
   | .ult => a.ult b
   | .ule => a.ule b
   | .ugt => b.ult a
   | .uge => b.ule a
+
+theorem cmpBV_eq {w : Nat} (o : CmpOp) (a b : BitVec w) : cmpBV o a b =
+    match o with
+    | .eq => a == b | .ne => a != b | .slt => a.slt b | .sle => a.sle b | .sgt => b.slt a
+    | .sge => b.sle a | .ult => a.ult b | .ule => a.ule b | .ugt => b.ult a | .uge => b.ule a := by
+  cases o <;> simp [cmpBV, BV.slt_eq, BV.sle_eq]
 
 def ofBool (c : Bool) : BitVec 1 := if c then 1 else 0
 
@@ -214,7 +303,7 @@ structure Slot where
   bar : Nat
   idx : Nat
   cta : Nat := 0
-  deriving Inhabited
+  deriving Inhabited, BEq
 
 /-- A slot as a map key: (barrier array, index, rank of its CTA). -/
 def Slot.key (s : Slot) : Nat × Nat × Nat := (s.bar, s.idx, s.cta)
@@ -299,6 +388,7 @@ inductive Ev where
   | gsig (w : Word) (v : Int)
   | gwait (w : Word) (tag : Int)
   | gclaim (w : Word) (add : Int)
+  deriving BEq
 
 structure TEvent where
   ev : Ev
@@ -423,6 +513,12 @@ structure Ctx where
   device : Bool
   /-- Linear index of the CTA (x fastest). -/
   cta : Nat := 0
+  /-- Count expression nodes and statement executions (KV/Profile.lean); no verdict reads them. -/
+  prof : Bool := false
+  /-- Evaluate the lane loops of tensor expressions and masks with the reference loops their
+  fast versions replace (`mapBinRef`, the zipped comparison, `bcastDataRef`, the zipped filter):
+  KV/SelfCheck.lean compares the two runs; no verdict uses this. -/
+  ref : Bool := false
 
 /-- The handoff records of a CTA (KIR change 17): (channel, slot key, k) -> the channel's
 value at its putter role's k-th `arrive` on the slot (counting from 0). -/
@@ -451,6 +547,9 @@ structure St where
   /-- Variables of `rget`s of slots no role wrote, or of takes whose store is data: reading one
   is a model limit, with its message. -/
   poison : Std.HashMap String String := {}
+  /-- Under `Ctx.prof`: expression nodes evaluated, and per statement loc (executions, nodes). -/
+  evals : Nat := 0
+  profLoc : Std.HashMap String (Nat × Nat) := {}
 
 abbrev M := ReaderT Ctx (EStateM EvalError St)
 
@@ -460,6 +559,10 @@ def blockedKey (chan : String) : String × Int × Nat := (chan, -1, 1048576)
 
 /-- The poison of a relay value its blocked putter never writes. -/
 def blockedPrefix : String := "relay (blocked putter) "
+
+/-- Under `Ctx.prof`: one more expression node. -/
+@[inline] def tick : M Unit := do
+  if (← read).prof then modify fun s => { s with evals := s.evals + 1 }
 
 def throwAt {α : Type} (loc : Loc) (msg : String) : M α :=
   throw { msg, loc, context := "" }
@@ -521,8 +624,9 @@ def wordOf (loc : Loc) (name : String) (off : Int) : M Word := do
 
 mutual
 def evalExpr (loc : Loc) : Expr → M Val
-  | .const v w => pure ⟨w, BitVec.ofInt w v⟩
+  | .const v w => do tick; pure ⟨w, BV.ofInt w v⟩
   | .var x w => do
+    tick
     let st ← get
     match st.env[x]? with
     | some v => if v.w = w then pure v else throwAt loc s!"variable {x} is i{v.w}, used as i{w}"
@@ -535,14 +639,17 @@ def evalExpr (loc : Loc) : Expr → M Val
         throwK loc .limit why
       | none => throwAt loc s!"unbound variable {x}"
   | .pid a w => do
+    tick
     let c ← read
     unless c.device do throwAt loc "pid in a host-side expression"
-    pure ⟨w, BitVec.ofNat w (axisOf c.pid a)⟩
+    pure ⟨w, BV.ofNat w (axisOf c.pid a)⟩
   | .nprog a w => do
+    tick
     let c ← read
     unless c.device do throwAt loc "nprog in a host-side expression"
-    pure ⟨w, BitVec.ofNat w (axisOf c.host.grid a)⟩
+    pure ⟨w, BV.ofNat w (axisOf c.host.grid a)⟩
   | .bin o a b w addr => do
+    tick
     let x ← asW loc (← evalExpr loc a) w
     let y ← asW loc (← evalExpr loc b) w
     match binBV o x y with
@@ -551,27 +658,32 @@ def evalExpr (loc : Loc) : Expr → M Val
       if addr && wraps o x y r then emit loc (.overflow s!"{o.name}({x.toInt}, {y.toInt})" r.toInt w)
       pure ⟨w, r⟩
   | .cmp o a b w => do
+    tick
     unless w = 1 do throwAt loc "cmp result must be i1"
     let x ← evalExpr loc a
     let y ← asW loc (← evalExpr loc b) x.w
     pure ⟨1, ofBool (cmpBV o x.bv y)⟩
   | .select c a b w => do
+    tick
     -- only the chosen operand runs (a masked scalar load reads nothing where its mask is false)
     let x ← if (← asW loc (← evalExpr loc c) 1) = 1 then evalExpr loc a else evalExpr loc b
     pure ⟨w, ← asW loc x w⟩
   | .ext signed a w => do
+    tick
     let x ← evalExpr loc a
     unless x.w < w do throwAt loc s!"ext from i{x.w} to i{w}"
-    pure ⟨w, if signed then x.bv.signExtend w else x.bv.setWidth w⟩
+    pure ⟨w, if signed then BV.signExtend w x.bv else x.bv.setWidth w⟩
   | .trunc a w addr => do
+    tick
     let x ← evalExpr loc a
     unless w < x.w do throwAt loc s!"trunc from i{x.w} to i{w}"
-    let r := x.bv.setWidth w
+    let r := BV.trunc w x.bv
     if addr && truncLoses x.bv r then emit loc (.overflow s!"trunc({x.int})" (bvInt r) w)
     pure ⟨w, r⟩
   | .load t index w => do
+    tick
     let is ← evalExprs loc index
-    pure ⟨w, BitVec.ofInt w (← loadMeta loc t (is.map Val.int))⟩
+    pure ⟨w, BV.ofInt w (← loadMeta loc t (is.map Val.int))⟩
 
 def evalExprs (loc : Loc) : List Expr → M (List Val)
   | [] => pure []
@@ -583,7 +695,7 @@ def evalInt (loc : Loc) (e : Expr) : M Int := return (← evalExpr loc e).int
 def evalCond (loc : Loc) (e : Expr) : M Bool := return (← asW loc (← evalExpr loc e) 1) = 1
 
 /-- Elementwise `o`; also returns operands and result of the first lane that wraps (if `addr`). -/
-def mapBin {w : Nat} (o : BinOp) (addr : Bool) (xs ys : Array (BitVec w)) :
+def mapBinRef {w : Nat} (o : BinOp) (addr : Bool) (xs ys : Array (BitVec w)) :
     Option (Array (BitVec w) × Option (BitVec w × BitVec w × BitVec w)) := Id.run do
   let mut out := Array.emptyWithCapacity xs.size
   let mut wrap := none
@@ -597,8 +709,81 @@ def mapBin {w : Nat} (o : BinOp) (addr : Bool) (xs ys : Array (BitVec w)) :
       out := out.push r
   return some (out, wrap)
 
+/-- `o` cannot fail (no division or remainder). -/
+def BinOp.total : BinOp → Bool
+  | .sdiv | .udiv | .srem | .urem => false
+  | _ => true
+
+/-- `o` can wrap (`wraps` is false for the others). -/
+def BinOp.mayWrap : BinOp → Bool
+  | .add | .sub | .mul | .shl => true
+  | _ => false
+
+/-- `binBV o a b` for an operation that cannot fail (`BinOp.total`). -/
+@[inline] def binTotal {w : Nat} (o : BinOp) (a b : BitVec w) : BitVec w :=
+  match binBV o a b with
+  | some r => r
+  | none => a
+
+/-- Lane-wise `binTotal o` (a loop that builds no state per lane). -/
+def mapTotal {w : Nat} (o : BinOp) (xs ys : Array (BitVec w)) : Array (BitVec w) :=
+  go 0 (Array.emptyWithCapacity xs.size)
+where
+  go (i : Nat) (acc : Array (BitVec w)) : Array (BitVec w) :=
+    if h : i < xs.size then go (i + 1) (acc.push (binTotal o xs[i] ys[i]!)) else acc
+  termination_by xs.size - i
+
+/-- Operands and result of the first lane `i` with `wraps o xs[i] ys[i] out[i]`. -/
+def firstWrap {w : Nat} (o : BinOp) (xs ys out : Array (BitVec w)) : Option (BitVec w × BitVec w × BitVec w) :=
+  go 0
+where
+  go (i : Nat) : Option (BitVec w × BitVec w × BitVec w) :=
+    if h : i < xs.size then
+      let x := xs[i]
+      let y := ys[i]!
+      let r := out[i]!
+      if wraps o x y r then some (x, y, r) else go (i + 1)
+    else none
+  termination_by xs.size - i
+
+/-- `mapBinRef` (lane-wise `binBV`, the first wrapping lane if `addr`) without per-lane state
+for the operations that cannot fail (tests/lean/fast_paths.lean). -/
+def mapBin {w : Nat} (o : BinOp) (addr : Bool) (xs ys : Array (BitVec w)) :
+    Option (Array (BitVec w) × Option (BitVec w × BitVec w × BitVec w)) :=
+  if o.total && xs.size == ys.size then
+    let out := mapTotal o xs ys
+    some (out, if addr && o.mayWrap then firstWrap o xs ys out else none)
+  else mapBinRef o addr xs ys
+
+/-- Lane-wise `ofBool (cmpBV o ...)` (the zipped map, without per-lane state; tests/lean/fast_paths.lean). -/
+def cmpLanes {w : Nat} (o : CmpOp) (xs ys : Array (BitVec w)) : Array (BitVec 1) :=
+  go 0 (Array.emptyWithCapacity xs.size)
+where
+  go (i : Nat) (acc : Array (BitVec 1)) : Array (BitVec 1) :=
+    if h : i < xs.size then go (i + 1) (acc.push (ofBool (cmpBV o xs[i] ys[i]!))) else acc
+  termination_by xs.size - i
+
+/-- Lane `i`: `x[i]` where `cs[i] = 1`, else `y[i]` (`select3_eq`: the zipped map). -/
+def select3 {w : Nat} (cs : Array (BitVec 1)) (x y : Array (BitVec w)) : Array (BitVec w) :=
+  Array.zipWith (fun k (pq : BitVec w × BitVec w) => if k = 1 then pq.1 else pq.2) cs
+    (Array.zipWith (fun p q => (p, q)) x y)
+
+theorem select3_eq {w : Nat} (cs : Array (BitVec 1)) (x y : Array (BitVec w)) :
+    select3 cs x y = (cs.zip (x.zip y)).map fun (k, p, q) => if k = 1 then p else q := by
+  apply Array.ext
+  · simp [select3]
+  · intro i h1 h2
+    simp [select3, Array.getElem_zip]
+
+theorem cmp_zipWith_eq {w : Nat} (o : CmpOp) (x y : Array (BitVec w)) :
+    Array.zipWith (fun p q => ofBool (cmpBV o p q)) x y = (x.zip y).map fun (p, q) => ofBool (cmpBV o p q) := by
+  apply Array.ext
+  · simp
+  · intro i h1 h2
+    simp [Array.getElem_zip]
+
 /-- Broadcast `xs` (extent 1 along `axis`) to `shape`. -/
-def bcastData {α : Type} [Inhabited α] (xs : Array α) (axis : Nat) (shape : List Nat) : Array α :=
+def bcastDataRef {α : Type} [Inhabited α] (xs : Array α) (axis : Nat) (shape : List Nat) : Array α :=
   let outer := numel (shape.take axis)
   let n := shape.getD axis 1
   let inner := numel (shape.drop (axis + 1))
@@ -610,9 +795,20 @@ def bcastData {α : Type} [Inhabited α] (xs : Array α) (axis : Nat) (shape : L
           out := out.push xs[o * inner + i]!
     return out
 
+/-- `bcastDataRef`: element `j` of the result is `xs[(j / (n * inner)) * inner + j % inner]` (a
+loop that builds no state per element; tests/lean/fast_paths.lean). -/
+def bcastData {α : Type} [Inhabited α] (xs : Array α) (axis : Nat) (shape : List Nat) : Array α :=
+  let n := shape.getD axis 1
+  let inner := numel (shape.drop (axis + 1))
+  let total := numel (shape.take axis) * n * inner
+  let rec go (j : Nat) (acc : Array α) : Array α :=
+    if j < total then go (j + 1) (acc.push xs[(j / (n * inner)) * inner + j % inner]!) else acc
+  termination_by total - j
+  go 0 (Array.emptyWithCapacity total)
+
 def evalTExpr (loc : Loc) : TExpr → M TVal
   | .range s e shape w =>
-    pure ⟨w, shape, (Array.range (e - s).toNat).map fun i => BitVec.ofInt w (s + Int.ofNat i)⟩
+    pure ⟨w, shape, (Array.range (e - s).toNat).map fun i => BV.ofInt w (s + Int.ofNat i)⟩
   | .splat a shape w => do
     let b ← asW loc (← evalExpr loc a) w
     pure ⟨w, shape, Array.replicate (numel shape) b⟩
@@ -621,7 +817,7 @@ def evalTExpr (loc : Loc) : TExpr → M TVal
     let d ← dataW loc x w
     unless x.shape.getD axis 0 = 1 && x.shape.length = shape.length do
       throwAt loc s!"bcast of shape {x.shape} along axis {axis} to {shape}"
-    pure ⟨w, shape, bcastData d axis shape⟩
+    pure ⟨w, shape, if (← read).ref then bcastDataRef d axis shape else bcastData d axis shape⟩
   | .expand a _ shape w => do
     let x ← evalTExpr loc a
     let d ← dataW loc x w
@@ -631,7 +827,7 @@ def evalTExpr (loc : Loc) : TExpr → M TVal
     let x ← dataW loc (← evalTExpr loc a) w
     let y ← dataW loc (← evalTExpr loc b) w
     unless x.size = numel shape && y.size = numel shape do throwAt loc s!"bin operand shapes differ from {shape}"
-    match mapBin o addr x y with
+    match (if (← read).ref then mapBinRef o addr x y else mapBin o addr x y) with
     | none => throwK loc .limit s!"division by zero in tensor {o.name}"
     | some (r, wrap) =>
       if let some (p, q, z) := wrap then emit loc (.overflow s!"{o.name}({p.toInt}, {q.toInt})" z.toInt w)
@@ -641,23 +837,24 @@ def evalTExpr (loc : Loc) : TExpr → M TVal
     let x ← evalTExpr loc a
     let y ← dataW loc (← evalTExpr loc b) x.w
     unless x.data.size = numel shape && y.size = numel shape do throwAt loc s!"cmp operand shapes differ from {shape}"
-    pure ⟨1, shape, (x.data.zip y).map fun (p, q) => ofBool (cmpBV o p q)⟩
+    pure ⟨1, shape, if (← read).ref then (x.data.zip y).map (fun (p, q) => ofBool (cmpBV o p q))
+      else cmpLanes o x.data y⟩
   | .select c a b shape w => do
     let cs ← dataW loc (← evalTExpr loc c) 1
     let x ← dataW loc (← evalTExpr loc a) w
     let y ← dataW loc (← evalTExpr loc b) w
     let n := numel shape
     unless cs.size = n && x.size = n && y.size = n do throwAt loc s!"select operand shapes differ from {shape}"
-    pure ⟨w, shape, (cs.zip (x.zip y)).map fun (k, p, q) => if k = 1 then p else q⟩
-  | .full v shape w => pure ⟨w, shape, Array.replicate (numel shape) (BitVec.ofInt w v)⟩
+    pure ⟨w, shape, select3 cs x y⟩
+  | .full v shape w => pure ⟨w, shape, Array.replicate (numel shape) (BV.ofInt w v)⟩
   | .ext signed a shape w => do
     let x ← evalTExpr loc a
     unless x.w < w && x.data.size = numel shape do throwAt loc s!"ext of i{x.w} {x.shape} to i{w} {shape}"
-    pure ⟨w, shape, x.data.map fun b => if signed then b.signExtend w else b.setWidth w⟩
+    pure ⟨w, shape, x.data.map fun b => if signed then BV.signExtend w b else b.setWidth w⟩
   | .trunc a shape w addr => do
     let x ← evalTExpr loc a
     unless w < x.w && x.data.size = numel shape do throwAt loc s!"trunc of i{x.w} {x.shape} to i{w} {shape}"
-    let r := x.data.map (·.setWidth w)
+    let r := x.data.map (BV.trunc w ·)
     if addr then
       if let some i := (Array.range r.size).find? fun i => truncLoses x.data[i]! r[i]! then
         emit loc (.overflow s!"trunc({bvInt x.data[i]!})" (bvInt r[i]!) w)
@@ -702,6 +899,15 @@ def ctasOf (loc : Loc) (what : String) (mask : Option Expr) : M (Array Nat) := d
       throwK loc .kernel s!"{what}: CTA mask {m} names a CTA outside the cluster of {n} CTA(s)"
     pure <| (Array.range n).filter fun r => (m.toNat >>> r) % 2 == 1
 
+/-- `(vals.zip bits).filterMap fun (v, k) => if k = 1 then some v else none`, without the pairs
+(tests/lean/fast_paths.lean). -/
+def maskedVals (vals : Array Int) (bits : Array (BitVec 1)) : Array Int :=
+  go 0 #[]
+where
+  go (i : Nat) (acc : Array Int) : Array Int :=
+    if h : i < vals.size then go (i + 1) (if bits[i]! = 1 then acc.push vals[i] else acc) else acc
+  termination_by vals.size - i
+
 /-- Masked-in lanes of an offset tensor. -/
 def activeOffsets (loc : Loc) (offs : TVal) (mask : Option TVal) : M (Array Int) := do
   let vals := offs.data.map bvInt
@@ -710,7 +916,8 @@ def activeOffsets (loc : Loc) (offs : TVal) (mask : Option TVal) : M (Array Int)
   | some m =>
     let bits ← dataW loc m 1
     unless bits.size = vals.size do throwAt loc s!"mask shape {m.shape} differs from offsets shape {offs.shape}"
-    pure <| (vals.zip bits).filterMap fun (v, k) => if k = 1 then some v else none
+    pure <| if (← read).ref then (vals.zip bits).filterMap (fun (v, k) => if k = 1 then some v else none)
+      else maskedVals vals bits
 
 def globalAccess (loc : Loc) (tensor : String) (offsets : TExpr) (mask : Option TExpr) :
     M (Nat × Array Int) := do
@@ -921,35 +1128,59 @@ def execEvent : Event → M Unit
 def setVar (x : String) (v : Val) : M Unit :=
   modify fun s => { s with env := s.env.insert x v }
 
+/-- Under `Ctx.prof`: `act`, its expression nodes added to the counts of statement loc `key`. -/
+@[inline] def profiled {α : Type} (key : String) (act : M α) : M α := do
+  if !(← read).prof then return ← act
+  let e0 := (← get).evals
+  let x ← act
+  modify fun s =>
+    let (n, k) := s.profLoc.getD key (0, 0)
+    { s with profLoc := s.profLoc.insert key (n + 1, k + (s.evals - e0)) }
+  return x
+
+/-- The loc of an event (the last field of every constructor). -/
+def Event.locOf : Event → Loc
+  | .bar_init _ _ _ l | .arrive _ _ _ _ _ l | .commit_arrive _ _ _ l | .expect_tx _ _ _ _ l
+  | .wait _ _ _ _ l | .tma_load _ _ _ _ _ _ l | .complete_tx _ _ _ _ l | .tma_store _ _ l
+  | .tma_reduce _ _ l | .gload _ _ _ l | .gstore _ _ _ l | .gatomic _ _ _ l
+  | .work _ l | .tmem _ _ _ _ _ l | .tmem_wait _ l
+  | .named_bar _ _ _ _ l | .nb_open _ _ _ _ _ _ l | .nb_rep _ _ _ l
+  | .bulk_store _ _ _ _ _ _ _ l | .bulk_commit l | .bulk_wait _ _ l
+  | .smem_write _ _ _ _ _ _ _ _ _ _ l | .tmap_write _ _ _ l
+  | .handoff_put _ _ l | .handoff_get _ _ l | .gsig _ _ _ _ l | .gwait _ _ _ _ l
+  | .gclaim _ _ _ _ _ l | .rput _ _ _ _ l | .rget _ _ _ _ _ l => l
+
 mutual
 def execStmt : Stmt → M Unit
-  | .«let» x e loc => do setVar x (← evalExpr loc e)
+  | .«let» x e loc => profiled loc do setVar x (← evalExpr loc e)
   | .«for» x lb ub step body loc => do
-    let l ← evalExpr loc lb
-    let u ← asW loc (← evalExpr loc ub) l.w
-    let s ← asW loc (← evalExpr loc step) l.w
-    let (li, ui, si) := (l.bv.toInt, u.toInt, s.toInt)
+    let (l, ui, si) ← profiled loc do
+      let l ← evalExpr loc lb
+      let u ← asW loc (← evalExpr loc ub) l.w
+      let s ← asW loc (← evalExpr loc step) l.w
+      pure (l, BV.toInt u, BV.toInt s)
+    let li := BV.toInt l.bv
     -- A loop with no trips runs nothing whatever its step; one that starts with a step that
     -- is not positive never reaches its upper bound.
     if si ≤ 0 && li < ui then
       throwK loc .kernel s!"for {x}: non-positive step {si} from {li} below {ui}: the loop never ends"
     let trips := if li < ui then ((ui - li + si - 1) / si).toNat else 0
     for k in [0:trips] do
-      setVar x ⟨l.w, BitVec.ofInt l.w (li + k * si)⟩
+      setVar x ⟨l.w, BV.ofInt l.w (li + k * si)⟩
       execBlock body
   | .«while» c body maxIters loc => do
     let mut exited := false
     for _ in [0:maxIters] do
-      if !(← evalCond loc c) then
+      if !(← profiled loc (evalCond loc c)) then
         exited := true
         break
       execBlock body
     if !exited && (← evalCond loc c) then
       throwAt loc s!"while loop exceeds max_iters = {maxIters} (a hang of the kernel, or a budget too small for the input)"
   | .«if» c t e loc => do
-    if ← evalCond loc c then execBlock t else execBlock e
-  | .event ev => execEvent ev
-  | .assert c msg loc => do
+    if ← profiled loc (evalCond loc c) then execBlock t else execBlock e
+  | .event ev => profiled ev.locOf (execEvent ev)
+  | .assert c msg loc => profiled loc do
     unless ← evalCond loc c do throwK loc .kernel s!"device assert failed: {msg}"
   | .assume c msg loc => do
     unless ← evalCond loc c do
@@ -969,9 +1200,9 @@ def pidStr (p : Nat × Nat × Nat) : String := s!"({p.1},{p.2.1},{p.2.2})"
 abbrev Relay := Std.HashMap (String × Int × Nat) Int
 
 def runM {α : Type} (h : Host) (pid : Nat × Nat × Nat) (role : Role) (device : Bool) (act : M α)
-    (rank : Nat := 0) (records : Handoffs := {}) (cta : Nat := 0) (relay : Relay := {}) :
-    EStateM.Result EvalError St α :=
-  (act.run { host := h, pid, role, device, rank, cta }).run
+    (rank : Nat := 0) (records : Handoffs := {}) (cta : Nat := 0) (relay : Relay := {})
+    (prof : Bool := false) (ref : Bool := false) : EStateM.Result EvalError St α :=
+  (act.run { host := h, pid, role, device, rank, cta, prof, ref }).run
     { env := h.params, trace := #[], work := #[], records, relay }
 
 /-- Values of host-side Exprs (params only). -/
@@ -981,20 +1212,44 @@ def hostInts (h : Host) (es : List Expr) : Except EvalError (Array Int) :=
   | .ok vs _ => .ok (vs.map Val.int).toArray
   | .error e _ => .error { e with context := "host" }
 
-/-- Trace of role `ri` of CTA `pid` (linear index `cta`), run with the CTA's handoff records
-`records` and relay slots `relay`, and those after it; a role that stops (a `metaOob` event,
-an `assume` that does not hold, a blocked take) keeps the events up to it and the reason. -/
-def runRole (h : Host) (pid : Nat × Nat × Nat) (ri : Nat) (role : Role) (rank : Nat := 0)
-    (records : Handoffs := {}) (cta : Nat := 0) (relay : Relay := {}) :
-    Except EvalError (RoleTrace × Handoffs × Relay) :=
+/-- One run of a role (`runRoleRun`): its trace (or error), the CTA's handoff records and relay
+slots after it (by an error too), and under `prof` its expression nodes and per-loc statement
+counts (KV/Profile.lean). -/
+structure RoleRun where
+  trace : Except EvalError RoleTrace
+  records : Handoffs := {}
+  relay : Relay := {}
+  evals : Nat := 0
+  profLoc : Std.HashMap String (Nat × Nat) := {}
+
+/-- Run role `ri` of CTA `pid` (linear index `cta`) with the CTA's handoff records `records` and
+relay slots `relay`; a role that stops (a `metaOob` event, an `assume` that does not hold, a
+blocked take) keeps the events up to it and the reason. -/
+def runRoleRun (h : Host) (pid : Nat × Nat × Nat) (ri : Nat) (role : Role) (rank : Nat := 0)
+    (records : Handoffs := {}) (cta : Nat := 0) (relay : Relay := {}) (prof : Bool := false)
+    (ref : Bool := false) : RoleRun :=
   let trace (s : St) (stopped : Bool) (why : StopWhy) (blocked : Bool) : RoleTrace :=
     { role := ri, events := s.trace, stopped, why, claimed := s.claimed, puts := s.puts,
       claimWords := s.claimWords, blocked }
-  match runM h pid role true (execBlock role.body) rank records cta relay with
-  | .ok () s => .ok (trace s false .metaOob false, s.records, s.relay)
+  match runM h pid role true (execBlock role.body) rank records cta relay prof ref with
+  | .ok () s => { trace := .ok (trace s false .metaOob false), records := s.records, relay := s.relay,
+                  evals := s.evals, profLoc := s.profLoc }
   | .error e s =>
-    if e.stop then .ok (trace s true e.why e.blocked, s.records, s.relay)
-    else .error { e with context := s!"cta {pidStr pid} role {role.name}" }
+    { trace := if e.stop then .ok (trace s true e.why e.blocked)
+               else .error { e with context := s!"cta {pidStr pid} role {role.name}" },
+      records := s.records, relay := s.relay, evals := s.evals, profLoc := s.profLoc }
+
+/-- Trace of role `ri` of CTA `pid` (linear index `cta`), run with the CTA's handoff records
+`records` and relay slots `relay`, and those after it (`runRoleRun`); a role that stops (a
+`metaOob` event, an `assume` that does not hold, a blocked take) keeps the events up to it and
+the reason. -/
+def runRole (h : Host) (pid : Nat × Nat × Nat) (ri : Nat) (role : Role) (rank : Nat := 0)
+    (records : Handoffs := {}) (cta : Nat := 0) (relay : Relay := {}) :
+    Except EvalError (RoleTrace × Handoffs × Relay) :=
+  let rr := runRoleRun h pid ri role rank records cta relay
+  match rr.trace with
+  | .ok t => .ok (t, rr.records, rr.relay)
+  | .error e => .error e
 
 def lookup {α : Type} (xs : List (String × α)) (k : String) : Option α :=
   (xs.find? (·.1 == k)).map (·.2)
@@ -1276,28 +1531,52 @@ def roleOrder (k : Kernel) (putters : Std.HashMap String (List Nat)) (order : Li
     hostErr "a role that puts handoff channels after a role that puts relay slots"
   pure out
 
-/-- Every CTA of the grid (x-fastest order), each CTA's roles in `order`. -/
-def evalAll (h : Host) (order : List Nat) : Except EvalError (Array CtaTrace) := do
+/-- Program id of CTA number `ci` (linear, x fastest). -/
+def Host.pidAt (h : Host) (ci : Nat) : Nat × Nat × Nat :=
+  let (gx, gy, _) := h.grid
+  (ci % gx, (ci / gx) % gy, ci / (gx * gy))
+
+/-- Evaluate every role of CTA number `ci` (linear, x fastest), its roles in `order` with the
+CTA's handoff records and relay slots carried from role to role, each run made by `run` (role
+index, role, the records and relay slots at its start; `runRoleRun` for `evalCta`, a timed one in
+KV/Profile.lean); the first error in that order stands. -/
+def evalCtaWith {m : Type → Type} [Monad m] (h : Host) (order : List Nat) (ci : Nat)
+    (run : Nat → Role → Handoffs → Relay → m RoleRun) : ExceptT EvalError m CtaTrace := do
   let roles := h.kernel.roles.toArray
+  let pid := h.pidAt ci
+  let mut traces := Array.replicate roles.size ({ role := 0, events := #[], stopped := false } : RoleTrace)
+  let mut records : Handoffs := {}
+  let mut relay : Relay := {}
+  for ri in order do
+    if let some role := roles[ri]? then
+      let rr ← (run ri role records relay : m RoleRun)
+      match rr.trace with
+      | .error e => throw e
+      | .ok t =>
+        traces := traces.set! ri t
+        records := rr.records
+        -- a putter blocked at a take never writes its later slots
+        relay := if t.blocked then (relayChans false role.body).foldl (fun m c => m.insert (blockedKey c) 1) rr.relay
+          else rr.relay
+  pure { pid, roles := traces, rank := h.rankOf pid }
+
+/-- Evaluate every role of CTA number `ci`, its roles in `order`: `evalCtaWith` with
+`runRoleRun`. -/
+def evalCta (h : Host) (order : List Nat) (ci : Nat) : Except EvalError CtaTrace :=
+  let pid := h.pidAt ci
+  let rank := h.rankOf pid
+  Id.run (evalCtaWith h order ci fun ri r records relay =>
+    pure (runRoleRun h pid ri r rank records ci relay)).run
+
+/-- Every CTA of the grid (x-fastest order), each CTA's roles in `order`, the CTAs in parallel
+tasks (`parMap`); the first error in CTA order stands, as in a loop that stops there. -/
+def evalAll (h : Host) (order : List Nat) : Except EvalError (Array CtaTrace) := do
   let (gx, gy, gz) := h.grid
-  let mut ctas := Array.emptyWithCapacity (gx * gy * gz)
-  for z in [0:gz] do
-    for y in [0:gy] do
-      for x in [0:gx] do
-        let rank := h.rankOf (x, y, z)
-        let cta := x + gx * (y + gy * z)
-        let mut traces := Array.replicate roles.size ({ role := 0, events := #[], stopped := false } : RoleTrace)
-        let mut records : Handoffs := {}
-        let mut relay : Relay := {}
-        for ri in order do
-          if let some role := roles[ri]? then
-            let (t, rs, rl) ← runRole h (x, y, z) ri role rank records cta relay
-            traces := traces.set! ri t
-            records := rs
-            -- a putter blocked at a take never writes its later slots
-            relay := if t.blocked then (relayChans false role.body).foldl (fun m c => m.insert (blockedKey c) 1) rl
-              else rl
-        ctas := ctas.push { pid := (x, y, z), roles := traces, rank }
+  let n := gx * gy * gz
+  let xs := parMap (evalCta h order) (Array.range n)
+  let mut ctas := Array.emptyWithCapacity n
+  for x in xs do
+    ctas := ctas.push (← x)
   pure ctas
 
 /-- The tagged stores of a run: (word, tag) -> value half; two stores of one tag with
@@ -1337,17 +1616,25 @@ def sameOrder (a b : Std.HashMap Word (Std.HashMap Nat Nat × Nat)) : Bool :=
     | some (m', n') => n == n' && m.size == m'.size && m.toList.all fun (k, v) => m'[k]? == some v
     | none => false
 
-/-- The passes of a run with sync tensors (module section above). -/
-def evalSyncPasses (h : Host) (order : List Nat) (maxPasses : Nat := 256) : Except EvalError Run := do
+/-- The passes of a run with sync tensors (module section above), each pass's CTAs evaluated by
+`all` (`evalAll`; KV/SelfCheck.lean's reference evaluation passes its sequential loop), and
+their number. The CTAs of a pass read only the stores and claimers of the previous one, so a
+pass may evaluate them in any order. -/
+def evalSyncPassesWith (all : Host → Except EvalError (Array CtaTrace)) (h : Host)
+    (maxPasses : Nat := 256) : Except EvalError (Run × Nat) := do
   let mut h := h
-  for _ in [0:maxPasses] do
-    let ctas ← evalAll h order
+  for p in [0:maxPasses] do
+    let ctas ← all h
     let puts ← putsOf h ctas
     let claims := claimOrderOf ctas
-    if samePuts puts h.puts && sameOrder claims h.claimOrder then return { host := h, ctas }
+    if samePuts puts h.puts && sameOrder claims h.claimOrder then return ({ host := h, ctas }, p + 1)
     h := { h with puts, claimOrder := claims }
   throw { msg := s!"tagged words and claims: no pass of {maxPasses} starts from the stores and claimers it ends with",
           loc := "", context := "run", kind := .limit }
+
+/-- The passes of a run with sync tensors (module section above). -/
+def evalSyncPasses (h : Host) (order : List Nat) (maxPasses : Nat := 256) : Except EvalError Run :=
+  (·.1) <$> evalSyncPassesWith (evalAll · order) h maxPasses
 
 /-- The claim assignment is an outcome of the fetch-adds iff, per word, the old values its
 claims read are exactly `0, v, …, (T - 1) v` (T claims of `v`): every claiming CTA claims until
@@ -1439,19 +1726,30 @@ def claimTurnsFeasible (r : Run) : Option String := Id.run do
             return some s!"CTA {s} reaches CTA {t} (tagged words, cluster or protocol region), but claims on {name} {ks} time(s) in turn {ts} against turn {tt}: the turns may contradict that order"
   return none
 
-/-- Evaluate every role of every CTA of `k` on `inp` (`evalAll`; a kernel with sync tensors in
-passes, `evalSyncPasses`). -/
-def eval (k : Kernel) (inp : Input) : Except EvalError Run := do
-  let h ← setupHost k inp
-  let (putters, order) ← handoffPlan k
-  let order ← roleOrder k putters order
-  let r : Run ← if h.hasSync then evalSyncPasses h order else pure { host := h, ctas := ← evalAll h order }
+/-- The checks of a whole run `r` (`eval`): its handoffs (`checkHandoffs`; `putters` from
+`handoffPlan`) and its claims (`claimsFeasible`, `claimTurnsFeasible`). -/
+def checkRun (k : Kernel) (r : Run) (putters : Std.HashMap String (List Nat)) : Except EvalError Unit := do
   unless putters.isEmpty do checkHandoffs k r putters
   if let some why := claimsFeasible r then
     throw { msg := s!"the claim assignment is not an outcome of the fetch-adds: {why}",
             loc := "", context := "run", kind := .limit }
   if let some why := claimTurnsFeasible r then
     throw { msg := s!"the representative claim order: {why}", loc := "", context := "run", kind := .limit }
+
+/-- `eval` with the CTAs of the run (of each pass) evaluated by `all` (host, role order):
+`evalAll` for `eval`, the sequential reference loop for KV/SelfCheck.lean's `evalRef`. -/
+def evalWith (all : Host → List Nat → Except EvalError (Array CtaTrace)) (k : Kernel) (inp : Input) :
+    Except EvalError Run := do
+  let h ← setupHost k inp
+  let (putters, order) ← handoffPlan k
+  let order ← roleOrder k putters order
+  let r : Run ← if h.hasSync then (·.1) <$> evalSyncPassesWith (all · order) h
+    else pure { host := h, ctas := ← all h order }
+  checkRun k r putters
   pure r
+
+/-- Evaluate every role of every CTA of `k` on `inp` (`evalAll`; a kernel with sync tensors in
+passes, `evalSyncPasses`). -/
+def eval (k : Kernel) (inp : Input) : Except EvalError Run := evalWith evalAll k inp
 
 end KV

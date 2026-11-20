@@ -85,7 +85,10 @@ report.md / report.json: verdict per (variant, input, spec), findings at source 
   `bin/lean` and `lib/lean`), else the `lean` on `PATH` (e.g. from elan);
   `scripts/build_lean.sh` compiles `lean/KV` and the native `libKV.so` into
   `/tmp/lkv_lean_build_$USER/<hash>`, one directory per `lean/` sources and toolchain
-  (`LKV_LEAN_BUILD` overrides it), and `lkv.py` runs it when needed.
+  (`LKV_LEAN_BUILD` overrides it), and `lkv.py` runs it when needed. Lean runs with
+  `LKV_LEAN_THREADS` threads (`scripts/run_lean_check.sh`: default min(8, CPUs); `lkv.py`
+  sets max(2, CPUs // `--jobs`)): the evaluator computes independent CTAs, cluster
+  ledgers, P0-1's and P0-3's per-CTA checks and the P1 pair searches in parallel tasks.
 - **The frontends run the kernel's real host code**, so they need its Python stack:
   a Triton with TLX and torch (TTGIR frontend, `frontend/ttgir/`), or
   nvidia-cutlass-dsl 4.4.2 or 4.6.1 exactly (the releases the CuTe op table was
@@ -107,7 +110,8 @@ python3 -I $S/scripts/lkv.py check K.kir.json... --out DIR   # Layer 2 alone on 
 
 - The frontend is CuTe if the case has a `builder`, else TTGIR. `run` options:
   `--inputs a,b`, `--target sm_103` (TTGIR only), `--jobs N` (Lean files at a time and
-  the TTGIR frontend's P0-6 processes; default min(8, CPUs)),
+  the TTGIR frontend's P0-6 processes; default min(8, CPUs); each Lean file gets
+  `LKV_LEAN_THREADS` threads, default max(2, CPUs // N)),
   `--timeout S` (per Lean file, default 3600), `--src DIR` (default: the case's
   `src_root` / `source.src`), `--frontend ptx|legacy` (the Layer-1 translation: `ptx`
   translates the kernel's PTX with one core shared by both frontends, `frontend_ptx.md`;
@@ -265,7 +269,8 @@ A verdict depends on exactly these items (`design.md`, "Trust base"):
    `tensormap.cp_fenceproxy` wrote: assumed, not checked, that no other role rewrites
    that slot and that its role does not while a load through it is in flight (P1-2
    checks that for stores).
-3. **`native_decide` (T1)**: the Lean compiler and the native `libKV.so` (`#lkv_check`
+3. **`native_decide` (T1)**: the Lean compiler and runtime (its tasks run independent
+   parts of the evaluation in parallel) and the native `libKV.so` (`#lkv_check`
    adds, per input, the axiom that the compiled evaluation's decisions are what it
    computed, as `native_decide` adds `e = true`).
 4. **The ledger algorithm** for P0-2 and P0-4, argued sound in Ledger.lean but
@@ -445,7 +450,7 @@ table says when to read each):
 ## Tests
 
 ```bash
-$S/tests/lean/run_all.sh                    # Layer 2: positive/negative controls per spec (tests/lean/p1: P1-1, p1_2: P1-2, nb: P0-6, gsync: P0-7)
+$S/tests/lean/run_all.sh                    # Layer 2: positive/negative controls per spec (tests/lean/p1: P1-1, p1_2: P1-2, nb: P0-6, gsync: P0-7), the evaluator's self-checks
 python3 -I $S/tests/e2e/test_e2e.py         # lkv.py end to end, ~2 min (frontends + Lean, no GPU)
 python3 -I $S/tests/cute/test_core.py       # CuTe translation, pure Python
 python3 -I $S/tests/ptx/test_translate.py   # PTX translation, pure Python (and tests/ptx/test_*.py)

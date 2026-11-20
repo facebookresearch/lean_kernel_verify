@@ -11,8 +11,10 @@
 The KIR is validated with kir.py first (invalid KIR: errors on stderr, exit 1). The Lean
 file imports KV, lifts the heartbeat limit (a KIR's definitions are data whose elaboration
 grows with their size, e.g. the 64 MB attention-core KIRs), defines `kernel` (one constructor
-per KIR node, see lean/KV/IR.lean) and one `KV.Input` per case input (each with the case's
-`elision_flags`), then per input one `#lkv_check kernel <input> <spec>...` (lean/KV/Command.lean;
+per KIR node, see lean/KV/IR.lean; an Expr or TExpr whose text is longer than SHARE_MIN
+characters is a definition `sx<n>` of its own, named wherever it recurs) and one `KV.Input`
+per case input (each with the case's `elision_flags`), then per input one
+`#lkv_check kernel <input> <spec>...` (lean/KV/Command.lean;
 the five P0 specs, and P0-7 `gwait` for a KIR with sync tensors, KIR change 18):
 one evaluation of the kernel on the input prints the report (verdicts, counterexamples and
 notes with IR loc; lean/KV/Check.lean, Report.render) and proves, per spec, the theorem
@@ -24,6 +26,11 @@ for a P0 KIR is unchanged; a P0-6 KIR (top-level `nbar`, file suffix .nb.json; c
 `#lkv_check_nb` with P0-6 (`namedBarriers`). --legacy-theorems writes the earlier form
 (`#eval KV.runCase` / `KV.runP1` / `KV.runNb` per input, then one theorem per (spec, input)
 closed by `native_decide`: one evaluation of the kernel per spec), for comparisons.
+--selfcheck writes `#eval KV.SelfCheck.run kernel <input>` per input instead (the
+evaluator's shortcuts against what they replace, lean/KV/SelfCheck.lean), --profile LOG[:N]
+`#eval KV.Profile.run ...` (the phases of one evaluation timed into LOG, lean/KV/Profile.lean);
+neither proves a verdict. --with-selfcheck writes the self-checks after the checks, in the same
+file (tests/lean/run_all.sh: one Lean run per fixture).
 """
 
 import argparse
@@ -31,6 +38,7 @@ import json
 import os
 import re
 import sys
+import threading
 
 sys.dont_write_bytecode = True  # keep the source tree free of __pycache__
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -87,7 +95,48 @@ def ctor(name, *args):
     return "(." + " ".join([name, *args]) + ")"
 
 
+# Shared terms: an Expr or TExpr whose Lean text is longer than SHARE_MIN characters becomes a
+# definition of its own (`sx<n>`), one per distinct text of a kernel's role bodies, emitted before
+# its first use: KIRs repeat large subtrees (a lane's select chain in many events), which the
+# text would otherwise copy at every use (a DAG of tens of thousands of distinct nodes printed as
+# millions); the values, and so every verdict, are the same.
+SHARE_MIN = 256
+
+
+class Shared:
+    """The shared-term definitions of one kernel's role bodies (emit)."""
+
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.names: dict = {}
+
+    def use(self, text: str, typ: str) -> str:
+        if len(text) <= SHARE_MIN:
+            return text
+        name = self.names.get((typ, text))
+        if name is None:
+            name = self.names[(typ, text)] = f"sx{len(self.names)}"
+            self.chunks.pending.append(f"def {name} : {typ} := {text}\n")
+        return name
+
+
+_SHARED = threading.local()  # .stack: the Shared of the role bodies this thread emits
+
+
+def _shared(text: str, typ: str) -> str:
+    stack = getattr(_SHARED, "stack", None)
+    return stack[-1].use(text, typ) if stack else text
+
+
 def expr(e):
+    return _shared(_expr(e), "KV.Expr")
+
+
+def texpr(t):
+    return _shared(_texpr(t), "KV.TExpr")
+
+
+def _expr(e):
     k, w = e["e"], str(e["w"])
     if k == "const":
         return ctor("const", lint(e["v"]), w)
@@ -117,7 +166,7 @@ def expr(e):
     raise AssertionError(k)  # unreachable after kir.validate
 
 
-def texpr(t):
+def _texpr(t):
     k, shape, w = t["t"], llist(map(str, t["shape"])), str(t["w"])
     if k == "range":
         return ctor("range", lint(t["start"]), lint(t["end"]), shape, w)
@@ -382,12 +431,67 @@ def ident(s):
     return re.sub(r"\W", "_", s, flags=re.ASCII)
 
 
-def emit(k, src_name, legacy=False):
+def roles(k, chunks):
+    """The role definitions of kernel `k`, each after the chunk and shared-term definitions it
+    uses (one Shared for all its role bodies), and their names."""
+    out, names = [], []
+    stack = _SHARED.__dict__.setdefault("stack", [])
+    stack.append(Shared(chunks))
+    try:
+        for i, r in enumerate(k["roles"]):
+            name = f"role{i}_{ident(r['name'])}"
+            names.append(name)
+            body = block(r["body"], 2, chunks)
+            out += chunks.take() + [
+                f"def {name} : KV.Role where",
+                f"  name := {lstr(r['name'])}",
+                f"  warps := {r['warps']}",
+                f"  threads_per_issue := {r['threads_per_issue']}",
+                f"  body := {body}",
+                *([f"  group := {lstr(r['group'])}"] if "group" in r else []),
+                "",
+            ]
+    finally:
+        stack.pop()
+    return out, names
+
+
+def debug_evals(inputs, kind, profile, selfcheck):
+    """The per-input `#eval`s that replace the verdicts under --profile (lean/KV/Profile.lean;
+    `profile` = (log path, CTA limit), a negative limit: every issue and note of every spec,
+    `dumpIssues`) or --selfcheck (lean/KV/SelfCheck.lean); None for neither. `kind` is
+    checkAll's report kind (lean/KV/Command.lean: 0 P0, 1 P1, 2 P0-6)."""
+    if profile is not None:
+        log, limit = profile
+        if limit < 0:
+            return [
+                f"#eval KV.Profile.dumpIssues kernel {name} {lstr(log)} {kind}"
+                for name in inputs
+            ]
+        return [
+            f"#eval KV.Profile.run kernel {name} {lstr(log)} {limit} {kind}"
+            for name in inputs
+        ]
+    if selfcheck:
+        return [f"#eval KV.SelfCheck.run kernel {name} {kind}" for name in inputs]
+    return None
+
+
+def emit(
+    k, src_name, legacy=False, profile=None, selfcheck=False, with_selfcheck=False
+):
     # IR.lean's `Ir` constructor of each kir.IRS value (`cute-mlir` needs «»).
     ir = {"ttgir": ".ttgir", "cute-mlir": ".«cute-mlir»", "ptx": ".ptx"}[k["ir"]]
     out = [
         f"-- Generated by frontend/emit_lean.py from {src_name}; do not edit.",
-        "import KV",
+        "import KV"
+        + (
+            "\nimport KV.Profile"
+            if profile is not None
+            else "\nimport KV.SelfCheck"
+            if selfcheck or with_selfcheck
+            else ""
+        ),
         "",
         "set_option maxHeartbeats 0",
         "",
@@ -395,20 +499,8 @@ def emit(k, src_name, legacy=False):
         "",
     ]
     chunks = Chunks()
-    role_defs = []
-    for i, r in enumerate(k["roles"]):
-        name = f"role{i}_{ident(r['name'])}"
-        role_defs.append(name)
-        body = block(r["body"], 2, chunks)
-        out += chunks.take() + [
-            f"def {name} : KV.Role where",
-            f"  name := {lstr(r['name'])}",
-            f"  warps := {r['warps']}",
-            f"  threads_per_issue := {r['threads_per_issue']}",
-            f"  body := {body}",
-            *([f"  group := {lstr(r['group'])}"] if "group" in r else []),
-            "",
-        ]
+    defs, role_defs = roles(k, chunks)
+    out += defs
     out += [
         "def kernel : KV.Kernel where",
         f"  kir_version := {k['kir_version']}",
@@ -494,7 +586,10 @@ def emit(k, src_name, legacy=False):
         if nb
         else SPECS + (SPECS_GLOBAL if any("sync" in t for t in k["tensors"]) else ())
     )
-    if legacy:
+    debug = debug_evals(inputs, 1 if p1 else 2 if nb else 0, profile, selfcheck)
+    if debug is not None:
+        out += debug
+    elif legacy:
         run = "KV.runP1" if p1 else "KV.runNb" if nb else "KV.runCase"
         out += [f"#eval {run} kernel {name}" for name in inputs]
         out.append("")
@@ -507,6 +602,8 @@ def emit(k, src_name, legacy=False):
         cmd = "#lkv_check_p1" if p1 else "#lkv_check_nb" if nb else "#lkv_check"
         names = " ".join(spec for spec, _ in specs)
         out += [f"{cmd} kernel {name} {names}" for name in inputs]
+        if with_selfcheck:
+            out += debug_evals(inputs, 1 if p1 else 2 if nb else 0, None, True)
     out += ["", f"end KIR.«{ident(k['kernel'])}»", ""]
     return "\n".join(out)
 
@@ -522,7 +619,29 @@ def main():
         action="store_true",
         help="one native_decide theorem per (spec, input), as before #lkv_check",
     )
+    ap.add_argument(
+        "--profile",
+        metavar="LOG[:N]",
+        help="time one evaluation per input instead of checking it (lean/KV/Profile.lean), "
+        "appending to LOG; N > 0 evaluates only the first N CTAs; N = -1 appends every issue "
+        "and note of every spec instead",
+    )
+    ap.add_argument(
+        "--selfcheck",
+        action="store_true",
+        help="compare the evaluator's shortcuts with what they replace on every input "
+        "instead of checking it (lean/KV/SelfCheck.lean)",
+    )
+    ap.add_argument(
+        "--with-selfcheck",
+        action="store_true",
+        help="the self-checks of --selfcheck after the checks, in the same file",
+    )
     args = ap.parse_args()
+    profile = None
+    if args.profile:
+        log, _, n = args.profile.partition(":")
+        profile = (os.path.abspath(log), int(n or 0))
     with open(args.kir) as f:
         k = json.load(f)
     errors = kir.validate(k)
@@ -530,7 +649,14 @@ def main():
         for e in errors:
             print(f"{args.kir}: {e}", file=sys.stderr)
         return 1
-    text = emit(k, os.path.basename(args.kir), args.legacy_theorems)
+    text = emit(
+        k,
+        os.path.basename(args.kir),
+        args.legacy_theorems,
+        profile,
+        args.selfcheck,
+        args.with_selfcheck,
+    )
     if args.output:
         with open(args.output, "w") as f:
             f.write(text)

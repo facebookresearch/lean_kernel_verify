@@ -201,3 +201,24 @@ First public release.
   refuted theorems). A spec's decision runs only that spec (`SpecId.holdsB`), the signed
   overflow test of `wraps` uses the sign rule instead of big integers, and the heartbeat
   limit is lifted for large KIRs. Verdicts are unchanged.
+- Lean: faster evaluation, same verdicts and reports. `BitVec` operations without a
+  big-number power per operation (`lean/KV/BV.lean`, each proved equal to the core one),
+  lane loops without per-lane state, one computation of the analyses the report and the
+  decisions share (barrier and P1 ledgers, P0-1's, P0-3's and P0-5's decisions, P0-6's
+  and P0-7's analyses; `checkAll_snd` is a proof), and parallel Lean tasks for independent
+  CTAs (with sync tensors, the CTAs of each pass), cluster ledgers and P0-1's per-CTA checks
+  (`LKV_LEAN_THREADS`; lkv.py: its CPUs divided by `--jobs`, at least 2).
+  `tests/lean/run_all.sh` checks the lane loops against the loops they replace
+  (`tests/lean/fast_paths.lean`) and, on every fixture input, the evaluation against the
+  sequential one with those loops (`lean/KV/SelfCheck.lean`, `emit_lean.py --selfcheck`);
+  `lean/KV/Profile.lean` (`emit_lean.py --profile`) times the phases of an evaluation.
+- emit_lean.py writes an Expr or TExpr whose Lean text is longer than 256 characters once,
+  as a definition `sx<n>` used at every place it recurs (a large repeated subterm is
+  elaborated once; the values, and so the verdicts, are the same).
+- Lean: P0-1's decision computes a tensor's span and the work item's segment once per
+  access instead of once per lane (`Bounds.eventOkB_eq`); P0-3's decision reads only the
+  offsets a store writes (`Coverage.writeOkB_iff`, `Coverage.okB_eq`), and its targets and
+  plain-store ledgers serve the decision and the report lines alike; P1-1's and P1-2's pair
+  searches run per CTA or cluster in parallel and serve the decision and the report alike
+  (`TmemReuse.holdsB_eq`, `StoreReuse.holdsOnB_eq`). The self-check also compares every
+  spec's report lines with the ones computed from scratch. Same verdicts and reports.

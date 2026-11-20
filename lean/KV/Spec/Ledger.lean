@@ -185,7 +185,7 @@ import KV.Spec.Common
 namespace KV
 
 /-- First index of `xs` satisfying the monotone predicate `p` (`xs.size` if none). -/
-def searchFirst {α : Type} [Inhabited α] (xs : Array α) (p : α → Bool) : Nat := Id.run do
+@[specialize] def searchFirst {α : Type} [Inhabited α] (xs : Array α) (p : α → Bool) : Nat := Id.run do
   let mut lo := 0
   let mut hi := xs.size
   for _ in [0:xs.size + 1] do
@@ -305,7 +305,7 @@ def RoleSlot.lander (rs : RoleSlot) : Bool :=
 
 /-- Index of the first entry of `rs.arrivals` satisfying the monotone predicate `p`
 (`rs.arrivals.size` if none). -/
-def RoleSlot.firstArrival (rs : RoleSlot) (p : Nat × Int → Bool) : Nat := searchFirst rs.arrivals p
+@[inline] def RoleSlot.firstArrival (rs : RoleSlot) (p : Nat × Int → Bool) : Nat := searchFirst rs.arrivals p
 
 /-- This role's arrivals on the slot at trace positions before `cut`. -/
 def RoleSlot.arrivedBefore (rs : RoleSlot) (cut : Nat) : Int :=
@@ -1205,8 +1205,20 @@ abbrev Ledgers := Array ((Nat × Nat × Nat) × Array SlotLedger)
 
 def Run.ledgers (r : Run) : Ledgers := r.clusters.map fun c => (c.cid, ledger r.host c)
 
+/-- `r.ledgers`, the clusters in parallel (`ledgersPar_eq`). -/
+def Run.ledgersPar (r : Run) : Ledgers := parMap (fun c => (c.cid, ledger r.host c)) r.clusters
+
+theorem Run.ledgersPar_eq (r : Run) : r.ledgersPar = r.ledgers := by
+  simp only [Run.ledgersPar, Run.ledgers, parMap_eq]
+
 /-- The ledgers the P1 specs (P1-1, P1-2) use (`ledger` with `precise`). -/
 def Run.ledgersP1 (r : Run) : Ledgers := r.clusters.map fun c => (c.cid, ledger r.host c true)
+
+/-- `r.ledgersP1`, the clusters in parallel (`ledgersP1Par_eq`). -/
+def Run.ledgersP1Par (r : Run) : Ledgers := parMap (fun c => (c.cid, ledger r.host c true)) r.clusters
+
+theorem Run.ledgersP1Par_eq (r : Run) : r.ledgersP1Par = r.ledgersP1 := by
+  simp only [Run.ledgersP1Par, Run.ledgersP1, parMap_eq]
 
 /-- `f`'s lines about every slot ledger of every cluster in `Ls` whose ledger converged (the
 others get an `unconverged` line instead). -/

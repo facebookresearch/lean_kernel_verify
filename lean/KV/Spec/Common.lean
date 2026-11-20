@@ -125,6 +125,15 @@ def TensorInfo.inAlloc (t : TensorInfo) (o : Int) : Bool :=
   | some (lo, hi) => if t.exact then t.isElem o else lo ≤ o && o ≤ hi
   | none => false
 
+/-- `inAlloc` with the tensor's span `sp` given (`t.inAlloc o = t.inAllocWith t.span o`), so the
+lanes of one access compute it once. -/
+def TensorInfo.inAllocWith (t : TensorInfo) (sp : Option (Int × Int)) (o : Int) : Bool :=
+  match sp with
+  | some (lo, hi) => if t.exact then t.isElem o else lo ≤ o && o ≤ hi
+  | none => false
+
+theorem TensorInfo.inAlloc_eq_with (t : TensorInfo) (o : Int) : t.inAlloc o = t.inAllocWith t.span o := rfl
+
 /-- Row of an element offset of a global tensor: its coordinate along the row dim, after
 removing the dims of larger stride greedily (largest first). Exact for segmented tensors,
 whose strides are checked not to overlap (`setupHost`). -/
@@ -204,9 +213,43 @@ def Run.forEvents {α : Type} (r : Run) (init : α) (f : α → Nat × Nat × Na
   r.ctas.foldl (init := init) fun acc c =>
     c.roles.foldl (init := acc) fun acc t => t.events.foldl (init := acc) fun acc e => f acc c.pid t.role e
 
-/-- `f`'s messages about every event, as lines located at the event. -/
-def Run.collect (r : Run) (f : TEvent → Array String) : Array Issue :=
+/-- `f`'s messages about every event, as lines located at the event (`collect_eq`). -/
+def Run.collectRef (r : Run) (f : TEvent → Array String) : Array Issue :=
   r.forEvents #[] fun acc pid role e =>
     acc ++ (f e).map fun m => { loc := e.loc, context := r.host.roleCtx pid role, msg := m }
+
+/-- `collectRef`'s lines of one CTA. -/
+def Run.collectCta (r : Run) (f : TEvent → Array String) (c : CtaTrace) : Array Issue :=
+  c.roles.foldl (init := #[]) fun acc t => acc ++ t.events.foldl (init := #[]) fun acc e =>
+    acc ++ (f e).map fun m => { loc := e.loc, context := r.host.roleCtx c.pid t.role, msg := m }
+
+/-- `collectRef`, the CTAs in parallel (`collect_eq`). -/
+def Run.collect (r : Run) (f : TEvent → Array String) : Array Issue :=
+  (parMap (r.collectCta f) r.ctas).foldl (· ++ ·) #[]
+
+theorem Run.collect_eq (r : Run) (f : TEvent → Array String) : r.collect f = r.collectRef f := by
+  unfold Run.collect Run.collectRef Run.forEvents
+  rw [parMap_eq, Array.foldl_map]
+  -- every CTA's fold from `acc` appends its lines to `acc`
+  have step : ∀ (acc : Array Issue) (c : CtaTrace),
+      c.roles.foldl (init := acc) (fun acc t => t.events.foldl (init := acc) fun acc e =>
+        acc ++ (f e).map fun m => { loc := e.loc, context := r.host.roleCtx c.pid t.role, msg := m }) =
+      acc ++ r.collectCta f c := by
+    intro acc c
+    unfold Run.collectCta
+    have inner : (fun (acc : Array Issue) (t : RoleTrace) => t.events.foldl (init := acc) fun acc e =>
+          acc ++ (f e).map fun m => { loc := e.loc, context := r.host.roleCtx c.pid t.role, msg := m }) =
+        (fun acc t => acc ++ t.events.foldl (init := #[]) fun acc e =>
+          acc ++ (f e).map fun m => { loc := e.loc, context := r.host.roleCtx c.pid t.role, msg := m }) := by
+      funext acc t
+      exact foldl_append t.events _ acc
+    rw [inner]
+    exact foldl_append c.roles _ acc
+  have : (fun (acc : Array Issue) (c : CtaTrace) => c.roles.foldl (init := acc) (fun acc t =>
+      t.events.foldl (init := acc) fun acc e =>
+        acc ++ (f e).map fun m => { loc := e.loc, context := r.host.roleCtx c.pid t.role, msg := m })) =
+      (fun acc c => acc ++ r.collectCta f c) := by
+    funext acc c; exact step acc c
+  rw [this]
 
 end KV

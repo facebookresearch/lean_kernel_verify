@@ -35,6 +35,15 @@
 # 5. The same for every tests/lean/gsync/*.kir.json fixture (global synchronization, kir.md
 #    change 18; written by gsync/make_fixtures.py) against gsync/expected.txt (P0-1..P0-5 and
 #    P0-7) and gsync/expected_messages.txt.
+# 6. fast_paths.lean: the evaluator's lane loops give what the zips and lane-state loops they
+#    replace give, on synthetic operands. Self-checks (lean/KV/SelfCheck.lean, written after the
+#    checks by emit_lean.py --with-selfcheck, so in the same Lean run) on every fixture of
+#    2.-5.: on every input, the evaluation (CTAs in parallel
+#    tasks, the fast lane loops) gives the same run, event by event, as the sequential one with
+#    the reference loops, and every spec's result in the report (from the shared analyses) is
+#    the one computed from scratch; one `SELFCHECK <input> OK` line per input. emit_shared.py: the
+#    emitted Lean's shared terms (`sx<n>`) are defined before their uses and emits from
+#    several threads equal the serial ones.
 #
 # Generated Lean files and outputs are kept in $LKV_TEST_OUT (default ${TMPDIR:-/tmp}/lkv_lean_tests_$USER).
 set -uo pipefail
@@ -65,7 +74,22 @@ check_theorems() {
   fi
 }
 
+# check_self NAME LEAN OUT: one `SELFCHECK <input> OK` line in OUT per self-check of LEAN
+# (emit_lean.py --with-selfcheck), and no DIFF line.
+nself=0
+check_self() {
+  local want got
+  want="$(grep -c '^#eval KV.SelfCheck.run' "$2")"
+  got="$(grep -c '^SELFCHECK .* OK' "$3")"
+  if [[ "$want" != "$got" ]] || grep -q '^SELFCHECK .* DIFF' "$3"; then
+    bad "$1: self-check: $got of $want inputs OK (output in $3)"
+    grep '^SELFCHECK .* DIFF' "$3" | sed 's/^/    /'
+  fi
+  nself=$((nself + want))
+}
+
 python3 -I "$T/kir_negative.py" || bad "kir_negative.py"
+python3 -I "$T/emit_shared.py" || bad "emit_shared.py"
 "$S/scripts/build_lean.sh" >/dev/null || { bad "scripts/build_lean.sh"; exit 1; }
 
 nfix=0
@@ -74,7 +98,7 @@ for f in "$T"/*.kir.json; do
   n="$(basename "$f" .kir.json)"
   nfix=$((nfix + 1))
   python3 -I "$S/frontend/kir.py" "$f" || { bad "$n: invalid KIR"; continue; }
-  python3 -I "$S/frontend/emit_lean.py" "$f" -o "$OUT/$n.lean" || { bad "$n: emit_lean.py failed"; continue; }
+  python3 -I "$S/frontend/emit_lean.py" "$f" --with-selfcheck -o "$OUT/$n.lean" || { bad "$n: emit_lean.py failed"; continue; }
   "$S/scripts/run_lean_check.sh" "$OUT/$n.lean" >"$OUT/$n.out" 2>&1
   status=$?
 
@@ -92,6 +116,7 @@ for f in "$T"/*.kir.json; do
   nverdicts=$((nverdicts + $(grep -c . <<<"$want")))
 
   check_theorems "$n" "$OUT/$n.out" "$want" "$status"
+  check_self "$n" "$OUT/$n.lean" "$OUT/$n.out"
 
   while IFS=' ' read -r fx msg; do
     [[ "$fx" == "$n" ]] || continue
@@ -114,7 +139,7 @@ for f in "$P1"/*.kir.json; do
   n="$(basename "$f" .kir.json)"
   nfix=$((nfix + 1))
   python3 -I "$S/frontend/kir.py" "$f" || { bad "p1/$n: invalid KIR"; continue; }
-  python3 -I "$S/frontend/emit_lean.py" "$f" -o "$OUT/p1_$n.lean" || { bad "p1/$n: emit_lean.py failed"; continue; }
+  python3 -I "$S/frontend/emit_lean.py" "$f" --with-selfcheck -o "$OUT/p1_$n.lean" || { bad "p1/$n: emit_lean.py failed"; continue; }
   "$S/scripts/run_lean_check.sh" "$OUT/p1_$n.lean" >"$OUT/p1_$n.out" 2>&1
   status=$?
   want="$(awk -v f="$n" '$1 == f { printf "VERDICT %s P1-1 %s\n", $2, $3 }' "$P1/expected.txt" | sort)"
@@ -129,6 +154,7 @@ for f in "$P1"/*.kir.json; do
   fi
   nverdicts=$((nverdicts + $(grep -c . <<<"$want")))
   check_theorems "p1/$n" "$OUT/p1_$n.out" "$want" "$status" P1-1
+  check_self "p1/$n" "$OUT/p1_$n.lean" "$OUT/p1_$n.out"
   while IFS=' ' read -r fx msg; do
     [[ "$fx" == "$n" ]] || continue
     grep -qF -- "$msg" "$OUT/p1_$n.out" || bad "p1/$n: report lacks: $msg"
@@ -149,7 +175,7 @@ for f in "$P12"/*.kir.json; do
   n="$(basename "$f" .kir.json)"
   nfix=$((nfix + 1))
   python3 -I "$S/frontend/kir.py" "$f" || { bad "p1_2/$n: invalid KIR"; continue; }
-  python3 -I "$S/frontend/emit_lean.py" "$f" -o "$OUT/p1_2_$n.lean" || { bad "p1_2/$n: emit_lean.py failed"; continue; }
+  python3 -I "$S/frontend/emit_lean.py" "$f" --with-selfcheck -o "$OUT/p1_2_$n.lean" || { bad "p1_2/$n: emit_lean.py failed"; continue; }
   "$S/scripts/run_lean_check.sh" "$OUT/p1_2_$n.lean" >"$OUT/p1_2_$n.out" 2>&1
   status=$?
   want="$(awk -v f="$n" '$1 == f { printf "VERDICT %s P1-2 %s\n", $2, $3 }' "$P12/expected.txt" | sort)"
@@ -164,6 +190,7 @@ for f in "$P12"/*.kir.json; do
   fi
   nverdicts=$((nverdicts + $(grep -c . <<<"$want")))
   check_theorems "p1_2/$n" "$OUT/p1_2_$n.out" "$want" "$status" P1-2
+  check_self "p1_2/$n" "$OUT/p1_2_$n.lean" "$OUT/p1_2_$n.out"
   while IFS=' ' read -r fx msg; do
     [[ "$fx" == "$n" ]] || continue
     grep -qF -- "$msg" "$OUT/p1_2_$n.out" || bad "p1_2/$n: report lacks: $msg"
@@ -186,7 +213,7 @@ for f in "$NB"/*.kir.json; do
   n="$(basename "$f" .kir.json)"
   nfix=$((nfix + 1))
   python3 -I "$S/frontend/kir.py" "$f" || { bad "nb/$n: invalid KIR"; continue; }
-  python3 -I "$S/frontend/emit_lean.py" "$f" -o "$OUT/nb_$n.lean" || { bad "nb/$n: emit_lean.py failed"; continue; }
+  python3 -I "$S/frontend/emit_lean.py" "$f" --with-selfcheck -o "$OUT/nb_$n.lean" || { bad "nb/$n: emit_lean.py failed"; continue; }
   "$S/scripts/run_lean_check.sh" "$OUT/nb_$n.lean" >"$OUT/nb_$n.out" 2>&1
   status=$?
   want="$(awk -v f="$n" '$1 == f { printf "VERDICT %s P0-6 %s\n", $2, $3 }' "$NB/expected.txt" | sort)"
@@ -201,6 +228,7 @@ for f in "$NB"/*.kir.json; do
   fi
   nverdicts=$((nverdicts + $(grep -c . <<<"$want")))
   check_theorems "nb/$n" "$OUT/nb_$n.out" "$want" "$status" P0-6
+  check_self "nb/$n" "$OUT/nb_$n.lean" "$OUT/nb_$n.out"
   while IFS=' ' read -r fx msg; do
     [[ "$fx" == "$n" ]] || continue
     grep -qF -- "$msg" "$OUT/nb_$n.out" || bad "nb/$n: report lacks: $msg"
@@ -222,7 +250,7 @@ for f in "$GS"/*.kir.json; do
   n="$(basename "$f" .kir.json)"
   nfix=$((nfix + 1))
   python3 -I "$S/frontend/kir.py" "$f" || { bad "gsync/$n: invalid KIR"; continue; }
-  python3 -I "$S/frontend/emit_lean.py" "$f" -o "$OUT/gsync_$n.lean" || { bad "gsync/$n: emit_lean.py failed"; continue; }
+  python3 -I "$S/frontend/emit_lean.py" "$f" --with-selfcheck -o "$OUT/gsync_$n.lean" || { bad "gsync/$n: emit_lean.py failed"; continue; }
   "$S/scripts/run_lean_check.sh" "$OUT/gsync_$n.lean" >"$OUT/gsync_$n.out" 2>&1
   status=$?
   want="$(awk -v f="$n" 'BEGIN { split("1 2 3 4 5 7", l, " ") }
@@ -238,14 +266,19 @@ for f in "$GS"/*.kir.json; do
   fi
   nverdicts=$((nverdicts + $(grep -c . <<<"$want")))
   check_theorems "gsync/$n" "$OUT/gsync_$n.out" "$want" "$status"
+  check_self "gsync/$n" "$OUT/gsync_$n.lean" "$OUT/gsync_$n.out"
   while IFS=' ' read -r fx msg; do
     [[ "$fx" == "$n" ]] || continue
     grep -qF -- "$msg" "$OUT/gsync_$n.out" || bad "gsync/$n: report lacks: $msg"
   done < <(grep -v '^#' "$GS/expected_messages.txt")
 done
 
+# 6. self-checks
+"$S/scripts/run_lean_check.sh" "$T/fast_paths.lean" >"$OUT/fast_paths.out" 2>&1 || bad "fast_paths.lean (output in $OUT/fast_paths.out)"
+grep -q "error" "$OUT/fast_paths.out" && bad "fast_paths.lean: errors (output in $OUT/fast_paths.out)"
+
 if (( failures )); then
   echo "run_all: $failures check(s) failed ($nfix fixtures, outputs in $OUT)"
   exit 1
 fi
-echo "run_all: OK: $nfix fixtures, $nverdicts (input, spec) verdicts as expected, theorems match, counterexample, note and report-check texts as expected"
+echo "run_all: OK: $nfix fixtures, $nverdicts (input, spec) verdicts as expected, theorems match, counterexample, note and report-check texts as expected; $nself self-checked inputs"

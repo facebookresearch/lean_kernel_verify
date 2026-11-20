@@ -152,6 +152,35 @@ constructs (e.g. lane-divergent barrier ops, indirect calls) are hard errors.
 - `Spec/*.lean`: the six P0 specs and the two P1 specs (`TmemReuse.lean`,
   `StoreReuse.lean`) as `Prop`s over traces, each with a `Decidable` instance, plus a
   counterexample extractor and a note extractor for reporting.
+- Evaluation cost. The evaluation computes exactly what the definitions say, with
+  shortcuts that are proved or checked to give the same values: `BitVec` operations
+  without the power `2 ^ w` per operation (`BV.lean`, each proved equal to the core one;
+  `binBV_eq`, `wraps_eq`, `cmpBV_eq`, `bvInt_eq`); lane loops of tensor expressions and
+  masks without per-lane state (`mapBin`, `cmpLanes`, `bcastData`, `maskedVals`, checked
+  against the loops they replace by `tests/lean/fast_paths.lean` and the self-check
+  below); the analyses the report and the decisions share (the run's barrier ledgers and
+  P1 ledgers, P0-1's, P0-3's and P0-5's decisions, P0-3's targets and plain-store ledgers,
+  P0-6's analysis, P1-1's and P1-2's pair searches, P0-7's analysis) computed once per input
+  (`Check.lean` `Shared`; `checkAll_snd` proves the decisions are the specs' decisions); P0-1's
+  decision computes a tensor's span and the segment of the work item once per access, not
+  per lane (`Bounds.eventOkB_eq`), and P0-3's reads only the offsets a store writes
+  (`Coverage.writeOkB_iff`, `Coverage.okB_eq`); independent CTAs (with sync tensors, the CTAs
+  of one pass: they read only the previous pass's stores and claimers; the passes run one after
+  another), cluster ledgers, P0-1's
+  and P0-3's per-CTA checks and lines and the per-CTA (P1-1) or per-cluster (P1-2) pair
+  searches in parallel Lean tasks (`parMap`, proved equal to `Array.map`;
+  `scripts/run_lean_check.sh` gives lean `LKV_LEAN_THREADS` threads, which `lkv.py` sets to
+  its CPUs divided by `--jobs`, at least 2). `lean/KV/SelfCheck.lean` (`emit_lean.py
+  --selfcheck`, `tests/lean/run_all.sh` step 6) compares, on every fixture input, the
+  evaluation with the sequential one that uses the reference loops (the same role order,
+  handoff records, relay slots, passes and checks), event by event, and
+  every spec's result in the report (verdict, every line) with the one computed from
+  scratch, as before the shared analyses; `lean/KV/Profile.lean`
+  (debug only, `emit_lean.py --profile LOG[:N]`) times the phases of one evaluation, or
+  dumps every issue and note of every spec. `frontend/emit_lean.py` writes an Expr or
+  TExpr of the role bodies whose Lean text is longer than 256 characters once, as a
+  definition `sx<n>` used wherever the text recurs (`SHARE_MIN`), so Lean elaborates a
+  repeated subterm once; the values are the same.
 - Verdicts are theorems for each concrete input in the case file (T1: trusts the Lean
   compiler). `#lkv_check` (lean/KV/Command.lean) evaluates the kernel on the input once,
   compiled as `native_decide` compiles its decision, adds the axiom that the evaluation's
@@ -261,7 +290,8 @@ it names in `elision_flags` the flags that select a mask-elided fast path.
    that slot and that its role does not while a load through it is in flight
    (`frontend_ptx.md`, "TMA descriptors").
 3. `native_decide`'s trust (Lean compiler; one compiled evaluation per input) for
-   whole-trace verdicts.
+   whole-trace verdicts, including the Lean runtime's tasks, which run independent parts
+   of the evaluation in parallel (`parMap`, whose value is `Array.map`'s).
 4. The phase ledger (`lean/KV/Spec/Ledger.lean`) for P0-2 and P0-4: its
    classification of waits (happens-before over the role traces, each role taken
    as one thread in lockstep), its lockstep phase contents (fixed per-role

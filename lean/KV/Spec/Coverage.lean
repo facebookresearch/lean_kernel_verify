@@ -147,6 +147,52 @@ def Holds (r : Run) : Prop := r.elided = false → Ok r
 
 instance (r : Run) : Decidable (Holds r) := by unfold Holds; infer_instance
 
+/-- `decide (WriteOk h tgs e)` from the written offsets alone, without the rows `writes` pairs
+them with (`writeOkB_iff`). -/
+def writeOkB (h : Host) (tgs : Array Target) (e : TEvent) : Bool :=
+  match e.ev with
+  | .gstore t offs =>
+    match tgs.find? (·.t == t) with
+    | some g => offs.all (g.set.contains ·)
+    | none => true
+  | .tmaStore t cs =>
+    match tgs.find? (·.t == t) with
+    | some g => (h.tensors[t]!.tmaElems cs).all fun x => g.set.contains x.1
+    | none => true
+  | _ => true
+
+theorem writeOkB_iff (h : Host) (tgs : Array Target) (e : TEvent) :
+    writeOkB h tgs e = true ↔ WriteOk h tgs e := by
+  cases hev : e.ev <;> simp only [writeOkB, WriteOk, writes, hev] <;>
+    (try split) <;> simp only [Array.all_eq_true'] <;> simp
+
+instance (h : Host) (t : TensorInfo) : Decidable (HasIntent h t) := by
+  unfold HasIntent; infer_instance
+
+/-- `decide (OkWith tgs Ls r)`, the events' writes checked per CTA in parallel by `writeOkB`
+(`okWithB_iff`). -/
+def okWithB (tgs : Array Target) (Ls : Array Ledger) (r : Run) : Bool :=
+  (r.host.tensors.all fun t => decide (HasIntent r.host t)) &&
+    (Ls.all fun L => L.target.elems.all fun x => L.plain x.1 == 1) &&
+    (parMap (fun c => c.roles.all fun t => t.events.all (writeOkB r.host tgs)) r.ctas).all id
+
+theorem okWithB_iff (tgs : Array Target) (Ls : Array Ledger) (r : Run) :
+    okWithB tgs Ls r = true ↔ OkWith tgs Ls r := by
+  unfold okWithB OkWith
+  simp only [parMap_eq, Array.all_map, Array.all_eq_true', Function.comp_def, id, writeOkB_iff,
+    Bool.and_eq_true, decide_eq_true_eq, beq_iff_eq, and_assoc]
+
+/-- `decide (Ok r)` from its targets `tgs = targets r.host` and their ledgers
+`Ls = ledgers r tgs`, computed once and shared with the report (`okB_eq`). -/
+theorem okB_eq (r : Run) :
+    okWithB (targets r.host) (ledgers r (targets r.host)) r = decide (Ok r) := by
+  rw [Bool.eq_iff_iff, decide_eq_true_iff, okWithB_iff]; rfl
+
+theorem decide_holds (r : Run) : decide (Holds r) = (r.elided || decide (Ok r)) := by
+  rw [Bool.eq_iff_iff, decide_eq_true_iff]
+  unfold Holds
+  by_cases h : r.elided = true <;> simp [h]
+
 /-! ## Counterexamples and notes -/
 
 /-- Output tensors the input's `intended_writes` does not name. -/
@@ -175,8 +221,14 @@ def dupIssues (h : Host) (Ls : Array Ledger) : Array Issue :=
              msg := s!"{dups.size} element(s) written more than once by plain stores (rows {runs (dedup (dups.map (·.2)))}); e.g. offset {o} (row {row}) {c.plain} times, by {" and ".intercalate c.writers.toList}" }
 
 /-- Elements of the write event `e` outside the intended region of its tensor: plain stores
-(`plain = true`, violations) or reductions (`plain = false`, notes). -/
+(`plain = true`, violations) or reductions (`plain = false`, notes). An event of the other kind
+gives none (tested first: `writes` and the filter are per lane). -/
 def outsideWrites (h : Host) (tgs : Array Target) (plain : Bool) (e : TEvent) : Array String :=
+  let kind := match e.ev with
+    | .gstore .. | .tmaStore .. => some true
+    | .gatomic .. | .tmaReduce .. => some false
+    | _ => none
+  if kind != some plain then #[] else
   match writes h e with
   | some (t, p, xs) =>
     match tgs.find? (·.t == t) with
@@ -189,20 +241,27 @@ def outsideWrites (h : Host) (tgs : Array Target) (plain : Bool) (e : TEvent) : 
     | none => #[]
   | none => #[]
 
-/-- Why `Ok r` fails (holes only if every role trace is complete). -/
-def okIssues (r : Run) : Array Issue :=
-  let tgs := targets r.host
-  let Ls := ledgers r tgs
+/-- Why `OkWith tgs Ls r` fails (holes only if every role trace is complete). -/
+def okIssuesWith (tgs : Array Target) (Ls : Array Ledger) (r : Run) : Array Issue :=
   intentIssues r.host ++ (if r.complete then holeIssues r.host Ls else #[]) ++ dupIssues r.host Ls ++
     r.collect (outsideWrites r.host tgs true)
 
-/-- Tensors opted out with `unchecked`, and reductions that leave the intended region. -/
-def okNotes (r : Run) : Array Issue :=
+/-- Why `Ok r` fails (holes only if every role trace is complete). -/
+def okIssues (r : Run) : Array Issue :=
+  let tgs := targets r.host
+  okIssuesWith tgs (ledgers r tgs) r
+
+/-- Tensors opted out with `unchecked`, and reductions that leave the intended regions `tgs`
+(`targets r.host`). -/
+def okNotesWith (tgs : Array Target) (r : Run) : Array Issue :=
   let unchecked := r.host.input.intended_writes.toArray.filterMap fun (name, iw) =>
     if let .unchecked := iw then
       some { loc := "", context := s!"tensor {name}", msg := "intended_writes is \"unchecked\": its coverage is not checked" }
     else none
-  unchecked ++ r.collect (outsideWrites r.host (targets r.host) false)
+  unchecked ++ r.collect (outsideWrites r.host tgs false)
+
+/-- Tensors opted out with `unchecked`, and reductions that leave the intended region. -/
+def okNotes (r : Run) : Array Issue := okNotesWith (targets r.host) r
 
 /-- Counterexamples of P0-3. -/
 def issues (r : Run) : Array Issue := if r.elided then #[] else okIssues r

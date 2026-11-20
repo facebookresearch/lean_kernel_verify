@@ -66,7 +66,11 @@ reference for what each verdict means. The Lean definitions are the authority; e
   adds the axiom that the evaluation's decisions are what it computed (Lean 4.34's
   `native_decide` adds `e = true` the same way) and proves, per spec, the theorem
   `KV.Holds .<spec> kernel input` (PASS) or its negation (FAIL, UNDECIDED) from it:
-  one evaluation per input whatever the number of specs (the form with one
+  one evaluation per input whatever the number of specs, its analyses (barrier and P1
+  ledgers, P0-1's, P0-3's and P0-5's decisions, P0-3's targets and ledgers, P0-6's
+  analysis, P1-1's and P1-2's pair searches, P0-7's analysis) computed once for the report and every
+  decision (`Check.lean` `Shared`; `checkAll_snd` proves the decisions computed from them
+  are the specs' decisions) (the form with one
   `native_decide` theorem per spec, which evaluates the input once per spec, is
   `emit_lean.py --legacy-theorems`). This trusts the Lean compiler and the native
   `libKV.so` built from the same sources (T1). The evaluator is total (no `partial`), so the theorem

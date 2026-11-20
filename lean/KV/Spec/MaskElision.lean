@@ -34,6 +34,12 @@ def Holds (r : Run) : Prop := r.elided = true → Bounds.EventsOk r ∧ Coverage
 
 instance (r : Run) : Decidable (Holds r) := by unfold Holds; infer_instance
 
+theorem decide_holds (r : Run) :
+    decide (Holds r) = (!r.elided || (decide (Bounds.EventsOk r) && decide (Coverage.Ok r))) := by
+  rw [Bool.eq_iff_iff, decide_eq_true_iff]
+  unfold Holds
+  by_cases h : r.elided = true <;> simp [h]
+
 /-- Counterexamples of P0-5. -/
 def issues (r : Run) : Array Issue := if r.elided then Bounds.eventsIssues r ++ Coverage.okIssues r else #[]
 

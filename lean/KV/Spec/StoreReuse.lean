@@ -648,6 +648,21 @@ def Holds (r : Run) : Prop := HoldsOn (ctxs r r.ledgersP1)
 
 instance (r : Run) : Decidable (Holds r) := by unfold Holds; infer_instance
 
+/-- Every cluster with its conflicting pairs, the clusters in parallel; the decision and the
+report (`analyzeWith`) share them (`holdsOnB_eq`). -/
+def withPairs (Cs : Array Ctx) : Array (Ctx × Array (Nat × Nat × PairKind)) :=
+  parMap (fun C => (C, pairs C)) Cs
+
+/-- `decide (HoldsOn Cs)` from `withPairs Cs` (`holdsOnB_eq`). -/
+def holdsOnB (cps : Array (Ctx × Array (Nat × Nat × PairKind))) : Bool :=
+  (cps.all fun (_, ps) => ps.isEmpty) && (crossPairs (cps.map (·.1))).isEmpty
+
+theorem holdsOnB_eq (Cs : Array Ctx) : holdsOnB (withPairs Cs) = decide (HoldsOn Cs) := by
+  rw [Bool.eq_iff_iff, decide_eq_true_iff]
+  unfold holdsOnB withPairs HoldsOn
+  simp only [parMap_eq, Array.map_map, Function.comp_def, Array.map_id', Array.all_map,
+    Array.all_eq_true', Bool.and_eq_true]
+
 /-! ## Counterexamples and notes -/
 
 def ctxName (h : Host) (C : Ctx) : String :=
@@ -727,9 +742,13 @@ stopped-trace line, then per cluster its certain F1/F2 lines (or, with a named b
 with two counts or a ledger that does not converge, a `not decided` line and them), the
 cross-cluster F2 lines, then the U1-U4 lines (each a `not decided` line), after a
 `not decided` head line if nothing is certain. -/
-def analyze (r : Run) (Ls : Ledgers) : P2Out := Id.run do
+def analyze (r : Run) (Ls : Ledgers) : P2Out := analyzeWith r ((ctxs r Ls).map fun C => (C, pairs C))
+where
+  /-- `analyze` from the clusters with their conflicting pairs (`withPairs`, shared with the
+  decision). -/
+  analyzeWith (r : Run) (cps : Array (Ctx × Array (Nat × Nat × PairKind))) : P2Out := Id.run do
   let h := r.host
-  let Cs := ctxs r Ls
+  let Cs := cps.map (·.1)
   let mut ok := true
   let mut issues : Array Issue := #[]
   let mut certain := false
@@ -742,8 +761,7 @@ def analyze (r : Run) (Ls : Ledgers) : P2Out := Id.run do
   let mut nnamed := 0
   let mut incons : Array Int := #[]
   let mut nblocked := 0
-  for C in Cs do
-    let ps := pairs C
+  for (C, ps) in cps do
     let bad := C.named.filter (!·.consistent)
     let fails := pairIssues h C ps .fail
     let why : Option String :=

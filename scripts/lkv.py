@@ -31,6 +31,10 @@ run    dump with the case's frontend (a buck2 binary: CuTe DSL if the case has a
        its own (`<spec>@cluster<dims>`, with the inputs whose grid the dims divide; a
        failed one counts for those inputs).
 check  the Layer-2 half of `run` on existing KIR files (e.g. tests/lean fixtures).
+       Both run --jobs Lean files at a time (default min(8, CPUs)); each Lean process
+       evaluates independent parts of an input (CTAs, cluster ledgers) in parallel tasks on
+       LKV_LEAN_THREADS threads, default max(2, CPUs // jobs): the CPUs shared among the
+       files, and at least two, as lean's elaboration uses a second thread.
 export write fbsource PATHs at REV under OUT_DIR with read-only `sl files`/`sl cat`: a
        file with the first-party modules it imports at OUT_DIR/<path below fbcode/>
        (TLX/Triton cases), a directory as a package at OUT_DIR/<basename>/ (CuTe cases),
@@ -212,6 +216,21 @@ EXIT_STATUS = {"PASS": 0, "UNDECIDED": 0, "FAIL": 1, "ERROR": 2}
 
 def log(msg):
     print(f"[lkv] {msg}", file=sys.stderr, flush=True)
+
+
+def lean_threads(jobs):
+    """Threads of each Lean process (scripts/run_lean_check.sh's -j): $LKV_LEAN_THREADS if
+    set, else the CPUs this process may use shared among `jobs` Lean files at a time, and at
+    least 2 (lean elaborates on a second thread: with one, elaboration is slower than lean's
+    default, which starts a worker per CPU in every process)."""
+    if os.environ.get("LKV_LEAN_THREADS", "").isdigit():
+        return max(1, int(os.environ["LKV_LEAN_THREADS"]))
+    cpus = (
+        len(os.sched_getaffinity(0))
+        if hasattr(os, "sched_getaffinity")
+        else os.cpu_count() or 1
+    )
+    return max(2, cpus // max(1, jobs))
 
 
 def die(msg):
@@ -820,8 +839,9 @@ def variant_name(path):
     return path.name.removesuffix(".json").removesuffix(".kir")
 
 
-def check_kir(path, lean_dir, sources, timeout):
-    """Validate, emit and check one KIR file; returns its report entry."""
+def check_kir(path, lean_dir, sources, timeout, threads=2):
+    """Validate, emit and check one KIR file (lean with `threads` threads); returns its
+    report entry."""
     entry = {"variant": variant_name(path), "kir": str(path)}
     k = json.loads(path.read_text())
     entry.update(
@@ -852,6 +872,7 @@ def check_kir(path, lean_dir, sources, timeout):
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=dict(os.environ, LKV_LEAN_THREADS=str(threads)),
         )
     except subprocess.TimeoutExpired:
         return dict(
@@ -898,9 +919,12 @@ def layer2(kirs, out, sources, jobs, timeout):
     if build.returncode != 0:
         raise RuntimeError(f"scripts/build_lean.sh failed:\n{build.stderr[-2000:]}")
     results = []
+    threads = lean_threads(jobs)
+    log(f"lean: {jobs} file(s) at a time, {threads} thread(s) each")
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as pool:
         futures = {
-            pool.submit(check_kir, p, lean_dir, sources, timeout): p for p in kirs
+            pool.submit(check_kir, p, lean_dir, sources, timeout, threads): p
+            for p in kirs
         }
         for n, f in enumerate(concurrent.futures.as_completed(futures), 1):
             e = f.result()
@@ -1875,7 +1899,8 @@ def main():
             "--jobs",
             type=int,
             default=min(8, os.cpu_count() or 1),
-            help="Lean files at a time; also the TTGIR frontend's P0-6 processes",
+            help="Lean files at a time; also the TTGIR frontend's P0-6 processes (each Lean "
+            "file gets LKV_LEAN_THREADS threads, default max(2, CPUs // jobs))",
         )
         p.add_argument(
             "--timeout", type=int, default=3600, help="seconds per Lean file"

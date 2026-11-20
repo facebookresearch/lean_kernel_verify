@@ -474,6 +474,21 @@ def Holds (r : Run) : Prop := ∀ c ∈ p1Ctas r r.ledgersP1, ctaOk (cols r) c =
 
 instance (r : Run) : Decidable (Holds r) := by unfold Holds; infer_instance
 
+/-- Every CTA with its conflicting pairs, the CTAs in parallel; the decision and the report
+(`analyzeWith`) share them (`holdsB_eq`). -/
+def withPairs (cols : Nat) (Cs : Array P1Cta) : Array (P1Cta × Array (Nat × Nat × PairKind)) :=
+  parMap (fun C => (C, pairs C cols)) Cs
+
+/-- `decide (∀ c ∈ Cs, ctaOk cols c = true)` from `withPairs cols Cs` (`holdsB_eq`). -/
+def holdsB (cols : Nat) (cps : Array (P1Cta × Array (Nat × Nat × PairKind))) : Bool :=
+  cps.all fun (C, ps) => ctaOkWith cols C ps
+
+theorem holdsB_eq (cols : Nat) (Cs : Array P1Cta) :
+    holdsB cols (withPairs cols Cs) = decide (∀ c ∈ Cs, ctaOk cols c = true) := by
+  rw [Bool.eq_iff_iff, decide_eq_true_iff]
+  unfold holdsB withPairs ctaOk
+  simp only [parMap_eq, Array.all_map, Function.comp_def, Array.all_eq_true']
+
 /-! ## Counterexamples and notes -/
 
 def ctx (h : Host) (C : P1Cta) (a b : Access) : String :=
@@ -561,7 +576,12 @@ order: a stopped-trace line, then per CTA the certain counterexamples (F2, F3, a
 every named barrier has one count and the ledger converged) or, with an inconsistent named
 barrier or a ledger that does not converge, a `not decided` line and its F1 lines; then the
 U1 lines, after a `not decided` line if nothing above is certain. -/
-def analyze (r : Run) (Ls : Ledgers) : P1Out := Id.run do
+def analyze (r : Run) (Ls : Ledgers) : P1Out :=
+  analyzeWith r ((p1Ctas r Ls).map fun C => (C, pairs C (cols r)))
+where
+  /-- `analyze` from the CTAs with their conflicting pairs (`withPairs`, shared with the
+  decision). -/
+  analyzeWith (r : Run) (cps : Array (P1Cta × Array (Nat × Nat × PairKind))) : P1Out := Id.run do
   let h := r.host
   let mut ok := true
   let mut issues : Array Issue := #[]
@@ -574,8 +594,7 @@ def analyze (r : Run) (Ls : Ledgers) : P1Out := Id.run do
   let mut nnamed := 0
   let mut incons : Array Int := #[]
   let mut nblocked := 0
-  for C in p1Ctas r Ls do
-    let ps := pairs C (cols r)
+  for (C, ps) in cps do
     let bad := C.named.filter (!·.consistent)
     let fails := pairIssues h C ps .fail
     let ranges := rangeIssues h (cols r) C

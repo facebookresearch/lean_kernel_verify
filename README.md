@@ -107,7 +107,9 @@ python3 -I scripts/lkv.py check tests/lean/pipeline_ok.kir.json \
 
 The first run builds `lean/KV` and its native library `libKV.so` in
 `/tmp/lkv_lean_build_$USER/<hash>`, one directory per `lean/` sources and toolchain
-(`LKV_LEAN_BUILD` overrides the directory). `pipeline_ok`
+(`LKV_LEAN_BUILD` overrides the directory). Lean evaluates independent parts of an input
+(CTAs, cluster ledgers) in parallel tasks on `LKV_LEAN_THREADS` threads (`lkv.py`: the
+CPUs divided by `--jobs`, at least 2). `pipeline_ok`
 passes every spec; `floor_tile_tail` launches `N // 64` programs of 64 rows, so for
 N = 100 and N = 40 the rows after the last full tile are never written:
 
