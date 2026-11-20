@@ -179,10 +179,14 @@ Consequences that are checked, not assumed:
 
 * Every launch is skipped, so data a launch writes keeps its CPU contents afterwards.
   dump compiles every launched specialization, the analyzed kernel's included, and reads
-  its TTGIR write set (`provenance.py`; if a store target is not traceable, e.g. an
-  address loaded from a pointer array, or the kernel has side-effecting inline asm, the
-  write set is unknown: every pointer argument, and every storage its address hints point
-  into). The inputs run in one process like consecutive calls, so a launch of one input
+  its TTGIR write set (`provenance.py`; side-effecting inline asm writes through its
+  pointer operands when each of its instructions writes no memory and no input register,
+  or is a shared-memory st/red/atom (no parameter) or a st/red/atom whose address is
+  `[$k]` or `[$k +- n]` of one (`$k` numbered as Triton packs the operands, no tied
+  constraints), else anywhere; if a store target is not
+  traceable, e.g. an address loaded from a pointer array, or the asm may write anywhere,
+  the write set is unknown: every pointer argument, and every storage its address hints
+  point into). The inputs run in one process like consecutive calls, so a launch of one input
   may write what a later input reads (a module-level cache): one `HostReads` tracks the
   whole run, and launch indices, sources and write sets are run-wide. It tracks where
   host data comes from: every storage passed to a launch is a possible source from then

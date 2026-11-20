@@ -47,16 +47,17 @@ def kernel(body, ptrs=("x",), scalars=("n",), threads=128, extra="", src=SRC):
 
 
 def run(body, family="ttgir", ptrs=("x",), scalars=("n",), threads=128, elem=None,
-        cluster=(1, 1, 1), extra="", src=SRC, **pol):  # fmt: skip
+        cluster=(1, 1, 1), extra="", src=SRC, floats=(), **pol):  # fmt: skip
     """Facts of kernel(body, ...) under the family's policy (overrides in pol); the
-    source root is `src`."""
+    source root is `src`; the tensors in `floats` hold floating-point data."""
     elem = elem or {}
     params = [{"ptx": f"k_param_{i}", "kind": "ptr", "name": p, "size": 8, "fields": {}}
               for i, p in enumerate(ptrs)]  # fmt: skip
     params += [{"ptx": f"k_param_{len(ptrs) + i}", "kind": "scalar", "name": s, "size": 4,
                 "fields": {}} for i, s in enumerate(scalars)]  # fmt: skip
     policy = T.policy(family, src_root=src, params=params,
-                      tensors={p: {"elem_bytes": elem.get(p, 4)} for p in ptrs}, **pol)  # fmt: skip
+                      tensors={p: {"elem_bytes": elem.get(p, 4), "float": p in floats} for p in ptrs},
+                      **pol)  # fmt: skip
     rec = {"block": [threads, 1, 1], "cluster": list(cluster)}
     return T.translate(
         kernel(body, ptrs, scalars, threads, extra, src), "k", [rec], policy

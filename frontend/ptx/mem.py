@@ -527,6 +527,9 @@ class Memory:
                 out.append(Data(f"{i.opcode} of {name} at {tr.loc(i)} (a strong "
                                 "load: another thread may write it)"))  # fmt: skip
                 continue
+            if self.tensors[name].get("float"):  # its contents are never recorded
+                out.append(Data(f"{i.opcode} of {name} at {tr.loc(i)}"))
+                continue
             out.append(E.load(name, tr.guard(idx, 0), bits))
         return out
 

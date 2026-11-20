@@ -368,7 +368,8 @@ the element size, provably exact, else the access is refused. An integer global 
 the register's width whose value reaches a root is a metadata read,
 KIR `load(T, [index])`, and T is a metadata tensor whose recorded contents the input
 carries; not a strong load (`.volatile`, `.relaxed`, `.acquire`, also `.cv`), whose
-location another thread may write while the kernel runs: its value is Data. The family
+location another thread may write while the kernel runs, nor a load of a floating-point
+tensor (TTGIR: its recorded dtype), whose contents are never recorded: its value is Data. The family
 assembly checks that the contents are those the kernel reads (`frontend_ttgir.md`,
 `frontend_cute.md`). A generic access of shared memory is data, as `ld`/`st.shared` and
 `atom`/`red.shared` (an explicitly global one there is an error); local memory is the

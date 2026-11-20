@@ -1129,21 +1129,84 @@ class LocAndAddrTest(unittest.TestCase):
 
 
 class ProvenanceTest(unittest.TestCase):
-    """A write set is unknown when the kernel has side-effecting asm."""
+    """The write set of side-effecting asm: its stores through pointer operands, else
+    unknown."""
 
-    def test_side_effecting_inline_asm_makes_the_write_set_unknown(self):
-        asm = """    %r = tt.make_range {{end = 4 : i32, start = 0 : i32}} : tensor<4xi32, #blocked> loc(#loc3)
-    %v = tt.elementwise_inline_asm "mov.u32 $0, $1;" {{constraints = "=r,r", packed_element = 1 : i32, pure = {PURE}}} %r : tensor<4xi32, #blocked> -> tensor<4xi32, #blocked> loc(#loc3)
+    ASM = """    %r = tt.make_range {{end = 4 : i32, start = 0 : i32}} : tensor<4xi32, #blocked> loc(#loc3)
+    %ys = tt.splat %y_ptr : !tt.ptr<i32> -> tensor<4x!tt.ptr<i32>, #blocked> loc(#loc3)
+    %v = tt.elementwise_inline_asm "{TEXT}" {{constraints = "=r,l,r", packed_element = 1 : i32, pure = {PURE}}} %ys, %r : tensor<4x!tt.ptr<i32>, #blocked>, tensor<4xi32, #blocked> -> tensor<4xi32, #blocked> loc(#loc3)
     %p = tt.addptr %x_ptr, %c0_i32 : !tt.ptr<i32>, i32 loc(#loc4)
     tt.store %p, %c0_i32 : !tt.ptr<i32> loc(#loc4)
 """
-        args = {"x_ptr": "!tt.ptr<i32>", "y_ptr": "!tt.ptr<i32>"}
+    ARGS = {"x_ptr": "!tt.ptr<i32>", "y_ptr": "!tt.ptr<i32>"}
+
+    def written(self, text: str, pure: str = "false"):
+        return provenance.written_params(
+            ttgir(self.ARGS, self.ASM.format(TEXT=text, PURE=pure))
+        )
+
+    def test_side_effecting_inline_asm(self):
+        store = "{ .reg .pred p; setp.ne.b32 p, $2, 0; @p st.global.b32 [$1+4], $2; mov.u32 $0, 0; }"
+        self.assertEqual(self.written(store, "true"), {"x_ptr"})
+        self.assertEqual(self.written(store), {"x_ptr", "y_ptr"})
+        self.assertEqual(self.written("mov.u32 $0, $2;"), {"x_ptr"})  # no memory write
         self.assertEqual(
-            provenance.written_params(ttgir(args, asm.format(PURE="true"))), {"x_ptr"}
+            self.written("st.shared.b32 [$2], $2; mov.u32 $0, 0;"), {"x_ptr"}
+        )
+        for unknown in ("st.global.b32 [$2], $2; mov.u32 $0, 0;",  # not a pointer operand
+                        "cp.async.bulk.global.shared::cta.bulk_group [$1], [$2], 16;",
+                        "membar.gl; mov.u32 $0, $2;",
+                        "ld.global.u64 $1, [$1]; st.global.b32 [$1], $2; mov.u32 $0, 0;"):  # fmt: skip
+            self.assertIsNone(self.written(unknown), unknown)  # (the last rewrites $1)
+        # an MLIR tab escape between instructions
+        self.assertEqual(self.written("st.global.b32 [$1], $2;\\0A\\09mov.u32 $0, 0;"),
+                         {"x_ptr", "y_ptr"})  # fmt: skip
+
+    TWO = """    %xs = tt.splat %x_ptr : !tt.ptr<i32> -> tensor<4x!tt.ptr<i32>, #blocked> loc(#loc3)
+    %ys = tt.splat %y_ptr : !tt.ptr<i32> -> tensor<4x!tt.ptr<i32>, #blocked> loc(#loc3)
+    %r = tt.make_range {{end = 4 : i32, start = 0 : i32}} : tensor<4xi32, #blocked> loc(#loc3)
+    %h = arith.trunci %r : tensor<4xi32, #blocked> to tensor<4xi16, #blocked> loc(#loc3)
+    %a = arith.extsi %r : tensor<4xi32, #blocked> to tensor<4xi64, #blocked> loc(#loc3)
+    %v = tt.elementwise_inline_asm "{TEXT}" {{constraints = "{CONS}", packed_element = {N} : i32, pure = false}} {OPS} : {TYPES} -> tensor<4xi32, #blocked> loc(#loc3)
+"""
+
+    def test_operand_registers(self):
+        # Triton packs the outputs, then each operand: a pointer takes packed_element
+        # registers; a tied (matching) constraint makes the write set unknown
+        ptr, i32 = "tensor<4x!tt.ptr<i32>, #blocked>", "tensor<4xi32, #blocked>"
+
+        def written(text, cons, n, ops):
+            body = self.TWO.format(TEXT=text, CONS=cons, N=n, OPS=", ".join(o for o, _ in ops),
+                                   TYPES=", ".join(t for _, t in ops))  # fmt: skip
+            return provenance.written_params(ttgir(self.ARGS, body))
+
+        two = [("%xs", ptr), ("%ys", ptr)]
+        self.assertEqual(written("st.global.b32 [$3], 0; mov.u32 $0, 0;", "=r,=r,l,l,l,l", 2, two),
+                         {"x_ptr"})  # fmt: skip
+        self.assertEqual(written("st.global.b32 [$4], 0; mov.u32 $0, 0;", "=r,=r,l,l,l,l", 2, two),
+                         {"y_ptr"})  # fmt: skip
+        mixed = [("%r", i32), ("%ys", ptr)]
+        self.assertEqual(written("st.global.b32 [$2], $1; mov.u32 $0, 0;", "=r,r,l", 1, mixed),
+                         {"y_ptr"})  # fmt: skip
+        self.assertIsNone(
+            written("st.global.b32 [$1], $2; mov.u32 $0, 0;", "=r,r,l", 1, mixed)
         )
         self.assertIsNone(
-            provenance.written_params(ttgir(args, asm.format(PURE="false")))
+            written("st.global.b32 [$2], 0; mov.u32 $0, 0;", "=r,l,0", 1, two)
         )
+        # a 32-element row store (pack 32): 8 outputs, 16 registers of i16 values, the pointer's 32,
+        # a 32-bit mask's 32; the stores go through $24, the pointer's first register
+        st = ("{ .reg .pred p; setp.ne.b32 p, $56, 0; "
+              "@p st.global.v8.b32 [$24], {$8, $9, $10, $11, $12, $13, $14, $15}; "
+              "@p st.global.v8.b32 [$24+32], {$16, $17, $18, $19, $20, $21, $22, $23}; "
+              + " ".join("mov.b32 $%d, 0;" % k for k in range(8)) + " }")  # fmt: skip
+        cons = ",".join(["=r"] * 8 + ["r"] * 16 + ["l"] * 32 + ["r"] * 32)
+        b16 = [("%h", "tensor<4xi16, #blocked>"), ("%ys", ptr), ("%r", i32)]
+        self.assertEqual(written(st, cons, 32, b16), {"y_ptr"})
+        # the i64 address $2 is no pointer operand's register (x_ptr is tied to output 0)
+        tied = [("%a", "tensor<4xi64, #blocked>"), ("%xs", ptr)]
+        self.assertIsNone(written("atom.global.exch.b32 $1, [$2], 1; mov.u64 $0, $3;",
+                                  "=l,=r,l,0", 1, tied))  # fmt: skip
 
 
 class EvaluateTest(unittest.TestCase):

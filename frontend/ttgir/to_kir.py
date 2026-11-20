@@ -1610,8 +1610,8 @@ def build_ptx(
         raise KirError(f"case `work`: {e}", kind="error") from e
     per = T.per_fields(annotations)
     pol = T.policy("ttgir", src_root=dump["src_root"], params=T.param_table(records, "ttgir", fn),
-                   tensors={n: {"elem_bytes": a["elem_bytes"]} for n, a in snap0.items()
-                            if a["kind"] == "tensor"}, blocks=_desc_blocks(launches),
+                   tensors={n: {"elem_bytes": a["elem_bytes"], "float": a["dtype"].startswith(("float", "bfloat"))}
+                            for n, a in snap0.items() if a["kind"] == "tensor"}, blocks=_desc_blocks(launches),
                    work={"fields": list(work), "mode": "gate", "per": per, "sites": sites},
                    **({"p1": ["P1-2"]} if p1 else {}))  # fmt: skip
     facts = T.translate(text, fn.name, records, pol)

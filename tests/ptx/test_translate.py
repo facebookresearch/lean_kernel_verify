@@ -322,6 +322,38 @@ class Contract(unittest.TestCase):
         return run(body, family=family, ptrs=("x", "seg"), scalars=(),
                    work={"fields": ["batch"], "mode": mode, "sites": [site]})  # fmt: skip
 
+    def test_float_tensor_loads(self):
+        # A load of a float tensor (its contents are never recorded) is Data: refused
+        # where it reaches an address, clean as data, and it still anchors a work field.
+        body = """
+    mov.u32 %r1, %tid.x;
+    ld.param.u64 %rd1, [k_param_0];
+    ld.param.u64 %rd5, [k_param_1];
+    mov.u32 %r2, %ctaid.x;
+    mul.wide.u32 %rd4, %r2, 4;
+    add.s64 %rd6, %rd5, %rd4;
+    ld.global.b32 %r4, [%rd6];
+    setp.eq.s32 %p1, %r1, 0;
+    USE
+    ret;
+"""
+        data = body.replace("USE", "@%p1 st.global.b32 [%rd1], %r4;")
+        fn = parse.parse(kernel(data, ptrs=("x", "seg"), scalars=())).function("k")
+        k = next(
+            j for j, i in enumerate(fn.instructions()) if i.text.startswith("ld.global")
+        )
+        site = {"field": "batch", "kind": "load", "instr": ("k", k, fn.instructions()[k].line),
+                "detail": {"tensor": "seg"}}  # fmt: skip
+        f = run(data, ptrs=("x", "seg"), scalars=(), floats=("seg",),
+                work={"fields": ["batch"], "mode": "gate", "sites": [site]})  # fmt: skip
+        self.assertEqual(f.refusals, [])
+        self.assertEqual(len(events(f, "work")), 1)
+        self.assertFalse(f.tensors["seg"]["metadata"])
+        addr = body.replace("USE", "mul.wide.s32 %rd2, %r4, 4;\n    add.s64 %rd3, %rd1, %rd2;\n"
+                            "    @%p1 st.global.b32 [%rd3], %r1;")  # fmt: skip
+        f = run(addr, ptrs=("x", "seg"), scalars=(), floats=("seg",))
+        self.assertIn("data value from ld.global.b32 of seg", f.refusals[0]["msg"])
+
     def test_work_anchors(self):
         f = self.work("ttgir", "assign")
         (w,) = events(f, "work")
