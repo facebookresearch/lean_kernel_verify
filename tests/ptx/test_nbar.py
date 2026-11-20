@@ -190,6 +190,25 @@ $LOOP:
         self.assertEqual((s["status"], s["kind"], s["certain"]), ("open", "loop", True))
         self.assertIn("ld.volatile.global.u32", s["why"])
 
+    def test_carry_written_under_a_data_predicate(self):
+        # the threads whose predicate (a strong load) is false keep another carry, so the
+        # addc that reads it outside the predicate decides the barrier on that data
+        f = facts("""
+    ld.param.u64 %rd1, [k_param_0];
+    ld.volatile.global.u32 %r1, [%rd1];
+    setp.eq.s32 %p1, %r1, 0;
+    @%p1 add.cc.u32 %r3, -1, 1;
+    addc.u32 %r4, 0, 0;
+    setp.eq.s32 %p2, %r4, 0;
+    @!%p2 bra $SKIP;
+    bar.sync 1, 96;
+$SKIP:
+    ret;""")
+        self.ok(f)
+        (s,) = sites(f)
+        self.assertEqual((s["status"], s["certain"]), ("open", True))
+        self.assertIn("ld.volatile.global.u32", s["why"])
+
     def test_counted_loop_is_exact(self):
         f = facts("""
     ld.param.u32 %r1, [k_param_1];

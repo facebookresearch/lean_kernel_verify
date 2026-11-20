@@ -18,8 +18,9 @@ differs between threads, is no channel (the first refusal stays); another write 
 touch a channel refuses the second translation. The same through stmatrix / ldmatrix and a
 warp reduction of the rows. A role that puts a channel gets none; a word no other role loads
 after a wait is no channel; an ld.shared.s32 into a 64-bit register sign-extends the value
-got; a write without static bounds assumes it misses the channel; a channel over an mbarrier
-array, or an error in the second translation, refuses the variant.
+got; a write without static bounds assumes it misses the channel; a write at the zero extension
+of a value that may be negative may overwrite a channel; a channel over an mbarrier array, or
+an error in the second translation, refuses the variant.
 """
 
 import sys
@@ -247,6 +248,17 @@ class Handoffs(unittest.TestCase):
         (role,) = [r for r in f.roles if r["name"] == "default"]
         self.assertIn("a shared write misses the handoff channel %extern+128",
                       [s.get("msg") for s in _exprs(role["body"]) if s.get("op") == "assume"])  # fmt: skip
+
+    def test_write_through_a_zero_extension_may_overwrite(self):
+        # the default stores at the zero extension of x = (n & 7) - 1 in [-1, 6] at 16
+        # bits: 0..6 or 65535, so its 4 bytes may cover the channel at 65536 (bounds of
+        # the extension, not of x: interp._capture_iv)
+        f = run(default="    and.b32 %r80, %r20, 7;\n    add.s32 %r81, %r80, -1;\n"
+                        "    cvt.u32.u16 %r82, %r81;\n    add.s32 %r84, %r30, %r82;\n"
+                        "    st.shared.b32 [%r84], %r1;\n",
+                put="    st.shared.b32 [global_smem+65536], %r51;\n",
+                get="    ld.shared.b32 %r62, [global_smem+65536];\n")  # fmt: skip
+        self.assertIn("may overwrite the handoff channel %extern+65536", refusal(f))
 
     def test_channel_over_an_mbarrier_array_is_refused(self):
         f = run(put="    st.shared.b32 [global_smem+84], %r51;\n",

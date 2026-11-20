@@ -3125,6 +3125,10 @@ def _capture_iv_parts(e):  # noqa: C901 (one case per expression kind)
         w = E.width(e)
         if x is None or not -(1 << (w - 1)) <= x[0] <= x[1] < (1 << (w - 1)):
             return None  # (a value the extension or truncation would change)
+        if e[0] == "ext" and (E.width(e[3]) == 1 or not e[2] and x[0] < 0):
+            # E.interval's bounds: a 1-bit value's read it unsigned (its sign extension is
+            # 0 or -1), and a zero extension changes a negative value
+            return None
         return x
     if e[0] == "select":
         x, y = _capture_iv(e[3]), _capture_iv(e[4])

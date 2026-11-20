@@ -366,6 +366,31 @@ class Captures(unittest.TestCase):
             interp._capture_iv(E.bin("and", bit, E.const(126, 32))), (0, 0)
         )
 
+    def test_zero_extension_of_a_negative_value(self):
+        # x in [-1, 6] at 16 bits: its zero extension is 0..6 or 65535, its sign extension
+        # -1..6, so a footprint 4 * zext(x) reaches 262140
+        x = E.bin("sub", E.bin("and", E.var("n", 16), E.const(7, 16)), E.const(1, 16))
+        self.assertEqual(interp._capture_iv(x), (-1, 6))
+        z = E.ext(x, 32, False)
+        self.assertEqual(interp._capture_iv(z), (0, 65535))
+        self.assertEqual(
+            interp._capture_iv(E.bin("mul", z, E.const(4, 32))), (0, 262140)
+        )
+        self.assertEqual(interp._capture_iv(E.ext(x, 32, True)), (-1, 6))
+        self.assertEqual(
+            interp._capture_iv(E.ext(E.bin("and", x, E.const(7, 16)), 32, False)),
+            (0, 7),
+        )
+
+    def test_sign_extension_of_a_bit(self):
+        # a 1-bit value is 0 or 1 and its sign extension 0 or -1, so a footprint
+        # 4 * sext(p) reaches -4
+        p = E.cmp("slt", E.var("n", 32), E.const(4, 32))
+        s = E.ext(p, 32, True)
+        self.assertEqual(interp._capture_iv(s), (-1, 0))
+        self.assertEqual(interp._capture_iv(E.ext(p, 32, False)), (0, 1))
+        self.assertEqual(interp._capture_iv(E.bin("mul", s, E.const(4, 32))), (-4, 0))
+
     def test_strength_reduced_offset_is_assumed(self):
         # an offset carried through a loop (no static bounds): the capture stays known
         # under a KIR assume (change 16) that the landing misses it, evaluated per input

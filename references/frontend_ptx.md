@@ -700,7 +700,9 @@ is the control flow, the named barriers and the values that decide them.
   test accepted; also LLVM's rotated `if accept(v0) skip; else spin`) is published
   (`u`) in the register that holds it as loaded (or a copy) at every exit; a value
   computed from it in the loop is `t`, not nondet. An instruction without an op table
-  row computes `t` data unless it may be a barrier or a branch (error).
+  row computes `t` data unless it may be a barrier or a branch (error). An instruction
+  under a data predicate leaves its destinations, and the carry flag a `.cc` instruction
+  writes, merged with their earlier values (the classes joined).
 - **Control flow.** An If deciding no barrier runs both arms for their values; one
   deciding a barrier is a KIR `if` (exact uniform), a split (per warp), two `nb_rep`
   regions (class-u data or a symbol), or divergent: both arms translated with every

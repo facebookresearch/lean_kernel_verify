@@ -775,6 +775,10 @@ class _Nb(interp.Translator):
                     self.div.pop()
                 return
             old = {r: self.env.get(r) for r in R.dests(i)}
+            if mn.endswith(
+                ".cc"
+            ):  # the carry flag it writes merges like its destinations
+                old[interp._CC] = self.env.get(interp._CC)
             self.execute(i, cls)
             for r, x in old.items():
                 self.env[r] = self._select(p, self.env.get(r), x, r)
