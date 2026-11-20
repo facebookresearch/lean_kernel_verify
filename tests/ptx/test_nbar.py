@@ -25,7 +25,9 @@ its compare chain (exact `if`s, a role split per warp, an index not provably in 
 refused); a class loop that leaves its dead registers unclassified; a cycle entered at
 two blocks (made reducible by node splitting); a call (refused, P0-6 undecided); a
 warp-specialized kernel whose default may run no round (the workers' barriers under its
-decision, refused on a decision that is data); and the KIRs frontend/kir.py accepts.
+decision, refused on a decision that is data); a nest of loops translated by classes
+(the final rounds the enclosing fixed-point rounds drop are skipped: the same KIR, fewer
+passes); and the KIRs frontend/kir.py accepts.
 """
 
 import sys
@@ -876,6 +878,85 @@ $E:
         self.assertEqual(got, [("default:w0-1", "arrive", 4), ("default:w0-1", "sync", 2),
                                ("default:w0-1", "sync", 3), ("default:w2-3", "sync", 2),
                                ("default:w2-3", "sync", 3), ("default:w2-3", "sync", 4)])  # fmt: skip
+
+    def test_discarded_final_rounds_are_skipped(self):
+        """A nest of loops bounded by a value read from x (uniform data: each loop is
+        translated by classes, an nb_rep region): inside an enclosing loop's fixed-point
+        round, whose work is discarded, a loop's final round is skipped
+        (nbar._SKIP_DISCARDED). The KIR does not change (also the variable names of an
+        exact loop inside the nest and of one after it: discarded work makes no names)
+        and the innermost barrier is translated fewer times: 3^d passes at depth d
+        without the cut (an exact attempt, one fixed-point round, the final round),
+        81 -> 48 at depth 4."""
+        passes = {}
+        for skip in (False, True):
+            seen = []
+            named_bar = nbar._Nb.named_bar
+
+            def spy(tr, i, mn, seen=seen, named_bar=named_bar):
+                seen.append(i.line)
+                return named_bar(tr, i, mn)
+
+            with mock.patch.object(nbar, "_SKIP_DISCARDED", skip):
+                with mock.patch.object(nbar._Nb, "named_bar", spy):
+                    nest = facts(_nest(4))
+                got = [nest, facts(NEST_NAMES)]
+            for f in got:
+                self.ok(f)
+            passes[skip] = (len(seen), [doc(f) for f in got])
+        self.assertEqual(passes[False][0], 81)
+        self.assertEqual(passes[True][0], 48)
+        self.assertEqual(passes[False][1], passes[True][1])  # the same KIRs
+        names = [s.get("var") for s in _stmts(passes[True][1][1]["roles"][0]["body"])
+                 if s["op"] in ("let", "for")]  # fmt: skip
+        # the exact loop's variable in the nest, then the slots of the loop after it: the
+        # first names of the role (the discarded rounds and attempts before them made
+        # none, interp.Translator.restore)
+        self.assertEqual(names[:3], ["i1", "c2", "go3"])
+
+
+# The innermost barrier of NEST_NAMES is in an exact counted loop (a KIR `for`), and an
+# exact loop on the parameter n follows the nest (`while` with its slots): both make
+# fresh names, the first ones in the rounds the cut skips.
+NEST_NAMES = """
+    ld.param.u64 %rd1, [k_param_0];
+    ld.global.u32 %r1, [%rd1];
+    mov.u32 %r10, 0;
+$L0:
+    mov.u32 %r11, 0;
+$L1:
+    mov.u32 %r20, 0;
+$E0:
+    bar.sync 1, 128;
+    add.s32 %r20, %r20, 1;
+    setp.lt.s32 %p5, %r20, 4;
+    @%p5 bra $E0;
+    add.s32 %r11, %r11, 1;
+    setp.lt.s32 %p2, %r11, %r1;
+    @%p2 bra $L1;
+    add.s32 %r10, %r10, 1;
+    setp.lt.s32 %p1, %r10, %r1;
+    @%p1 bra $L0;
+    ld.param.u32 %r30, [k_param_1];
+    mov.u32 %r31, 0;
+$E1:
+    bar.sync 2, 128;
+    add.s32 %r31, %r31, 1;
+    setp.lt.s32 %p6, %r31, %r30;
+    @%p6 bra $E1;
+    ret;"""
+
+
+def _nest(depth: int) -> str:
+    """depth loops, each counting to the value read from x, around one bar.sync."""
+    out = "    ld.param.u64 %rd1, [k_param_0];\n    ld.global.u32 %r1, [%rd1];\n"
+    for k in range(depth):
+        out += f"    mov.u32 %r{10 + k}, 0;\n$L{k}:\n"
+    out += "    bar.sync 1, 128;\n"
+    for k in reversed(range(depth)):
+        out += (f"    add.s32 %r{10 + k}, %r{10 + k}, 1;\n"
+                f"    setp.lt.s32 %p{k + 1}, %r{10 + k}, %r1;\n    @%p{k + 1} bra $L{k};\n")  # fmt: skip
+    return out + "    ret;"
 
 
 def _keys(f) -> dict:

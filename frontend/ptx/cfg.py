@@ -1176,10 +1176,14 @@ def _to(succs, frm, to):
 _FORK_BARRIERS = ("bar.sync", "barrier.sync", "barrier.sync.aligned")
 
 
-def _is_fork(i):
+def _is_fork(i, mn: str | None = None):
     """i is a fork barrier: barrier 1 over the whole CTA (no thread count) in any spelling
-    the op table admits; interp.py counts the same instructions."""
-    return ops.mnemonic(i.opcode) in _FORK_BARRIERS and i.operands == (("imm", 1),)
+    the op table admits; interp.py counts the same instructions (for every one it
+    executes: the operand test first, then the mnemonic, `mn` if the caller has it)."""
+    return (
+        i.operands == (("imm", 1),)
+        and (mn if mn is not None else ops.mnemonic(i.opcode)) in _FORK_BARRIERS
+    )
 
 
 def _nforks(cfg, b):
@@ -1246,7 +1250,17 @@ _BAR_RED = ("bar.red.", "barrier.red.")
 
 def _dests(i):
     """Registers i may write: those of its first operand. Taking a read for a write
-    only makes a match fail, never succeed."""
+    only makes a match fail, never succeed. Memoized in a parse.Instr's `memo`."""
+    memo = getattr(i, "memo", None)
+    r = None if memo is None else memo.get("dests")
+    if r is None:
+        r = _first_regs(i)
+        if memo is not None:
+            memo["dests"] = r
+    return r
+
+
+def _first_regs(i) -> tuple:
     if not i.operands or (
         i.opcode.startswith(_READS_FIRST) and not i.opcode.startswith(_BAR_RED)
     ):

@@ -1290,8 +1290,9 @@ class _Reroll:
         for j, s in enumerate(done):
             last.update(dict.fromkeys(_read(s, set()), j))
         out, i, vis = [], 0, set(visible)
+        memo: dict = {}  # _canon of each block tried, (start, length) -> _canon_at's entry
         while i < len(done):
-            run = self.best(texts, keys, i, vis, last)
+            run = self.best(texts, keys, i, vis, last, memo)
             if run is None:
                 if done[i]["op"] == "let":
                     vis.add(done[i]["var"])
@@ -1303,7 +1304,7 @@ class _Reroll:
                 i += run[0]
         return out
 
-    def best(self, texts: list, keys: list, i: int, vis: set, last: dict):
+    def best(self, texts: list, keys: list, i: int, vis: set, last: dict, memo: dict):
         """(statements covered, `for`) of the run at i saving the most, or None."""
         best, tries = None, 0
         for p in range(1, min(_REROLL_MAX, (len(texts) - i) // 2) + 1):
@@ -1312,24 +1313,26 @@ class _Reroll:
             tries += 1
             if tries > _REROLL_TRIES:
                 break
-            got = self.run(texts, keys, i, p, vis, last)
+            got = self.run(texts, keys, i, p, vis, last, memo)
             if got is not None and (best is None or got[0] > best[0]):
                 best = got
         return None if best is None else best[1:]
 
-    def run(self, texts: list, keys: list, i: int, p: int, vis: set, last: dict):
+    def run(self, texts: list, keys: list, i: int, p: int, vis: set, last: dict,
+            memo: dict):  # fmt: skip
         """(bytes saved, statements covered, `for`) of the longest run of blocks of p
-        statements at i, or None."""
+        statements at i, or None. The blocks' canonical forms come from `memo`
+        (_canon_at): the runs tried at the next positions meet the same blocks again."""
         if keys[i + p : i + 2 * p] != keys[i : i + p]:
             return None
         text = "".join(texts[i : i + p])
-        form, defs, base = _canon(text, vis)
+        form, defs, base = _canon_at(texts, i, p, vis, memo)
         steps, blocks = None, [defs]
         while i + (len(blocks) + 1) * p <= len(texts):
             k, j = len(blocks), i + len(blocks) * p
             if keys[j : j + p] != keys[i : i + p]:
                 break
-            f, d, vals = _canon("".join(texts[j : j + p]), vis)
+            f, d, vals = _canon_at(texts, j, p, vis, memo)
             if f != form:
                 break
             if steps is None:
@@ -1362,6 +1365,23 @@ class _Reroll:
         self.names.add(f"u{self.count}")
         while f"u{self.count}" in self.names:
             self.count += 1
+
+
+def _canon_at(texts: list, j: int, p: int, visible: set, memo: dict):
+    """_canon of the block texts[j : j + p], memoized in `memo` per block and the
+    visibility of the names it defines (all the result depends on): (start, length) ->
+    (those names, {their visibility: _canon})."""
+    got = memo.get((j, p))
+    if got is None:
+        text = "".join(texts[j : j + p])
+        names = tuple(m.group(2) for m in _NAME.finditer(text) if m.group(1) == "var")
+        got = memo[(j, p)] = (names, {})
+    names, by = got
+    key = tuple(n in visible for n in names)
+    r = by.get(key)
+    if r is None:
+        r = by[key] = _canon("".join(texts[j : j + p]), visible)
+    return r
 
 
 def _canon(text: str, visible: set):

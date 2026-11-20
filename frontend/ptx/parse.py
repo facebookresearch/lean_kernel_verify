@@ -124,6 +124,9 @@ class Instr:
     line: int
     asm: int | None  # index of the enclosing inline-asm block (Function.asm_locs)
     text: str  # the statement as written, for messages
+    # what cfg._dests and regions.reads_of derive from the fields above (which nothing
+    # changes after parsing), computed once; not part of the instruction's value
+    memo: dict = field(default_factory=dict, compare=False, repr=False)
 
     @property
     def base(self):

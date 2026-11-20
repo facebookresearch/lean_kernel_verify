@@ -104,6 +104,8 @@ Control flow (regions.py tree; registers live across it as in interp.py):
   conditions' classes: a loop holding a barrier is an `nb_rep` region (its body once,
   between `nb_rep` begin and end events) if that class is u, else divergent (its body
   once, every barrier an `nb_open`). A loop without a barrier only computes values.
+  Inside an enclosing loop's fixed-point round, whose statements are dropped, that
+  last pass is skipped (_class_loop).
 An `nb_open` is `certain` when the model admits participants that diverge: thread-index
 constants that differ (an elect.sync leader), or nondet data (warps may read different
 values, and a spin loop's warps leave it in different iterations), for every divergent
@@ -165,6 +167,9 @@ _DEAD = ("t", False, _NONE, False, False)
 _NEG = {"eq": "ne", "ne": "eq", "lt": "ge", "ge": "lt", "le": "gt", "gt": "le",
         "lo": "hs", "hs": "lo", "ls": "hi", "hi": "ls"}  # fmt: skip
 _ROUNDS = 8  # class fixed point of a loop (each class rises at most 3 times)
+# Skip a loop's final round inside an enclosing loop's fixed-point round (_class_loop;
+# tests turn it off to compare the KIRs and count the passes).
+_SKIP_DISCARDED = True
 _SPLIT_BUDGET = 64  # node splitting rounds (each removes one irreducible entry)
 _LOCAL = "%local"  # local memory, as one register of the path signatures
 
@@ -234,35 +239,6 @@ def _lane_subst(tr, e, fv, ln: int):
         return e
     lc = E.const(ln, 32)
     return E.subst(e, {"%lane": lc}, tr.memo(("l", lc)))
-
-
-def _lane_elect(e, lane: int, cache: dict):
-    """e with %lane := lane and every %elect var := (lane == 0), memoized in `cache`:
-    interp._warp_instances's per-lane substitution (whose mapping names the %elect vars
-    of its expression; a node's result depends only on the vars it holds, so one memo per
-    lane serves every expression)."""
-
-    def go(x):
-        r = cache.get(x)
-        if r is None:
-            if x[0] == "var":
-                name = x[2]
-                if name == "%lane":
-                    r = E.const(lane, 32)
-                elif name.startswith("%elect"):
-                    r = E.const(int(lane == 0), 1)
-                else:
-                    r = x
-            elif not any(
-                v == "%lane" or v.startswith("%elect") for v in E.free_vars(x)
-            ):
-                r = x
-            else:
-                r = E.rebuild(x, [go(c) for c in E.children(x)])
-            cache[x] = r
-        return r
-
-    return go(e)
 
 
 def _jvar(a: str, b: str) -> str:
@@ -421,8 +397,8 @@ class _Nb(interp.Translator):
             (len(self.sites), self.reps),
         )  # base indexes the rest
 
-    def restore(self, snap) -> None:
-        super().restore(snap[:-1])
+    def restore(self, snap, forget: bool = True) -> None:
+        super().restore(snap[:-1], forget)
         n, self.reps = snap[-1]
         del self.sites[n:]
 
@@ -473,22 +449,6 @@ class _Nb(interp.Translator):
             cls = "t", False, _NONE, False, self.olane(v)
         return ("u",) + cls[1:] if cls[0] == "w" and self.nw == 1 else cls
 
-    def _warp_instances(self, e, w: int, lanes: tuple = interp._LANES) -> list:
-        """interp's _warp_instances, with the substitution memos shared between
-        expressions (interp's memo; ("e", lane) for _lane_elect's): the values of a role
-        mostly share their thread-dependent subexpressions (thread index, lane offsets),
-        which then are rebuilt once."""
-        r = self._inst.get(e)
-        if r is not None:
-            return [r[32 * (w - self.w0) + ln] for ln in lanes]
-        fv = E.free_vars(e)
-        if not any(map(E.is_thread_var, fv)):
-            return [e] * len(lanes)
-        ew = _warp_subst(self, e, fv, w)
-        if not any(v == "%lane" or v.startswith("%elect") for v in fv):
-            return [ew] * len(lanes)  # every lane's substitution is the identity
-        return [_lane_elect(ew, lane, self.memo(("e", lane))) for lane in lanes]
-
     def ouniform(self, e) -> bool:
         """The exact value e has one value over every thread of the role before warp
         splitting, its symbols too (the condition of a shared nb_rep key)."""
@@ -509,13 +469,15 @@ class _Nb(interp.Translator):
     def _same_instances(self, e, fv) -> bool:
         """Whether e has one instance over every thread of the role before warp
         splitting (ouniform), stopping at the first that differs; an ExprError (e.g. a
-        table of the split role's threads only) is a difference."""
+        table of the split role's threads only) is a difference. e has no elect symbol,
+        so interp's per-lane substitution (Translator._warp_instances, with its memos)
+        gives each instance: the split role's own warps reuse its nodes."""
         first = None
         try:
             for w in range(self.ow0, self.ow0 + self.onw):
                 ew = _warp_subst(self, e, fv, w)
                 for ln in _lanes_of(fv):
-                    x = _lane_subst(self, ew, fv, ln)
+                    x = interp._lane_elect(ew, ln, self.memo(("e", ln)))
                     if first is None:
                         first = x
                     elif x is not first:
@@ -1357,7 +1319,8 @@ class _Nb(interp.Translator):
         carried = [r for r in written if r in live]
         top = {"mode": "class", "bars": self._bars(node.body), "exits": [], "backs": {},
                "outs": {}, "exitk": {}, "backk": {}, "written": written,
-               "start": {r: self.env[r] for r in carried}, "carried": carried}  # fmt: skip
+               "start": {r: self.env[r] for r in carried}, "carried": carried,
+               "dropped": mode is None}  # fmt: skip
         self.nb.append(top)
         self.loops.append([written, [None] * len(written), None, [None] * len(written),
                            [None] * len(written), None, live, [None] * len(written), {}])  # fmt: skip
@@ -1381,7 +1344,10 @@ class _Nb(interp.Translator):
 
     def _class_loop(self, node, bars: bool) -> None:
         """A loop that is not exact (module doc): its classes to a fixed point; with a
-        barrier inside, an nb_rep region or a divergent region."""
+        barrier inside, an nb_rep region or a divergent region. Inside an enclosing
+        loop's fixed-point round, whose work its caller discards (restore forgets it,
+        names included), that final round is skipped (_SKIP_DISCARDED): what follows
+        reads only the last fixed-point round (its classes, exits and loads)."""
         head = self.k.mem.first_instr(node.header)
         why = f"the loop at {self.where(head)}"
         written = sorted(self.tree.defs[node.header])
@@ -1408,7 +1374,14 @@ class _Nb(interp.Translator):
             self.fail(head, f"P0-6: no class fixed point for {why}", "error")
         exits = [e for e in top["exits"] if e[0][0] != "u"]
         ex = _join(*(e[0] for e in exits)) if exits else _UO
-        if bars and not exits:
+        skip = (
+            bars
+            and _SKIP_DISCARDED
+            and any(x["mode"] == "class" and x["dropped"] for x in self.nb)
+        )
+        if skip:
+            pass  # (docstring)
+        elif bars and not exits:
             ou = all(len(e[0]) > 3 and e[0][3] for e in top["exits"])
             self._class_round(node, written, classes, live,
                               f"{why} repeats a number of times the model does not "
@@ -1530,13 +1503,21 @@ def _derived(reg: str, what: str, srcs) -> NbData:
                   False, frozenset(srcs))  # fmt: skip
 
 
+_WIDTHS: dict = {}  # register type -> _width(type)
+
+
 def _width(typ: str) -> int:
-    """The width of an integer or predicate register type, else 0."""
-    if typ == "pred":
-        return 1
-    if typ[:1] in ("b", "s", "u") and typ[1:].isdigit() and int(typ[1:]) <= 64:
-        return int(typ[1:])
-    return 0
+    """The width of an integer or predicate register type, else 0 (memoized)."""
+    w = _WIDTHS.get(typ)
+    if w is None:
+        w = _WIDTHS[typ] = (
+            1
+            if typ == "pred"
+            else int(typ[1:])
+            if typ[:1] in ("b", "s", "u") and typ[1:].isdigit() and int(typ[1:]) <= 64
+            else 0
+        )
+    return w
 
 
 def _instrs(seqs):

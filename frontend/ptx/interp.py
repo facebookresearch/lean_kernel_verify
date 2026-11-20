@@ -161,9 +161,9 @@ class Kernel:
     work_fields: tuple = ()
     work_mode: str = "gate"  # "gate" (the TTGIR rule) or "each" (the CuTe rule)
     work_per: dict = field(default_factory=dict)  # field -> tensors segmented per it
-    origin: dict = field(
-        default_factory=dict
-    )  # expression -> (loc, line) of its instruction
+    # expression -> (loc, line) of its instruction, for the expressions that read no
+    # variable of a role (Translator.origins)
+    origin: dict = field(default_factory=dict)
     srclocs: dict = field(default_factory=dict)  # id(instr) -> (source path, line)
     elects: dict = field(default_factory=dict)  # id(elect.sync) -> its elect symbol
     p1: "P1 | None" = None  # the P1 pass's events (translate.py, tmem.py), else None
@@ -271,6 +271,11 @@ class Translator:
         self.slot_iv: dict = {}
         self.cur = None  # the instruction being translated
         self._inst: dict = {}
+        # expression -> (loc, line) of its instruction, for the expressions that read a
+        # variable this role made (origins: another role's variables of the same name are
+        # others)
+        self.origin: dict = {}
+        self._local: dict = {}  # expression -> it reads a variable of this role (origins)
         self._memos: dict = {}  # substitution memos shared between expressions (memo)
         self._nmemo = 0  # memo() calls since the memos' size was last checked
         self._tvals: dict = {}  # (%t term, threads) -> its value per thread (_read_once)
@@ -282,6 +287,9 @@ class Translator:
         self.clc_reads: list = []  # sync.py: ClcResponse.read of every queried response
         self.invals: list = []  # sync.py: (symbol, offset, instr) of each elided cycle
         self.forks = 0  # fork barriers (barrier.sync 1, the whole CTA) executed so far
+        # gsev.py (policy gsync): (statement list, its length) right after the role's last
+        # named barrier of the whole role (mark_bar), else None
+        self.gs_bar = None
 
     # ---------------------------------------------------------------- basics
     def loc(self, i=None) -> str:
@@ -321,6 +329,18 @@ class Translator:
         self._bind_deps([e])
         return E.to_json(e, self.names)
 
+    def origins(self, x) -> dict:
+        """The map of binding origins that holds x: the role's own (origin) if x reads a
+        variable the role made (not a parameter, nor a reserved `%` name), else the
+        kernel's (Kernel.origin), shared by its roles."""
+        r = self._local.get(x)
+        if r is None:
+            params = self.k.mem.used_params
+            r = self._local[x] = any(
+                not v.startswith("%") and v not in params for v in E.free_vars(x)
+            )
+        return self.origin if r else self.k.origin
+
     def _bind_deps(self, roots: list) -> None:
         """Bind the hoistable subexpressions of roots that an instruction computed (or that
         they share), in program order: a metadata load that fails stops the role where
@@ -328,13 +348,14 @@ class Translator:
         order, shared = _hoistable(roots, self.names)
         keys: dict = {}
         for x in order:  # children first: an unmarked node runs after its last child
-            o = self.k.origin.get(x)
+            o = self.origins(x).get(x)
             keys[x] = (
                 o[1] if o else max((keys.get(c, -1) for c in E.children(x)), default=-1)
             )
         for x in sorted(order, key=keys.__getitem__):
-            if (x in self.k.origin or x in shared) and _bindable(x):
-                self._let(x, self.k.origin[x][0] if x in self.k.origin else self.loc())
+            o = self.origins(x).get(x)
+            if (o is not None or x in shared) and _bindable(x):
+                self._let(x, o[0] if o is not None else self.loc())
 
     def _let(self, x, loc: str) -> str:
         """Bind x where it is used, or, if the innermost open loop cannot change it (its
@@ -398,7 +419,8 @@ class Translator:
             return e
         self._bind_deps([e])
         if e not in self.names:
-            self._let(e, self.k.origin[e][0] if e in self.k.origin else self.loc())
+            o = self.origins(e).get(e)
+            self._let(e, o[0] if o is not None else self.loc())
         return E.var(self.names[e], E.width(e))
 
     def push_scope(self) -> int:
@@ -453,8 +475,10 @@ class Translator:
     def memo(self, key) -> dict:
         """The memo (expr.subst's `cache`) of one substitution, shared by every
         expression this translator applies it to; `key` names the mapping: ("w", w)
-        %warp := w, ("l", s) %lane := s (an Expr). The substitutions are pure, so a shared
-        memo gives the very nodes a fresh one does. Dropped when large."""
+        %warp := w, ("l", s) %lane := s (an Expr), ("e", lane) _lane_elect's %lane :=
+        lane with every elect symbol := (lane == 0) (_warp_instances). The substitutions
+        are pure, so a shared memo gives the very nodes a fresh one does. Dropped when
+        large."""
         self._nmemo += 1
         if self._nmemo >= 4096:
             self._nmemo = 0
@@ -475,21 +499,25 @@ class Translator:
 
     def _warp_instances(self, e, w: int, lanes: tuple = _LANES) -> list:
         """e for some lanes of warp w, the very nodes instances() holds for them (callers
-        compare instances by identity)."""
+        compare instances by identity). The substitutions are memoized per translator
+        across expressions (memo: ("w", w) for %warp := w, ("e", lane) for _lane_elect's
+        %lane := lane with every elect symbol := (lane == 0)): the values of a role mostly
+        share their thread-dependent subexpressions (thread index, lane offsets), which
+        then are rebuilt once."""
         r = self._inst.get(e)
         if r is not None:
             return [r[32 * (w - self.w0) + ln] for ln in lanes]
         fv = E.free_vars(e)
         if not any(map(E.is_thread_var, fv)):
             return [e] * len(lanes)
-        elects = [v for v in fv if v.startswith("%elect")]
-        ew = E.subst(e, {"%warp": E.const(w, 32)}) if "%warp" in fv else e
-        out = []
-        for lane in lanes:
-            m = {"%lane": E.const(lane, 32)}
-            m.update({v: E.const(int(lane == 0), 1) for v in elects})
-            out.append(E.subst(ew, m))
-        return out
+        ew = (
+            E.subst(e, {"%warp": E.const(w, 32)}, self.memo(("w", w)))
+            if "%warp" in fv
+            else e
+        )
+        if not _lane_dep(e):
+            return [ew] * len(lanes)  # every lane's substitution is the identity
+        return [_lane_elect(ew, lane, self.memo(("e", lane))) for lane in lanes]
 
     def _varies(self, e, in_warp: bool, across: bool) -> bool:
         """A cheap refutation before instances(e) (all threads; the 8-warp TLX default
@@ -678,21 +706,54 @@ class Translator:
         return (len(self.stmts), len(self.barriers), self.stmts, dict(self.names),
                 [list(s) for s in self.scopes], len(self.created), dict(self.env),
                 dict(self.slot_facts), self.work_events,
-                len(self.work_scopes), len(self.regions))  # fmt: skip
+                len(self.work_scopes), len(self.regions),
+                (self.nfresh, len(self.origin), dict(self.slot_iv), self.cur),
+                self.gs_bar)  # fmt: skip
 
-    def restore(self, snap) -> None:
+    def restore(self, snap, forget: bool = True) -> None:
         """Back to a snapshot (a loop translated again): the statement lists, bindings,
-        environment and the stacks a translation interrupted by _Widen left open."""
+        environment and the stacks a translation interrupted by _Widen left open, and the
+        mark of the role's last named barrier in them (gs_bar); with `forget`, also every
+        trace of the discarded work (forget), so that it does not change what the
+        translation makes later (its variable numbers included)."""
         self.pending = None
-        n, nb, stmts, names, scopes, nc, env, facts, works, nw, nr = snap
+        n, nb, stmts, names, scopes, nc, env, facts, works, nw, nr, more, bar = snap
         del self.work_scopes[nw:]
         del self.regions[nr:]
         self.stmts = stmts
         del self.stmts[n:]
         del self.barriers[nb:]
         self.names, self.scopes, self.env = names, scopes, env
-        self.slot_facts, self.work_events = facts, works
+        self.slot_facts, self.work_events, self.gs_bar = facts, works, bar
+        if forget:
+            self.forget(nc, more)
         del self.created[nc:]
+
+    def forget(self, nc: int, more: tuple, dead=None) -> None:
+        """Undo the discarded work's state outside the statements (snapshot's `more`):
+        the fresh-name counter (the names it made are free again), the current
+        instruction (the loc of what is emitted before the next one), the induction
+        variables it found, and the names it made from the sets and maps that outlive it
+        (the role's binding origins of expressions that read them, the variables defined
+        before each open loop, the mbarriers waited on, the in-kernel descriptors by
+        address): a later translation may reuse those names (`dead`: those names, default
+        the ones made since). Its other binding origins stay, as they did when names were
+        not reused."""
+        nfresh, norigin, ivs, cur = more
+        dead = frozenset(self.created[nc:] if dead is None else dead)
+        self.nfresh, self.cur = nfresh, cur
+        self.slot_iv = ivs
+        if not dead:
+            return
+        for x in list(itertools.islice(self.origin, norigin, None)):
+            if _mentions(x, dead):
+                del self.origin[x]
+        for h in self.hoist:
+            h[1].difference_update(dead)
+        self.waited = {w for w in self.waited if not _mentions(w[1], dead)}
+        descs = self.k.mem.tma.dyn.get(self, {}).get("descs", {})
+        for key in [a for a in descs if _mentions(a, dead)]:
+            del descs[key]
 
     # ------------------------------------------------------------ regions
     def run(self, seq: list, inherit: bool = True, stop=None, fields=None) -> None:
@@ -929,7 +990,8 @@ class Translator:
             now = (len(self.stmts), len(self.barriers), self.work_events)
             return self.pending is not None or now != base
 
-        checked, nkeys = dict(self._uniform_checked), len(self.k.origin)
+        checked, made = dict(self._uniform_checked), set()  # made: the trials' names
+        nkeys = (len(self.k.origin), len(self.origin))
         hoisted = self.hoist[-1][0] if self.hoist else []
         nhoisted = len(hoisted)
         env0, saved, arms = self.env, self.mask, []
@@ -946,7 +1008,8 @@ class Translator:
                 arms.append(e)
             finally:
                 self.mask = saved
-            self.restore(snap)
+            made.update(self.created[snap[5] :])
+            self.restore(snap, forget=False)  # a trial that succeeds keeps its values
             del hoisted[nhoisted:]
         if all(isinstance(a, dict) for a in arms):
             self.env = dict(env0)
@@ -956,8 +1019,10 @@ class Translator:
                                else Data(f"{r} set under a data condition at {self.loc(node.branch)}"))  # fmt: skip
             return True
         self._uniform_checked = checked
-        for x in list(itertools.islice(self.k.origin, nkeys, None)):
-            del self.k.origin[x]
+        for m, n in zip((self.k.origin, self.origin), nkeys):
+            for x in list(itertools.islice(m, n, None)):
+                del m[x]
+        self.forget(snap[5], snap[11], made)
         split = [a for a in arms if isinstance(a, SplitWarps)]
         if len(split) == 1 and any(isinstance(a, dict) for a in arms):
             raise split[0]
@@ -1951,7 +2016,7 @@ class Translator:
             return
         if self.k.p1 is not None:  # P1 pass: TMEM, named-barrier, P1-2 events (tmem.py)
             self.k.p1.execute(self, i, mn)
-        if C._is_fork(i):  # (cfg.py)
+        if C._is_fork(i, mn):  # (cfg.py)
             self.forks += 1
         if cls == "event" and self._tracked():
             self._capture_writes(i, mn)
@@ -2004,13 +2069,13 @@ class Translator:
             self.k.mem.tma.close_staging(self)
             if self.k.captures is not None:  # each address-giving lane: a 16-byte row
                 a = self.k.mem.address(self, i.operands[0])
-                self._capture_clobber(i, self._footprint(a, 16), checked=True)
+                self._capture_clobber(i, a, 16, checked=True)
         elif mn.startswith(("atom.shared", "red.shared")):  # as a generic one (mem.py)
             self.k.mem.execute(self, i, mn)
             if self._tracked():
                 op = i.operands[1 if mn.startswith("atom") else 0]
                 a = self.k.mem.address(self, op)
-                self._capture_clobber(i, self._footprint(a, _access_bytes(i.opcode)))
+                self._capture_clobber(i, a, _access_bytes(i.opcode))
 
     # ------------------------------------------------- warp-specialize captures
     def _capture_bytes(self, i, op) -> list | None:
@@ -2070,8 +2135,7 @@ class Translator:
                 vals = self._capture_values(i, len(where))
         if vals is None or where is None:  # no capture: the bytes it may touch
             a = self.k.mem.address(self, mem) if mem else None
-            fp = self._footprint(a, _access_bytes(i.opcode))
-            self._capture_clobber(i, fp, checked=True)
+            self._capture_clobber(i, a, _access_bytes(i.opcode), checked=True)
             return
         for k, b in enumerate(where):  # (not over an earlier asynchronous write)
             dirty = any(
@@ -2169,28 +2233,29 @@ class Translator:
         lo, hi = min(r[0] for r in rs), max(r[1] for r in rs)
         return region, lo, hi + nbytes
 
-    def _capture_clobber(
-        self,
-        i,
-        fp,
-        asynchronous: bool = False,
-        remote: bool = False,
-        checked: bool = False,
-    ):
-        """A shared write that records no capture, with footprint fp (_footprint), for the
-        warp-specialize captures: the captured bytes it may touch become unknown, all of
-        them if fp is None; if some worker already read a capture and the write may touch
-        a known one, the kernel is refused (roles are translated one after the other, the
-        default first). A write after its role's second fork barrier follows every
-        worker's reads, unless it is another CTA's (`remote`: no barrier of this CTA
-        orders it). An asynchronous or remote write may land after a later store: its
-        footprint stays dirty, so the default records no capture over it. A write whose
-        offsets have no static bounds keeps the captures, under a KIR assume that it misses
-        them (_capture_assume). First the handoff channels (_handoff_clobber), unless the
-        caller `checked` them."""
-        if self.k.handoffs and not checked:
-            self._handoff_clobber(i, fp)
+    def _capture_clobber(self, i, a, nbytes: int | None, asynchronous: bool = False,
+                         remote: bool = False, checked: bool = False):  # fmt: skip
+        """A shared write that records no capture, of nbytes per executing thread at
+        address a, for the warp-specialize captures: the captured bytes its footprint fp
+        (_footprint) may touch become unknown, all of them if fp is None; if some worker
+        already read a capture and the write may touch a known one, the kernel is refused
+        (roles are translated one after the other, the default first). A write after its
+        role's second fork barrier follows every worker's reads, unless it is another
+        CTA's (`remote`: no barrier of this CTA orders it). An asynchronous or remote write
+        may land after a later store: its footprint stays dirty, so the default records no
+        capture over it. A write whose offsets have no static bounds keeps the captures,
+        under a KIR assume that it misses them (_capture_assume). First the handoff
+        channels (_handoff_clobber), unless the caller `checked` them. The footprint (the
+        offset's instances over the role's threads) is computed only for a write that can
+        matter: in the translation with handoff channels, and for the captures not in a
+        kernel without them, nor after the second fork barrier."""
+        handoffs = bool(self.k.handoffs) and not checked
         caps = self.k.captures
+        if not handoffs and (caps is None or (self.forks > 1 and not remote)):
+            return
+        fp = self._footprint(a, nbytes)
+        if handoffs:
+            self._handoff_clobber(i, fp)
         if caps is None or fp == () or (self.forks > 1 and not remote):
             return
         if asynchronous or remote:
@@ -2241,7 +2306,7 @@ class Translator:
 
         if self._tracked():
             remote = remote or isinstance(a, cluster.Remote)
-            self._capture_clobber(i, self._footprint(a, nbytes), True, remote)
+            self._capture_clobber(i, a, nbytes, True, remote)
 
     def _capture_writes(self, i, mn: str) -> None:
         """The shared bytes an event-class instruction writes beside its events, for the
@@ -2257,17 +2322,18 @@ class Translator:
         ops_, mem = i.operands, self.k.mem
         if mn.startswith(("st.async", "red.async.shared")):
             a = cluster._address(self, ops_[0])
-            fp = self._footprint(a, _access_bytes(i.opcode))
-            return self._capture_clobber(i, fp, asynchronous=True, remote=True)
+            return self._capture_clobber(
+                i, a, _access_bytes(i.opcode), asynchronous=True, remote=True
+            )
         if mn in ("st", "atom", "red") or (
             mn.startswith(("atom.", "red.")) and ".global" not in mn
         ):  # generic: a shared address only (a global one writes no shared memory)
             a = mem.address(self, ops_[1 if mn.startswith("atom") else 0])
             if isinstance(a, Data):  # any byte (mem.py refuses the access itself too)
-                return self._capture_clobber(i, None)
+                return self._capture_clobber(i, a, None)
             if not any(v[:3] in ("%s:", "%S:") for v in E.free_vars(a)):
                 return None
-            return self._capture_clobber(i, self._footprint(a, _access_bytes(i.opcode)))
+            return self._capture_clobber(i, a, _access_bytes(i.opcode))
         if mn.startswith(
             (
                 "cp.async.ca.shared",
@@ -2281,18 +2347,15 @@ class Translator:
             n = None if v is None or isinstance(v, Data) else self.uniform(v)
             nb = n[2] if n is not None and E.is_const(n) and n[2] > 0 else None
             remote = "multicast" in mn or isinstance(a, cluster.Remote)
-            fp = self._footprint(a, nb)
-            return self._capture_clobber(i, fp, asynchronous=True, remote=remote)
+            return self._capture_clobber(i, a, nb, asynchronous=True, remote=remote)
         if mn.startswith("clusterlaunchcontrol.try_cancel"):
-            fp = self._footprint(mem.address(self, ops_[0]), 16)
+            a = mem.address(self, ops_[0])
             remote = "multicast" in mn
-            return self._capture_clobber(i, fp, asynchronous=True, remote=remote)
+            return self._capture_clobber(i, a, 16, asynchronous=True, remote=remote)
         sizes = {"tcgen05.alloc": 4, "tensormap.replace": 128, "mbarrier.inval": 8}
         for prefix, nb in sizes.items():
             if mn.startswith(prefix) and not mn.endswith(".global"):
-                return self._capture_clobber(
-                    i, self._footprint(mem.address(self, ops_[0]), nb)
-                )
+                return self._capture_clobber(i, mem.address(self, ops_[0]), nb)
         return None
 
     # ------------------------------------------- handoffs through shared memory
@@ -2466,7 +2529,7 @@ class Translator:
         if not isinstance(v, Data):
             v = self.scalarize(v)
             if v[0] not in ("const", "var", "pid", "nprog"):
-                self.k.origin.setdefault(
+                self.origins(v).setdefault(
                     v, (self.loc(), self.cur.line if self.cur else 0)
                 )
         self.env[reg] = v
@@ -2559,9 +2622,9 @@ class Translator:
             return self._mov(i, ndst)
         if base == "cvt":
             return [self._cvt(i, mn, types)]
-        packed = re.search(r"\.([su])16x2$", i.opcode)
+        packed = _packed_sign(i.opcode)
         if packed:
-            return [self._packed(i, mn, packed.group(1) == "s")]
+            return [self._packed(i, mn, packed == "s")]
         if not types:
             self.fail(i, "integer instruction without a type", "error")
         kind, w = types[-1]
@@ -3305,6 +3368,50 @@ def _has_elect(e) -> bool:
     return any(v.startswith("%elect") for v in E.free_vars(e))
 
 
+def _mentions(e, names: frozenset) -> bool:
+    """The expression e (or anything else: no) reads one of the variables `names`."""
+    return isinstance(e, tuple) and bool(names) and not names.isdisjoint(E.free_vars(e))
+
+
+def _lane_elect(e, lane: int, cache: dict):
+    """e with %lane := lane and every %elect var := (lane == 0), memoized in `cache`:
+    Translator._warp_instances's per-lane substitution (a node's result depends only on
+    the vars it holds, so one memo per lane serves every expression)."""
+
+    def go(x):
+        r = cache.get(x)
+        if r is None:
+            if x[0] == "var":
+                name = x[2]
+                if name == "%lane":
+                    r = E.const(lane, 32)
+                elif name.startswith("%elect"):
+                    r = E.const(int(lane == 0), 1)
+                else:
+                    r = x
+            elif not _lane_dep(x):
+                r = x
+            else:
+                r = E.rebuild(x, [go(c) for c in E.children(x)])
+            cache[x] = r
+        return r
+
+    return go(e)
+
+
+_LANE_DEP: dict = {}  # node -> _lane_dep(node)
+
+
+def _lane_dep(x) -> bool:
+    """x reads %lane or an elect symbol (memoized per node: expressions are interned)."""
+    r = _LANE_DEP.get(x)
+    if r is None:
+        r = _LANE_DEP[x] = any(
+            v == "%lane" or v.startswith("%elect") for v in E.free_vars(x)
+        )
+    return r
+
+
 def _any_elected(var):
     """The mask var without its conjuncts on the elected lane: the threads that may run
     under it, whichever lane elect.sync elects (unspecified)."""
@@ -3381,9 +3488,21 @@ _CMP = {
 _TYPE = re.compile(r"([bsu])(8|16|32|64|128)|(pred)")
 
 
+_TYPES: dict = {}  # opcode -> _types(opcode)
+_WIDTHS: dict = {}  # register type -> _reg_width(type)
+
+
 def _types(opcode: str) -> list:
     """The integer types of an opcode, in order: [(kind "b"|"s"|"u", bits)]; .pred is
-    ("b", 1). A float type makes the list end in ("f", bits)."""
+    ("b", 1). A float type makes the list end in ("f", bits). Memoized (callers only
+    read it)."""
+    out = _TYPES.get(opcode)
+    if out is None:
+        out = _TYPES[opcode] = _opcode_types(opcode)
+    return out
+
+
+def _opcode_types(opcode: str) -> list:
     out = []
     for t in opcode.split(".")[1:]:
         m = _TYPE.fullmatch(t)
@@ -3394,11 +3513,25 @@ def _types(opcode: str) -> list:
     return out
 
 
+_PACKED: dict = {}  # opcode -> _packed_sign(opcode)
+
+
+def _packed_sign(opcode: str) -> str:
+    """The signedness of an opcode on packed 16-bit pairs (.s16x2 / .u16x2), "s" or
+    "u", else "" (memoized)."""
+    r = _PACKED.get(opcode)
+    if r is None:
+        m = re.search(r"\.([su])16x2$", opcode)
+        r = _PACKED[opcode] = m.group(1) if m else ""
+    return r
+
+
 def _reg_width(t: str) -> int:
-    if t == "pred":
-        return 1
-    m = re.fullmatch(r"[bsuf](\d+)", t)
-    return int(m.group(1)) if m else 32
+    w = _WIDTHS.get(t)
+    if w is None:
+        m = None if t == "pred" else re.fullmatch(r"[bsuf](\d+)", t)
+        w = _WIDTHS[t] = 1 if t == "pred" else int(m.group(1)) if m else 32
+    return w
 
 
 def _dest_regs(i) -> list:

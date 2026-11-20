@@ -263,6 +263,9 @@ class Tma:
         self.later: dict = {}  # id(later message) -> id(first message of its block)
         self.pos: dict | None = None  # id(instr) -> (its basic block's instrs, index)
         self.block_of: dict | None = None  # id(instr) -> its block (_kept_in_loops)
+        # the block sets of the function's natural loops that hold a
+        # tensormap.cp_fenceproxy (_kept_in_loops)
+        self.fence_loops: list | None = None
 
     # -------------------------------------------------------------- addresses
     def symbol(self, name: str, w: int):
@@ -633,14 +636,18 @@ class Tma:
             self.block_of = {
                 id(j): b for b, blk in cfg.blocks.items() for j in blk.instrs
             }
+        if self.fence_loops is None:  # once per function
+            self.fence_loops = [
+                blocks
+                for blocks in cfg.loops.values()
+                if any(
+                    j.opcode.startswith("tensormap.cp_fenceproxy")
+                    for b in blocks
+                    for j in cfg.blocks[b].instrs
+                )
+            ]
         bi, bw = self.block_of.get(id(i)), self.block_of.get(id(got[2]))
-        return not any(
-            j.opcode.startswith("tensormap.cp_fenceproxy")
-            for blocks in cfg.loops.values()
-            if bi in blocks and bw not in blocks
-            for b in blocks
-            for j in cfg.blocks[b].instrs
-        )
+        return not any(bi in blocks and bw not in blocks for blocks in self.fence_loops)
 
     def _host(self, tr: Translator, i, ptx: str) -> Desc:
         d = self.host.get(ptx)

@@ -744,11 +744,16 @@ is the control flow, the named barriers and the values that decide them.
   writes and nothing reads later reaches no decision) and a weak load's address only if
   the loaded value's class depends on it (shared memory, a tensor the kernel never
   writes). The substitutions are memoized per translator across
-  expressions (interp's `memo`; the values of a role share their thread-dependent
-  subexpressions). The TTGIR hook makes its P0-6 KIRs (one per specialization and cluster
-  geometry) as tasks of `to_kir`'s fork pool, with its P0 and P1-2 KIRs: up to `--jobs`
-  forked processes, one KIR each (`to_kir --jobs`, which `lkv.py run` passes; the
-  results and files are the same in any order).
+  expressions, as in every pass (interp's `memo`; the values of a role share their
+  thread-dependent subexpressions). Inside an enclosing loop's fixed-point round, whose
+  statements are dropped, a loop's final pass (its `nb_rep` or divergent region) is
+  skipped: discarded work leaves no trace (interp's `restore` forgets it, the variable
+  names it made included), so the KIR does not change. The TTGIR hook makes its P0-6
+  KIRs (one per specialization and cluster geometry) as tasks of `to_kir`'s fork pool, with its P0 and P1-2 KIRs: up to `--jobs`
+  forked processes,
+  one KIR each (`to_kir --jobs`, which `lkv.py run` passes; the
+  results and files are
+  the same in any order).
 
 ## Global synchronization (policy `gsync`, gsev.py)
 

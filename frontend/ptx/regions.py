@@ -328,7 +328,18 @@ def dests(i):
 def reads_of(i):
     """Registers instruction i reads: every register operand but the ones it writes,
     its guard, and address bases; a guarded instruction also reads what it writes (the
-    old value survives where the guard is false)."""
+    old value survives where the guard is false). A frozenset, memoized in a
+    parse.Instr's `memo`."""
+    memo = getattr(i, "memo", None)
+    r = None if memo is None else memo.get("reads")
+    if r is None:
+        r = frozenset(_reads(i))
+        if memo is not None:
+            memo["reads"] = r
+    return r
+
+
+def _reads(i) -> set:
     out = set()
     ds = set(dests(i))
 

@@ -355,8 +355,8 @@ def tag_spin(tr, node) -> None:  # noqa: C901 (one refusal per shape condition)
         exits_on_true = target == node.exit or _maps_to(cfg, target, node.exit)
         c = E.not1(p) if neg else p
         c = c if exits_on_true else E.not1(c)
-    finally:
-        tr.restore(snap)
+    finally:  # its values and the names it made (vs) are used below: not forgotten
+        tr.restore(snap, forget=False)
         tr.mask = saved_mask
     targets = _tag_targets(tr, first, c, vs)
     timeout = site.get("timeout") == "trap"

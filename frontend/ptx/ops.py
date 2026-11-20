@@ -85,7 +85,20 @@ FLOAT_OPS = (
 )  # fmt: skip
 
 
+_MNEMONICS: dict = {}  # opcode -> mnemonic(opcode)
+
+
 def mnemonic(opcode):
+    """The op table's key of an opcode: types, the cta of bar/barrier, default memory
+    semantics and other modifiers that do not change the row dropped (memoized: the
+    translators ask for it at every instruction they execute)."""
+    r = _MNEMONICS.get(opcode)
+    if r is None:
+        r = _MNEMONICS[opcode] = _mnemonic(opcode)
+    return r
+
+
+def _mnemonic(opcode):
     base, *mods = opcode.split(".")
     if base in FLOAT_OPS and any(_FLOAT_TYPE.fullmatch(t) for t in mods):
         return base + ".f"
@@ -591,24 +604,47 @@ _WARPID = (
 )
 
 
+_CALL = ("call",)  # _BY_OPCODE: a call, whose callee decides (_call)
+_NO_ROW = ("no row",)  # _BY_OPCODE: no row decides the opcode
+_BY_OPCODE: dict = {}  # opcode -> what the opcode alone decides (_opcode_class)
+
+
 def classify(instr):
-    """(class, reason) of a parse.Instr; UnknownInstruction if no row decides it."""
-    if any(m in instr.opcode for m in ("im2col", "gather4", "scatter4")):
-        return _LOAD_MODE
+    """(class, reason) of a parse.Instr; UnknownInstruction if no row decides it. What
+    the opcode alone decides is memoized (_opcode_class); a %warpid operand and a call's
+    callee are read per instruction."""
+    got = _BY_OPCODE.get(instr.opcode)
+    if got is None:
+        got = _BY_OPCODE[instr.opcode] = _opcode_class(instr.opcode)
+    if got is _LOAD_MODE:
+        return got
     if ("sreg", "%warpid") in instr.operands:
         return _WARPID
-    key = mnemonic(instr.opcode)
-    if key == "call":
+    if got is _CALL:
         return _call(instr)
+    if got is _NO_ROW:
+        raise UnknownInstruction(
+            f"line {instr.line}: no op table row for {mnemonic(instr.opcode)} "
+            f"({instr.opcode})"
+        )
+    return got
+
+
+def _opcode_class(opcode):
+    """classify's answer from the opcode alone: _LOAD_MODE, a row's (class, reason),
+    _CALL or _NO_ROW."""
+    if any(m in opcode for m in ("im2col", "gather4", "scatter4")):
+        return _LOAD_MODE
+    key = mnemonic(opcode)
+    if key == "call":
+        return _CALL
     if key in TABLE:
         return TABLE[key]
     for cls, reason, prefixes in _FAMILIES:
         for p in prefixes:
             if key.startswith(p) and key[len(p) : len(p) + 1] in ("", ".", ":"):
                 return cls, reason
-    raise UnknownInstruction(
-        f"line {instr.line}: no op table row for {key} ({instr.opcode})"
-    )
+    return _NO_ROW
 
 
 def _call(instr):
