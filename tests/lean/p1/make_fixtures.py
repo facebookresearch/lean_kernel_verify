@@ -3,12 +3,13 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Writes the P1-1 Lean fixtures tests/lean/p1/*.kir.json (P1 KIR, references/kir.md
-change 10). Each fixture is a small hand-made kernel; its inputs select the variant
+"""Writes the P1-1 Lean fixtures of tests/lean/p1 (P1 KIR, references/kir.md change 10).
+Each fixture is a small hand-made kernel; its inputs select the variant
 (param MODE) and the number of m-blocks (param M). Expected verdicts:
-tests/lean/p1/expected.txt; run by tests/lean/run_all.sh.
+tests/lean/p1/expected.txt; run by tests/lean/run_all.sh, which writes them into
+$LKV_TEST_OUT/gen/p1.
 
-    python3 -I tests/lean/p1/make_fixtures.py      # rewrites the fixtures in place
+    python3 -I tests/lean/p1/make_fixtures.py OUT_DIR    # writes OUT_DIR/<fixture>.kir.json
 
 The fixtures model the TMEM protocol of a block-scaled attention backward: an MMA role
 (one warp) writes the S accumulator (cols [0, 128)) with a block-scaled MMA, commits
@@ -25,44 +26,32 @@ arrivals than warps.
 """
 
 import json
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.dont_write_bytecode = True  # keep the source tree free of __pycache__
+sys.path.insert(0, str(HERE.parent))
+from kirgen import (  # noqa: E402
+    arrive,
+    b,
+    c,
+    cmp,
+    ev,
+    for_,
+    if_,
+    inp,
+    mode_is,
+    nbar,
+    role,
+    var,
+    wait,
+    write,
+)
 
 
-def c(v, w=32):
-    return {"e": "const", "v": v, "w": w}
-
-
-def var(n, w=32):
-    return {"e": "var", "name": n, "w": w}
-
-
-def b(o, x, y, w=32):
-    return {"e": "bin", "o": o, "a": x, "b": y, "w": w}
-
-
-def cmp(o, x, y):
-    return {"e": "cmp", "o": o, "a": x, "b": y, "w": 1}
-
-
-def ev(kind, loc, **f):
-    return {"op": "event", "ev": kind, "loc": loc, **f}
-
-
-def wait(bar, parity, loc, idx=None):
-    return ev("wait", loc, bar=bar, idx=idx or c(0), parity=parity)
-
-
-def arrive(bar, loc, idx=None, per_warp=False):
-    e = ev("arrive", loc, bar=bar, idx=idx or c(0))
-    if per_warp:
-        e["per_warp"] = True
-    return e
-
-
-def commit(bar, loc, idx=None):
-    return ev("commit_arrive", loc, bar=bar, idx=idx or c(0))
+def commit(bar, loc):
+    return ev("commit_arrive", loc, bar=bar, idx=c(0))
 
 
 def rect(use, write, lane, nlanes, col, ncols):
@@ -85,30 +74,6 @@ def tmem(inst, warp, rects, loc, site=""):
 
 def twait(ld, loc):
     return ev("tmem_wait", loc, ld=ld)
-
-
-def nbar(i, count, sync, loc):
-    return ev("named_bar", loc, id=c(i), count=c(count), sync=sync)
-
-
-def for_(v, lb, ub, body, loc):
-    return {
-        "op": "for",
-        "var": v,
-        "lb": lb,
-        "ub": ub,
-        "step": c(1),
-        "body": body,
-        "loc": loc,
-    }
-
-
-def if_(cond, then, els, loc):
-    return {"op": "if", "cond": cond, "then": then, "else": els, "loc": loc}
-
-
-def mode_is(k):
-    return cmp("eq", var("MODE"), c(k))
 
 
 def parity(e):
@@ -177,14 +142,6 @@ def kernel(
         "tmem": tmem_info or {"cols": 512, "base": "zero"},
         "case": {"name": name, "inputs": inputs},
     }
-
-
-def role(name, warps, body):
-    return {"name": name, "warps": warps, "threads_per_issue": 1, "body": body}
-
-
-def inp(name, **params):
-    return {"name": name, "params": params}
 
 
 # ----------------------------------------------------------------------- the bug
@@ -525,17 +482,13 @@ def named_bars():
     a_body = [
         tmem("ld", c(0), [rect("data", False, c(0), 32, c(0), 32)], f"{f}:10"),
         twait(True, f"{f}:11"),
-        if_(
-            cmp("sle", var("MODE"), c(0)), [nbar(1, 64, True, f"{f}:12")], [], f"{f}:12"
-        ),
-        if_(mode_is(1), [nbar(1, 64, False, f"{f}:13")], [], f"{f}:13"),
-        if_(mode_is(3), [nbar(1, 64, True, f"{f}:14")], [], f"{f}:14"),
+        if_(cmp("sle", var("MODE"), c(0)), [nbar(1, 64, f"{f}:12")], [], f"{f}:12"),
+        if_(mode_is(1), [nbar(1, 64, f"{f}:13", False)], [], f"{f}:13"),
+        if_(mode_is(3), [nbar(1, 64, f"{f}:14")], [], f"{f}:14"),
     ]
     b_body = [
-        if_(
-            cmp("sle", var("MODE"), c(1)), [nbar(1, 64, True, f"{f}:20")], [], f"{f}:20"
-        ),
-        if_(mode_is(3), [nbar(1, 96, True, f"{f}:21")], [], f"{f}:21"),
+        if_(cmp("sle", var("MODE"), c(1)), [nbar(1, 64, f"{f}:20")], [], f"{f}:20"),
+        if_(mode_is(3), [nbar(1, 96, f"{f}:21")], [], f"{f}:21"),
         tmem("st", c(4), [rect("data", True, c(0), 32, c(0), 32)], f"{f}:22"),
         twait(False, f"{f}:23"),
     ]
@@ -567,17 +520,17 @@ def named_idle():
           twait(True, f"{f}:11")]  # fmt: skip
     st = [tmem("st", c(4), [rect("data", True, c(0), 32, c(0), 32)], f"{f}:22"),
           twait(False, f"{f}:23")]  # fmt: skip
-    wide = [nbar(1, 128, True, f"{f}:12")]
+    wide = [nbar(1, 128, f"{f}:12")]
     a_body = [
         if_(mode_is(0), wide + ld + wide, [], f"{f}:12"),
         if_(mode_is(1), ld + wide + wide, [], f"{f}:12"),
-        if_(mode_is(2), ld + [nbar(1, 64, False, f"{f}:13")], [], f"{f}:13"),
-        if_(mode_is(3), ld + [nbar(1, 64, True, f"{f}:14")], [], f"{f}:14"),
+        if_(mode_is(2), ld + [nbar(1, 64, f"{f}:13", False)], [], f"{f}:13"),
+        if_(mode_is(3), ld + [nbar(1, 64, f"{f}:14")], [], f"{f}:14"),
     ]
     b_body = [
-        if_(cmp("sle", var("MODE"), c(1)), [nbar(1, 128, True, f"{f}:20")] + st
-            + [nbar(1, 128, True, f"{f}:24")], [], f"{f}:20"),
-        if_(cmp("sge", var("MODE"), c(2)), [nbar(1, 64, True, f"{f}:21")] + st, [], f"{f}:21"),
+        if_(cmp("sle", var("MODE"), c(1)), [nbar(1, 128, f"{f}:20")] + st
+            + [nbar(1, 128, f"{f}:24")], [], f"{f}:20"),
+        if_(cmp("sge", var("MODE"), c(2)), [nbar(1, 64, f"{f}:21")] + st, [], f"{f}:21"),
     ]  # fmt: skip
     roles = [role("a", 1, a_body), role("b", 1, b_body)]
     k = kernel(
@@ -649,7 +602,7 @@ def cross_warp():
     body = [
         tmem("ld", c(0), [rect("data", False, c(0), 32, c(0), 32)], f"{f}:10"),
         twait(True, f"{f}:11"),
-        if_(mode_is(1), [nbar(2, 64, True, f"{f}:12")], [], f"{f}:12"),
+        if_(mode_is(1), [nbar(2, 64, f"{f}:12")], [], f"{f}:12"),
         tmem("st", c(4), [rect("data", True, c(0), 32, c(0), 32)], f"{f}:13"),
         twait(False, f"{f}:14"),
     ]
@@ -686,7 +639,7 @@ def partial_issue():
         body += [
             tmem("ld", c(w), [rect("data", False, quarter(c(w)), 32, c(64), 32)], f"{f}:{line + 1}"),
             twait(True, f"{f}:{line + 2}"),
-            if_(mode_is(1), [nbar(1, 64, True, f"{f}:{line + 3}")], [], f"{f}:{line + 3}"),
+            if_(mode_is(1), [nbar(1, 64, f"{f}:{line + 3}")], [], f"{f}:{line + 3}"),
         ]  # fmt: skip
         if lead:
             body.append(
@@ -823,7 +776,7 @@ def partial_sync():
     def rnd(first):
         pre = [] if first else [wait("go", c(0), f"{f}:20")]
         return pre + [
-            nbar(1, 64, True, f"{f}:21"),
+            nbar(1, 64, f"{f}:21"),
             per_warp("ld", 64, 32, f"{f}:22", False),
             twait(True, f"{f}:23"),
             if_(
@@ -904,13 +857,13 @@ def partial_named():
     Y = [
         per_warp("ld", 0, 32, f"{f}:20", False, lo=1, hi=3),
         twait(True, f"{f}:21"),
-        nbar(1, 128, True, f"{f}:22"),
+        nbar(1, 128, f"{f}:22"),
     ]
     X = [
-        nbar(1, 128, False, f"{f}:30"),
-        if_(mode_is(0), [nbar(1, 128, False, f"{f}:31")], [], f"{f}:31"),
+        nbar(1, 128, f"{f}:30", False),
+        if_(mode_is(0), [nbar(1, 128, f"{f}:31", False)], [], f"{f}:31"),
     ]
-    C = [nbar(1, 128, True, f"{f}:10"), cp(0, f"{f}:11")]
+    C = [nbar(1, 128, f"{f}:10"), cp(0, f"{f}:11")]
     roles = [role("C", 1, C), role("Y", 2, Y), role("X", 1, X)]
     return kernel(
         "partial_named",
@@ -1253,10 +1206,12 @@ FIXTURES = {
 }
 
 
+def fixtures():
+    return {name: make() for name, make in FIXTURES.items()}
+
+
 def main():
-    for name, make in FIXTURES.items():
-        (HERE / f"{name}.kir.json").write_text(json.dumps(make(), indent=1) + "\n")
-        print(HERE / f"{name}.kir.json")
+    write(fixtures())
 
 
 if __name__ == "__main__":

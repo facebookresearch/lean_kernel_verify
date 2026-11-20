@@ -9,41 +9,30 @@ named barrier keeps its store from (a hang), claims (feasible, a CTA that stops 
 that synchronize), claim turns the tagged words may contradict, relay slots (written,
 unwritten), a long take chain and a take of data.
 
-    python3 -I tests/lean/gsync/make_fixtures.py     # rewrites tests/lean/gsync/*.kir.json
+    python3 -I tests/lean/gsync/make_fixtures.py OUT_DIR    (writes OUT_DIR/<fixture>.kir.json)
+
+tests/lean/run_all.sh writes them into $LKV_TEST_OUT/gen/gsync and checks them there.
 """
 
-import json
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-
-
-def c(v, w=32):
-    return {"e": "const", "v": v, "w": w}
-
-
-def var(n, w=32):
-    return {"e": "var", "name": n, "w": w}
+sys.dont_write_bytecode = True  # keep the source tree free of __pycache__
+sys.path.insert(0, str(HERE.parent))
+from kirgen import b, c, cmp, ev, if_, role, var, write  # noqa: E402
 
 
 def pid():
     return {"e": "pid", "axis": 0, "w": 32}
 
 
-def cmp(o, a, b):
-    return {"e": "cmp", "o": o, "a": a, "b": b, "w": 1}
-
-
-def add(a, b):
-    return {"e": "bin", "o": "add", "a": a, "b": b, "w": 32}
+def add(x, y):
+    return b("add", x, y)
 
 
 def iff(cond, then, els=None, loc="k.py:1"):
-    return {"op": "if", "cond": cond, "then": then, "else": els or [], "loc": loc}
-
-
-def ev(name, loc, **f):
-    return {"op": "event", "ev": name, "loc": loc, **f}
+    return if_(cond, then, els or [], loc)
 
 
 def gstore(t, off, loc):
@@ -86,10 +75,6 @@ def tensor(name, n, sync=None, role="workspace"):
     return t
 
 
-def role(name, body):
-    return {"name": name, "warps": 1, "threads_per_issue": 1, "body": body}
-
-
 def kernel(name, grid, params, tensors, roles, inputs):
     return {"kir_version": 1, "kernel": name, "source": f"tests/lean/gsync/{name}", "ir": "ptx",
             "grid": [c(grid), c(1), c(1)], "params": [{"name": p, "type": "i32"} for p in params],
@@ -111,8 +96,8 @@ FIX = {}
 # value it read (PASS); a tag no CTA stores hangs (P0-7 FAIL); tag 0 is the start value's.
 FIX["tagged"] = kernel(
     "tagged", 2, ["TAG"], [tensor("mail", 1, sync=64), tensor("out", 4)],
-    [role("p", [iff(pid_is(0), [store("mail", c(0), (1 << 32) | 2, "tg.py:10")])]),
-     role("c", [iff(pid_is(1), [take("mail", c(0), var("TAG"), "tg.py:20", "v"),
+    [role("p", 1, [iff(pid_is(0), [store("mail", c(0), (1 << 32) | 2, "tg.py:10")])]),
+     role("c", 1, [iff(pid_is(1), [take("mail", c(0), var("TAG"), "tg.py:20", "v"),
                                 gstore("out", var("v"), "tg.py:21")])])],
     [inp("paired", {"TAG": 1}, capacity={"ctas": 2}),
      inp("unstored_tag", {"TAG": 2}, capacity={"ctas": 2}),
@@ -123,8 +108,8 @@ FIX["tagged"] = kernel(
 # capacity is undecided.
 FIX["coresident"] = kernel(
     "coresident", 4, [], [tensor("mail", 4, sync=64)],
-    [role("p", [iff(pid_is(0), [], [store("mail", pid(), 1 << 32, "cr.py:10")])]),
-     role("c", [iff(pid_is(0), [take("mail", c(k), 1, "cr.py:20") for k in (1, 2, 3)])])],
+    [role("p", 1, [iff(pid_is(0), [], [store("mail", pid(), 1 << 32, "cr.py:10")])]),
+     role("c", 1, [iff(pid_is(0), [take("mail", c(k), 1, "cr.py:20") for k in (1, 2, 3)])])],
     [inp("capacity4", capacity={"ctas": 4}), inp("capacity2", capacity={"ctas": 2}),
      inp("no_capacity")],
 )  # fmt: skip
@@ -134,8 +119,8 @@ FIX["coresident"] = kernel(
 BAR = ev("named_bar", "nb.py:5", id=c(1), count=c(64), sync=True)
 FIX["barrier_cycle"] = kernel(
     "barrier_cycle", 1, ["ORDER"], [tensor("mail", 1, sync=64)],
-    [role("a", [dict(BAR, loc="nb.py:10"), store("mail", c(0), 1 << 32, "nb.py:11")]),
-     role("b", [iff(cmp("eq", var("ORDER"), c(0)),
+    [role("a", 1, [dict(BAR, loc="nb.py:10"), store("mail", c(0), 1 << 32, "nb.py:11")]),
+     role("b", 1, [iff(cmp("eq", var("ORDER"), c(0)),
                     [take("mail", c(0), 1, "nb.py:20"), dict(BAR, loc="nb.py:21")],
                     [dict(BAR, loc="nb.py:22"), take("mail", c(0), 1, "nb.py:23")])])],
     [inp("cycle", {"ORDER": 0}, capacity={"ctas": 1}),
@@ -154,7 +139,7 @@ LOOP = {"op": "while", "cond": cmp("ne", var("go"), c(0)), "max_iters": 16, "loc
                      [{"op": "let", "var": "go", "expr": c(0), "loc": "cl.py:14"}])]}  # fmt: skip
 FIX["claims"] = kernel(
     "claims", 2, ["N", "EARLY"], [tensor("ctr", 1, sync=32), tensor("out", 4, role="output")],
-    [role("w", [{"op": "let", "var": "go", "expr": c(1), "loc": "cl.py:9"}, LOOP])],
+    [role("w", 1, [{"op": "let", "var": "go", "expr": c(1), "loc": "cl.py:9"}, LOOP])],
     [inp("n4", {"N": 4, "EARLY": 0}, intended_writes={"out": [[0, 4]]}, capacity={"ctas": 2}),
      inp("stop_early", {"N": 4, "EARLY": 1}, intended_writes={"out": [[0, 4]]},
          capacity={"ctas": 2}),
@@ -171,7 +156,7 @@ FIX["claims"]["representative"] = ["claims"]
 FIX["claim_turns"] = kernel(
     "claim_turns", 2, ["ORDER"], [tensor("ctr", 1, sync=32), tensor("mail", 1, sync=64),
                                   tensor("out", 2, role="output")],
-    [role("w", [iff(cmp("eq", pid(), var("ORDER")),
+    [role("w", 1, [iff(cmp("eq", pid(), var("ORDER")),
                     [claim("ctr", "k", "ct.py:10"), store("mail", c(0), 1 << 32, "ct.py:11"),
                      gstore("out", var("k"), "ct.py:12")],
                     [take("mail", c(0), 1, "ct.py:20"), claim("ctr", "k", "ct.py:21"),
@@ -186,10 +171,10 @@ FIX["claim_turns"]["representative"] = ["claims"]
 # a limit of the model).
 FIX["relay"] = kernel(
     "relay", 1, ["OFF"], [tensor("ctr", 1, sync=32), tensor("out", 4, role="output")],
-    [role("p", [{"op": "for", "var": "j", "lb": c(0), "ub": c(3), "step": c(1), "loc": "rl.py:10",
+    [role("p", 1, [{"op": "for", "var": "j", "lb": c(0), "ub": c(3), "step": c(1), "loc": "rl.py:10",
                  "body": [claim("ctr", "k", "rl.py:11"),
                           ev("rput", "rl.py:12", chan="ring", ord=var("j"), field=0, value=var("k"))]}]),
-     role("c", [{"op": "for", "var": "j", "lb": c(0), "ub": c(3), "step": c(1), "loc": "rl.py:20",
+     role("c", 1, [{"op": "for", "var": "j", "lb": c(0), "ub": c(3), "step": c(1), "loc": "rl.py:20",
                  "body": [ev("rget", "rl.py:21", chan="ring", ord=add(var("j"), var("OFF")), field=0,
                              var="v", w=32),
                           gstore("out", var("v"), "rl.py:22")]}])],
@@ -203,7 +188,7 @@ FIX["relay"]["representative"] = ["claims"]
 K = 100
 FIX["pingpong"] = kernel(
     "pingpong", 2, [], [tensor("a", 1, sync=64), tensor("b", 1, sync=64)],
-    [role("w", [iff(pid_is(0),
+    [role("w", 1, [iff(pid_is(0),
                     [x for j in range(1, K + 1) for x in (store("a", c(0), j << 32, "pp.py:10"),
                                                          take("b", c(0), j, "pp.py:11"))],
                     [x for j in range(1, K + 1) for x in (take("a", c(0), j, "pp.py:20"),
@@ -215,7 +200,7 @@ FIX["pingpong"] = kernel(
 # after it is a limit of the model (data), not a second store at the earlier value.
 FIX["stale"] = kernel(
     "stale", 2, [], [tensor("mail", 1, sync=64), tensor("out", 4, role="output")],
-    [role("w", [iff(pid_is(0),
+    [role("w", 1, [iff(pid_is(0),
                     [store("mail", c(0), 1 << 32, "st.py:10"),
                      store("mail", c(0), 2 << 32, "st.py:11", data=True)],
                     [take("mail", c(0), 1, "st.py:20", "x"), gstore("out", var("x"), "st.py:21"),
@@ -224,9 +209,12 @@ FIX["stale"] = kernel(
 )  # fmt: skip
 
 
+def fixtures():
+    return FIX
+
+
 def main():
-    for name, k in FIX.items():
-        (HERE / f"{name}.kir.json").write_text(json.dumps(k, indent=1) + "\n")
+    write(fixtures())
 
 
 if __name__ == "__main__":

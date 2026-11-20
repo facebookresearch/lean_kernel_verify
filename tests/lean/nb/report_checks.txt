@@ -1,42 +1,12 @@
 # Report lines run_all.sh checks for the P0-6 fixtures besides expected_messages.txt:
 # <fixture> <text> must occur in the fixture's Lean output, <fixture> !<text> must not.
-short !UNDECIDED one P0-6
-cycle !UNDECIDED one P0-6
-count_mismatch !UNDECIDED one P0-6
-open_certain !UNDECIDED one P0-6
-two_ctas !UNDECIDED one P0-6
 two_ctas !cta (0,0,0)
-open_undecided UNDECIDED one P0-6
-rep_shared UNDECIDED one P0-6
-arrive_twice UNDECIDED one P0-6
-arrive_leftover UNDECIDED one P0-6
 uniform 1 CTA(s) x 1 role(s); P0-6: 3 named barrier operation(s), 0 not counted (nb_open), 0 repeated region(s) reached
 rep_private 0 not counted (nb_open), 1 repeated region(s) reached
-rep_keyed_two UNDECIDED one P0-6
-rep_keyed !UNDECIDED one P0-6
-held_cycle UNDECIDED one P0-6
-rep_mixed UNDECIDED one P0-6
-arrive_ahead !UNDECIDED one P0-6
-arrive_double !UNDECIDED one P0-6
 arrive_ahead 1 arrival(s) held under the warp-ahead reading
 arrive_double !held under the warp-ahead reading
-meta_stop UNDECIDED out_of_range P0-6
-meta_stop !UNDECIDED in_range P0-6
-meta_stop_two_roles UNDECIDED out_of_range P0-6
-meta_stop_two_roles !UNDECIDED in_range P0-6
 meta_stop_two_roles !waits forever
-short_arrive_after !UNDECIDED one P0-6
 pairing 1 arrival(s) held under the warp-ahead reading
 forced_pair !held under the warp-ahead reading
-mix_alone UNDECIDED one P0-6
-mix_counts UNDECIDED one P0-6
-mix_groups UNDECIDED one P0-6
-wait_after_rep UNDECIDED one P0-6
-wait_after_rep_swapped UNDECIDED one P0-6
-rep_open_certain UNDECIDED one P0-6
-rep_bad_count UNDECIDED one P0-6
 all_exit !waits forever
-all_counted !UNDECIDED one P0-6
 all_exit_two !waits forever
-all_mixed UNDECIDED one P0-6
-all_cycle !UNDECIDED one P0-6

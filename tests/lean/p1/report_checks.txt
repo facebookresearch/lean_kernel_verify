@@ -28,16 +28,6 @@ partial_split 3 conflicting pair(s) classified (3 ordered only under the lockste
 partial_split !NOTES
 partial_named 2 conflicting pair(s) classified (0 ordered only under the lockstep contents)
 partial_named !NOTES
-lockstep_only UNDECIDED credit_two_mblocks P1-1
-lockstep_only !UNDECIDED credit_and_race P1-1
-named_bars UNDECIDED inconsistent P1-1
-named_bars !UNDECIDED no_barrier P1-1
-s2t_race !UNDECIDED
-meta_oob_p1 UNDECIDED oob P1-1
-assume_p1 UNDECIDED fails P1-1
-assume_p1 !UNDECIDED holds
 assume_p1 stop at a model assumption that does not hold (the copy misses the capture), so P1-1 is not decided
 cluster_pair grid (2,1,1) in clusters (2,1,1): 2 CTA(s) x 2 role(s), 35 events; P1: 9 TMEM accesses, 0 conflicting pair(s) classified
 cluster_pair !NOTES
-ledger_cycle UNDECIDED extra0 P1-1
-ledger_cycle UNDECIDED extra1 P1-1

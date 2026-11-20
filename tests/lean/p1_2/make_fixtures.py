@@ -3,12 +3,13 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-"""Writes the P1-2 Lean fixtures tests/lean/p1_2/*.kir.json (P1 KIR with "p1": ["P1-2"],
+"""Writes the P1-2 Lean fixtures of tests/lean/p1_2 (P1 KIR with "p1": ["P1-2"],
 references/kir.md change 15). Each fixture is a small hand-made kernel; its inputs select
 the variant (param MODE) and the trip count (T tiles or I work items). Expected verdicts:
-tests/lean/p1_2/expected.txt; run by tests/lean/run_all.sh.
+tests/lean/p1_2/expected.txt; run by tests/lean/run_all.sh, which writes them into
+$LKV_TEST_OUT/gen/p1_2.
 
-    python3 -I tests/lean/p1_2/make_fixtures.py      # rewrites the fixtures in place
+    python3 -I tests/lean/p1_2/make_fixtures.py OUT_DIR    # writes OUT_DIR/<fixture>.kir.json
 
 The fixtures model the TLX/Triton patterns P1-2 was written for: an epilogue whose 128
 threads write a staging buffer in shared memory and whose elected lane of warp 0 stores it
@@ -25,78 +26,39 @@ write in another CTA); an st.async into the other CTA's store source (`cluster_r
 an `assume` that does not hold (`assume_stop`).
 """
 
-import json
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.dont_write_bytecode = True  # keep the source tree free of __pycache__
+sys.path.insert(0, str(HERE.parent))
+from kirgen import (  # noqa: E402
+    arrive,
+    b,
+    c,
+    cmp,
+    ev,
+    for_,
+    if_,
+    inp,
+    mode_is,
+    nbar,
+    role,
+    var,
+    wait,
+    write,
+)
+
 SYM = "smem"
 SCR = "scratch"
-
-
-def c(v, w=32):
-    return {"e": "const", "v": v, "w": w}
-
-
-def var(n, w=32):
-    return {"e": "var", "name": n, "w": w}
-
-
-def b(o, x, y, w=32):
-    return {"e": "bin", "o": o, "a": x, "b": y, "w": w}
-
-
-def cmp(o, x, y):
-    return {"e": "cmp", "o": o, "a": x, "b": y, "w": 1}
 
 
 def ext64(x):
     return {"e": "ext", "signed": False, "a": x, "w": 64}
 
 
-def ev(name, loc, **f):
-    return {"op": "event", "ev": name, "loc": loc, **f}
-
-
-def for_(v, lb, ub, body, loc):
-    return {
-        "op": "for",
-        "var": v,
-        "lb": lb,
-        "ub": ub,
-        "step": c(1),
-        "body": body,
-        "loc": loc,
-    }
-
-
-def if_(cond, then, els, loc):
-    return {"op": "if", "cond": cond, "then": then, "else": els, "loc": loc}
-
-
-def mode_is(*ks):
-    out = cmp("eq", var("MODE"), c(ks[0]))
-    for k in ks[1:]:
-        out = b("or", out, cmp("eq", var("MODE"), c(k)), 1)
-    return out
-
-
 def when(cond, body, loc):
     return if_(cond, body, [], loc)
-
-
-def nbar(i, count, loc, sync=True):
-    return ev("named_bar", loc, id=c(i), count=c(count), sync=sync)
-
-
-def wait(bar, parity, loc):
-    return ev("wait", loc, bar=bar, idx=c(0), parity=parity)
-
-
-def arrive(bar, loc, per_warp=False):
-    e = ev("arrive", loc, bar=bar, idx=c(0))
-    if per_warp:
-        e["per_warp"] = True
-    return e
 
 
 def store(src, nbytes, loc, warp=0, lane=None, tmap=None, kind="tensor"):
@@ -180,17 +142,6 @@ def kernel(
     }
     if cta_threads is not None:
         out["cta_threads"] = cta_threads
-    return out
-
-
-def role(name, warps, body):
-    return {"name": name, "warps": warps, "threads_per_issue": 1, "body": body}
-
-
-def inp(name, grid=None, **params):
-    out = {"name": name, "params": params}
-    if grid is not None:
-        out["grid"] = [grid, 1, 1]
     return out
 
 
@@ -621,10 +572,14 @@ def cluster_remote():
     return k
 
 
+def fixtures():
+    ks = (staging(), staging_wide(), tmap_rebuild(), handoff(), same_thread(), landing(),
+          pair_chain(), blocked(), blocked_cross(), cluster_remote(), assume_stop())  # fmt: skip
+    return {k["kernel"]: k for k in ks}
+
+
 def main():
-    for k in (staging(), staging_wide(), tmap_rebuild(), handoff(), same_thread(), landing(),
-              pair_chain(), blocked(), blocked_cross(), cluster_remote(), assume_stop()):  # fmt: skip
-        (HERE / f"{k['kernel']}.kir.json").write_text(json.dumps(k, indent=1) + "\n")
+    write(fixtures())
 
 
 if __name__ == "__main__":

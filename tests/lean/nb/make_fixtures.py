@@ -5,7 +5,9 @@
 
 """Write the P0-6 KIR fixtures of tests/lean/nb (lean/KV/Spec/NamedBarriers.lean).
 
-    python3 -I tests/lean/nb/make_fixtures.py      (rewrites nb/*.kir.json)
+    python3 -I tests/lean/nb/make_fixtures.py OUT_DIR    (writes OUT_DIR/<fixture>.kir.json)
+
+tests/lean/run_all.sh writes them into $LKV_TEST_OUT/gen/nb and checks them there.
 
 Small hand-written P0-6 KIRs (top-level `nbar`), one grid CTA unless said otherwise,
 each with the verdicts nb/expected.txt lists:
@@ -61,10 +63,13 @@ each with the verdicts nb/expected.txt lists:
   all_cycle      barrier 0 without a count waits for a role blocked on barrier 1: FAIL
 """
 
-import json
+import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.dont_write_bytecode = True  # keep the source tree free of __pycache__
+sys.path.insert(0, str(HERE.parent))
+from kirgen import role, write  # noqa: E402
 
 
 def c32(v):
@@ -91,10 +96,6 @@ def rep(begin, line=1, key=None):
     if key is not None:
         ev["key"] = key
     return ev
-
-
-def role(name, warps, body):
-    return {"name": name, "warps": warps, "threads_per_issue": 1, "body": body}
 
 
 def loop(n, body, var="i"):
@@ -163,53 +164,12 @@ FIXTURES = {
     "meta_stop": dict(
         kir(
             "meta_stop",
-            [
-                role(
-                    "all",
-                    4,
-                    [
-                        {
-                            "op": "let",
-                            "var": "v",
-                            "loc": "nb.py:5",
-                            "expr": {
-                                "e": "load",
-                                "tensor": "meta",
-                                "w": 32,
-                                "index": [{"e": "pid", "axis": 0, "w": 32}],
-                            },
-                        },
-                        bar(1, 128, line=6),
-                    ],
-                )
-            ],  # fmt: skip
-            [
-                {
-                    "name": "in_range",
-                    "params": {"N_META": 2},
-                    "metadata": {"meta": [3, 5]},
-                },
-                {
-                    "name": "out_of_range",
-                    "params": {"N_META": 1},
-                    "metadata": {"meta": [3]},
-                },
-            ],
+            [role("all", 4, [META_LOAD, bar(1, 128, line=6)])],
+            META_INPUTS,
             params=("N_META",),
             grid=(2, 1, 1),
-        ),  # fmt: skip
-        tensors=[
-            {
-                "name": "meta",
-                "kind": "global",
-                "elem_bytes": 4,
-                "shape": [{"e": "var", "name": "N_META", "w": 32}],
-                "strides": [c32(1)],
-                "segments": None,
-                "role": "input",
-                "metadata": True,
-            }
-        ],  # fmt: skip
+        ),
+        tensors=[META_TENSOR],
     ),
     "meta_stop_two_roles": dict(
         kir(
@@ -483,11 +443,12 @@ FIXTURES = {
 }
 
 
+def fixtures():
+    return FIXTURES
+
+
 def main():
-    for old in HERE.glob("*.kir.json"):
-        old.unlink()
-    for name, k in FIXTURES.items():
-        (HERE / f"{name}.kir.json").write_text(json.dumps(k, indent=1) + "\n")
+    write(fixtures())
 
 
 if __name__ == "__main__":

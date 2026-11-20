@@ -2,45 +2,46 @@
 # make_fixtures.py); run_all.sh compares them with the VERDICT lines KV.runNb prints and
 # with the native_decide theorems. An undecided input (an nb_open not certain, a barrier
 # shared with a repeated region, a pairing that depends on timing, a stopped role trace) is
-# a refuted theorem: FAIL here, and report_checks.txt checks its UNDECIDED line.
+# a refuted theorem without a certain counterexample: UNDECIDED here (Lean prints
+# `UNDECIDED <input> P0-6`).
 # fixture              input   P0-6
 uniform                one     PASS
 short                  one     FAIL
 per_input              n0      PASS
 per_input              n1      FAIL
 meta_stop              in_range      PASS
-meta_stop              out_of_range  FAIL
+meta_stop              out_of_range  UNDECIDED
 meta_stop_two_roles    in_range      PASS
-meta_stop_two_roles    out_of_range  FAIL
+meta_stop_two_roles    out_of_range  UNDECIDED
 pairing                one     PASS
 forced_pair            one     PASS
 count_mismatch         one     FAIL
 cycle                  one     FAIL
 open_certain           one     FAIL
-open_undecided         one     FAIL
+open_undecided         one     UNDECIDED
 open_unreached         n0      PASS
 rep_private            one     PASS
-rep_shared             one     FAIL
+rep_shared             one     UNDECIDED
 rep_keyed              one     PASS
-rep_keyed_two          one     FAIL
-arrive_twice           one     FAIL
-arrive_leftover        one     FAIL
+rep_keyed_two          one     UNDECIDED
+arrive_twice           one     UNDECIDED
+arrive_leftover        one     UNDECIDED
 arrive_double          one     PASS
 arrive_ahead           one     PASS
-held_cycle             one     FAIL
+held_cycle             one     UNDECIDED
 rep_outside_inside     one     PASS
-rep_mixed              one     FAIL
+rep_mixed              one     UNDECIDED
 short_arrive_after     one     FAIL
 two_ctas               one     FAIL
-mix_alone              one     FAIL
-mix_counts             one     FAIL
-mix_groups             one     FAIL
-wait_after_rep         one     FAIL
-wait_after_rep_swapped one     FAIL
-rep_open_certain       one     FAIL
-rep_bad_count          one     FAIL
+mix_alone              one     UNDECIDED
+mix_counts             one     UNDECIDED
+mix_groups             one     UNDECIDED
+wait_after_rep         one     UNDECIDED
+wait_after_rep_swapped one     UNDECIDED
+rep_open_certain       one     UNDECIDED
+rep_bad_count          one     UNDECIDED
 all_exit               one     PASS
 all_counted            one     FAIL
 all_exit_two           one     PASS
-all_mixed              one     FAIL
+all_mixed              one     UNDECIDED
 all_cycle              one     FAIL

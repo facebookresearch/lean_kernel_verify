@@ -35,20 +35,17 @@
   of the CuTe DSL 4.4.2 PTX translation (LKV_FRONTEND=ptx) best effort (report.json
   `loc_quality`; a legacy report has no such key).
 * lean_fixtures: `lkv.py check` on tests/lean/*.kir.json gives the verdicts of
-  tests/lean/expected.txt, and lkv files every text of tests/lean/expected_messages.txt
-  under the right kind: a `note: ` text among the notes and never among the
-  counterexamples, any other text among the counterexamples or the evaluation error.
-  Every evaluation error has the kind tests/lean/eval_errors and segmented_gload
-  bad_layout pin, and every spec of its input that kind's outcome; the other UNDECIDED
-  outcomes are exactly P0-1..P0-5 of the inputs of `assume` and `assume_reader` whose
-  assumption does not hold (KIR change 16; the certain counterexamples of a CTA where no
-  trace stopped stay FAILs), P0-2..P0-5 of the four inputs with an out-of-bounds
-  metadata load (meta_oob_load out_of_range, eval_errors meta_oob, meta_masked_load unmasked_empty,
-  meta_oob_elided out_of_range) and P0-2/P0-4 of ledger_cycle's inputs and ledger_confirm
-  at_budget (a barrier ledger that does not converge) where nothing but the `not decided`
-  line is listed, and P0-4 of cluster_pair_prologue peer_unordered, cluster_multicast_pipeline
-  local_release and cluster_lander_shares' inputs (another CTA's bytes that balance only if
-  a landing completes a later phase than its issue order shows).
+  tests/lean/expected.txt (FAIL where it says UNDECIDED), and lkv files every text of
+  tests/lean/expected_messages.txt under the right kind: a `note: ` text among the notes
+  and never among the counterexamples, any other text among the counterexamples or the
+  evaluation error. Every evaluation error has the kind tests/lean/eval_errors and
+  segmented_gload bad_layout pin, and every spec of its input that kind's outcome; the
+  UNDECIDED outcomes are exactly the specs expected.txt marks UNDECIDED, less those of an
+  unexpected evaluation error (ERROR), and those no evaluation error stopped (inputs whose
+  assumption does not hold, KIR change 16, or with an out-of-bounds metadata load, a barrier
+  ledger that does not converge, another CTA's bytes that balance only if a landing
+  completes a later phase than its issue order shows) list nothing but the `not decided`
+  line (the certain counterexamples of a CTA where no trace stopped stay FAILs).
 * probe_tlx / probe_cute: the probe kernels of kernels/ through the real TTGIR and CuTe
   frontends (`lkv.py run`), with degenerate inputs (an empty tensor, fewer elements than
   one block). The seeded bugs (a floor grid; threads past the end) must be the only FAILs.
@@ -163,17 +160,6 @@ EVAL_ERROR_KINDS = {
     ("handoff", "no_value"): "limit",
     ("handoff", "parity_order"): "limit",
     ("handoff_group", "parts_differ"): "limit",
-}
-
-
-# P0-4 UNDECIDED through another CTA's landings (Ledger.lean, "Landers").
-LANDER_UNDECIDED = {
-    ("cluster_pair_prologue", "peer_unordered", "P0-4"),
-    ("cluster_multicast_pipeline", "local_release", "P0-4"),
-    ("cluster_lander_shares", "ordered", "P0-4"),
-    ("cluster_lander_shares", "unordered", "P0-4"),
-    ("cluster_clc_response", "unordered", "P0-4"),
-    ("cluster_pair_two_release", "early_release", "P0-4"),
 }
 
 
@@ -1155,13 +1141,17 @@ class EndToEnd(unittest.TestCase):
     def test_lean_fixtures(self):
         fixtures = sorted(str(p) for p in (SKILL / "tests/lean").glob("*.kir.json"))
         report = lkv("check", "lean_fixtures", *fixtures, "--name", "lean_fixtures")
-        want = {}
+        want, undecided = {}, set()
         for line in (SKILL / "tests/lean/expected.txt").read_text().splitlines():
             f = line.split()
             if f and not f[0].startswith("#"):
-                want[(f[0], f[1])] = dict(zip(SPECS, f[2:7]))
+                row = dict(zip(SPECS, f[2:7]))
+                undecided |= {(*f[:2], s) for s, v in row.items() if v == "UNDECIDED"}
+                want[(f[0], f[1])] = {
+                    s: "FAIL" if v == "UNDECIDED" else v for s, v in row.items()
+                }
         self.assertEqual(runs(report), want)
-        self.assert_outcomes(report)
+        self.assert_outcomes(report, undecided)
         self.assertEqual(report["result"]["outcome"], "FAIL")
         found = {}  # fixture -> {"notes": [...], "fails": [...]}, rendered findings
         for v in report["variants"]:
@@ -1186,15 +1176,13 @@ class EndToEnd(unittest.TestCase):
             else:
                 self.assertTrue(any(text in c for c in kinds["fails"]), (fixture, text))
 
-    def assert_outcomes(self, report):
+    def assert_outcomes(self, report, undecided):
         """Every evaluation error has the kind EVAL_ERROR_KINDS pins, and every spec of its
-        input that kind's outcome; the other UNDECIDED outcomes are the specs of the inputs
-        with an assumption that does not hold, an out-of-bounds metadata load (but P0-1) or
-        a barrier ledger that does not converge that list nothing but the `not decided`
-        line (its other lines are certain counterexamples), and P0-4 of the inputs whose
-        peer CTA's bytes balance only if a landing completes a later phase than its issue
-        order shows (LANDER_UNDECIDED), which list nothing but the `not decided` line;
-        there is no other ERROR."""
+        input that kind's outcome; the UNDECIDED outcomes are the specs expected.txt marks
+        UNDECIDED (`undecided`), less the ERRORs of an unexpected evaluation error, and those
+        no evaluation error stopped are exactly the specs that list nothing but the
+        `not decided` line (its other lines are certain counterexamples); there is no other
+        ERROR."""
         outcomes, evals, only_marker = {}, {}, set()
         for v, i in runs_of_report(report):
             if i["eval_error"]:
@@ -1219,49 +1207,10 @@ class EndToEnd(unittest.TestCase):
                 for label in SPECS
             }
 
-        stopped = {
-            ("meta_oob_load", "out_of_range"),
-            ("eval_errors", "meta_oob"),
-            ("meta_masked_load", "unmasked_empty"),
-            ("meta_oob_elided", "out_of_range"),
-        }
-        assumed = {  # an assumption that does not hold (KIR change 16): P0-1 too
-            ("assume", "fails"),
-            ("assume", "oob_before"),
-            ("assume", "dup_before"),
-            ("assume_reader", "fails"),
-            ("assume_reader", "fails_both"),
-        }
-        unconverged = {
-            ("ledger_cycle", i) for i in ("extra0", "extra1", "hang_elsewhere")
-        } | {("ledger_confirm", "at_budget")}
         self.assertTrue(of_kind("kernel") <= outcomes["FAIL"])
         self.assertEqual(outcomes["ERROR"], of_kind("unexpected"))
-        self.assertEqual(
-            outcomes["UNDECIDED"],
-            of_kind("limit")
-            | {
-                (*x, label)
-                for x in stopped | unconverged | assumed
-                for label in (SPECS if x in assumed else SPECS[1:])
-                if (*x, label) in only_marker
-            }
-            | LANDER_UNDECIDED,
-        )
-        self.assertLessEqual(LANDER_UNDECIDED, only_marker)
-        # A stopped input FAILs a spec it has a certain counterexample for.
-        self.assertIn(("meta_oob_load", "out_of_range", "P0-3"), outcomes["FAIL"])
-        self.assertIn(("assume", "oob_before", "P0-1"), outcomes["FAIL"])
-        self.assertIn(("assume", "dup_before", "P0-3"), outcomes["FAIL"])
-        self.assertIn(("assume_reader", "fails_both", "P0-1"), outcomes["FAIL"])
-        # An assumption that does not hold is no P0-1 finding (an assert would FAIL all),
-        # and leaves P0-1 undecided, also for the other roles of its CTA.
-        self.assertIn(("assume", "fails", "P0-1"), outcomes["UNDECIDED"])
-        self.assertIn(("assume_reader", "fails", "P0-1"), outcomes["UNDECIDED"])
-        self.assertIn(("meta_oob_elided", "out_of_range", "P0-2"), outcomes["FAIL"])
-        # So does a CTA's certain hang beside a CTA whose ledger does not converge.
-        self.assertIn(("ledger_cycle", "hang_elsewhere", "P0-2"), outcomes["FAIL"])
-        self.assertIn(("ledger_cycle", "extra1", "P0-2"), outcomes["UNDECIDED"])
+        self.assertEqual(outcomes["UNDECIDED"], undecided - outcomes["ERROR"])
+        self.assertEqual(outcomes["UNDECIDED"] - of_kind("limit"), only_marker)
 
     def assert_shell_env_ignored(self, name, report):
         """The frontend dropped SHELL_ENV and the report lists the dropped values."""

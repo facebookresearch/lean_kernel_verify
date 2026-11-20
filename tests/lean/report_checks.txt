@@ -16,35 +16,14 @@ redundant_rewait !needs 5 completions
 positive_share_preferred !the wait hangs
 nonuniform_contents !this wait never returns
 stale_presumed_hang !role c (consumer convention, 3 waits) needs 3 completions
-meta_oob_load UNDECIDED out_of_range P0-2
-meta_oob_load !UNDECIDED out_of_range P0-1
-meta_oob_load !UNDECIDED out_of_range P0-3
 assume 2 CTA(s) x 1 role(s), 2 events; 1 role trace(s) stop at a model assumption that does not hold (the write misses the capture), so P0-1..P0-5 are not decided
-assume !UNDECIDED holds
-assume UNDECIDED fails P0-1
-assume UNDECIDED fails P0-2
-assume UNDECIDED fails P0-5
-assume !UNDECIDED oob_before P0-1
-assume UNDECIDED oob_before P0-3
-assume UNDECIDED dup_before P0-1
-assume !UNDECIDED dup_before P0-3
-assume UNDECIDED dup_before P0-4
 assume !offsets [100, 101)
 assume !cta (1,0,0) role default: gload
 assume !evaluation error
 assume !out-of-bounds metadata load
 assume_reader 2 CTA(s) x 2 role(s), 1 events; 1 role trace(s) stop at a model assumption that does not hold (the write misses the capture), so P0-1..P0-5 are not decided
-assume_reader !UNDECIDED holds
-assume_reader UNDECIDED fails P0-1
-assume_reader !UNDECIDED fails_both P0-1
 assume_reader !offsets [20, 21)
 assume_reader !cta (1,0,0) role reader: gload inp: 1 lane(s) outside allocation [0, 3]: offsets [30, 31)
-meta_oob_elided !UNDECIDED out_of_range P0-2
-meta_oob_elided UNDECIDED out_of_range P0-3
-eval_errors !UNDECIDED meta_oob P0-1
-eval_errors UNDECIDED meta_oob P0-2
-eval_errors !UNDECIDED ok
-segment_edges !UNDECIDED
 eval_errors evaluation error (kernel error): eval_errors.py:5: cta (0,0,0) role default: device assert failed
 eval_errors (a certain error of the kernel on this input: every spec FAILs)
 eval_errors evaluation error (kernel error): eval_errors.py:11: cta (0,0,0) role default: barrier index
@@ -56,50 +35,14 @@ eval_errors (a limit of the model: no spec is decided on this input; not an erro
 eval_errors evaluation error (unexpected): eval_errors.py:8: cta (0,0,0) role default: while loop exceeds max_iters = 10
 eval_errors evaluation error (unexpected): ?: host: barrier b: negative num -1
 eval_errors (the case or LKV needs a fix: no spec is decided on this input)
-eval_errors !UNDECIDED assert_fail
-eval_errors !UNDECIDED barrier_index
-eval_errors !UNDECIDED for_step_zero
-eval_errors !UNDECIDED negative_grid
-eval_errors UNDECIDED div_zero P0-1
-eval_errors UNDECIDED tensor_div_zero_masked P0-5
-eval_errors UNDECIDED while_bound P0-3
-eval_errors UNDECIDED negative_barrier_num P0-4
 segmented_gload evaluation error (unexpected): ?: host: segmented tensor
 cluster_pair_tma grid (2,1,1) in clusters (2,1,1): 2 CTA(s) x 3 role(s), 9 events
 cluster_launch grid (4,1,1) in clusters (2,1,1): 4 CTA(s) x 1 role(s), 0 events
-ledger_cycle UNDECIDED extra0 P0-2
-ledger_cycle UNDECIDED extra1 P0-2
-ledger_cycle UNDECIDED extra1 P0-4
-ledger_cycle UNDECIDED hang_elsewhere P0-4
-ledger_cycle !UNDECIDED hang_elsewhere P0-2
 ledger_cycle !do not split into per-role shares
 ledger_cycle !NOTES
-ledger_confirm UNDECIDED at_budget P0-2
-ledger_confirm UNDECIDED at_budget P0-4
-ledger_confirm !UNDECIDED one_more P0-2
-cluster_pair_prologue UNDECIDED peer_unordered P0-4
-cluster_clc_response UNDECIDED unordered P0-4
-cluster_pair_two_release UNDECIDED early_release P0-4
-cluster_pair_two_release !UNDECIDED n3
-cluster_pair_two_release !UNDECIDED n5
-cluster_clc_response !UNDECIDED n3
-cluster_clc_response !UNDECIDED n5
-cluster_pair_prologue !UNDECIDED short_peer
-cluster_pair_prologue !UNDECIDED extra_peer_box
-cluster_pair_prologue !UNDECIDED peer_extra_iteration
 cluster_pair_prologue !phase 1: expect_tx 384 bytes != tma_load
-cluster_multicast_pipeline UNDECIDED local_release P0-4
-cluster_multicast_pipeline !UNDECIDED n4
-cluster_multicast_pipeline !UNDECIDED s2_n6
-cluster_multicast_pipeline !UNDECIDED swapped_slices
-cluster_lander_shares UNDECIDED ordered P0-4
-cluster_lander_shares UNDECIDED unordered P0-4
 cluster_lander_shares !TMA bytes land in it
 cluster_lander_shares !bytes landing in it
 cluster_dsmem_relay evaluation error (unexpected): cluster.py:53: cta (0,0,0) role relay: complete_tx: negative byte count -256
-cluster_dsmem_relay UNDECIDED negative_bytes P0-4
-handoff !UNDECIDED paired
 handoff evaluation error (model limit): handoff.py:16: cta (0,0,0): handoff mbox: a putter's next put of the channel (handoff.py:7) follows no wait that pairs with an arrive of the reading role after this read (KIR change 17)
 handoff evaluation error (model limit): handoff.py:16: cta (0,0,0): handoff mbox: the waits of the reading role on the slot of its last wait do not pair with the arrives on it
-handoff UNDECIDED overwritten P0-1
-handoff UNDECIDED other_arrival P0-1

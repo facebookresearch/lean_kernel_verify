@@ -3,7 +3,8 @@
 # with the native_decide theorems. An undecided input (an out-of-bounds metadata load or an
 # assumption that does not hold, an unordered pair under an inconsistent named barrier or
 # in a CTA whose ledger does not converge, or a pair ordered only under the lockstep
-# contents) is a refuted theorem: FAIL here.
+# contents) is a refuted theorem without a certain counterexample: UNDECIDED here (Lean
+# prints `UNDECIDED <input> P1-1`).
 # fixture              input                       P1-1
 s2t_race               one_mblock                  PASS
 s2t_race               two_mblocks                 FAIL
@@ -27,18 +28,18 @@ handoff_mixed          commit_and_plain            FAIL
 handoff_mixed          two_commits                 PASS
 split_drain            two_mblocks                 PASS
 split_drain            three_mblocks               PASS
-lockstep_only          credit_two_mblocks          FAIL
-lockstep_only          credit_three_mblocks        FAIL
-lockstep_only          commit_landing              FAIL
+lockstep_only          credit_two_mblocks          UNDECIDED
+lockstep_only          credit_three_mblocks        UNDECIDED
+lockstep_only          commit_landing              UNDECIDED
 lockstep_only          waited_credit               PASS
 lockstep_only          credit_and_race             FAIL
 named_bars             bar_sync                    PASS
 named_bars             bar_arrive_sync             PASS
 named_bars             no_barrier                  FAIL
-named_bars             inconsistent                FAIL
+named_bars             inconsistent                UNDECIDED
 named_idle             cta_wide_between            FAIL
 named_idle             cta_wide_before             PASS
-named_idle             arrive_sync_idle            FAIL
+named_idle             arrive_sync_idle            UNDECIDED
 named_idle             roles_count                 PASS
 same_role              pipelined                   PASS
 same_role              cp_cp                       PASS
@@ -49,14 +50,14 @@ cross_warp             bar_sync                    PASS
 partial_issue          one_thread_arrives          FAIL
 partial_issue          bar_sync_then_one_arrives   PASS
 partial_issue          one_thread_waits            FAIL
-partial_event          credit_two                  FAIL
+partial_event          credit_two                  UNDECIDED
 partial_event          count_one                   FAIL
 partial_event_control  all_warps_needed            PASS
-partial_event_control  credit_three                FAIL
-partial_sync           credit_two                  FAIL
+partial_event_control  credit_three                UNDECIDED
+partial_sync           credit_two                  UNDECIDED
 partial_sync           credit_one                  FAIL
 partial_sync           no_credit                   PASS
-partial_split          run_ahead_one               FAIL
+partial_split          run_ahead_one               UNDECIDED
 partial_split          one_each                    PASS
 partial_named          x_twice                     FAIL
 partial_named          x_once                      PASS
@@ -69,13 +70,13 @@ ranges                 lane_quarter                FAIL
 ranges_relative        in_range                    PASS
 ranges_relative        col_out_of_range            FAIL
 meta_oob_p1            in_bounds                   PASS
-meta_oob_p1            oob                         FAIL
+meta_oob_p1            oob                         UNDECIDED
 assume_p1              holds                       PASS
-assume_p1              fails                       FAIL
+assume_p1              fails                       UNDECIDED
 hang_vacuous           blocked                     FAIL
 cluster_pair           ordered                     PASS
 cluster_pair           last_unwaited               FAIL
 cluster_pair           last_unwaited_one_block     PASS
 cluster_pair           leader_only_release         FAIL
-ledger_cycle           extra0                      FAIL
-ledger_cycle           extra1                      FAIL
+ledger_cycle           extra0                      UNDECIDED
+ledger_cycle           extra1                      UNDECIDED

@@ -2,6 +2,8 @@
 # VERDICT lines printed by KV.runCase and with the native_decide theorems. A FAIL is a
 # violation certain in the extracted model; findings that are not (read/reduce spills,
 # completions nobody waits for, pending tx after the last wait) are notes and PASS.
+# UNDECIDED: a refuted theorem without a certain counterexample (Lean prints `UNDECIDED
+# <input> <spec>` besides the spec's VERDICT line).
 # fixture                 input            P0-1 P0-2 P0-3 P0-4 P0-5
 pipeline_ok               two_tiles_k3     PASS PASS PASS PASS PASS
 pipeline_ok               one_tile_k1      PASS PASS PASS PASS PASS
@@ -44,17 +46,17 @@ eval_semantics            x3               PASS PASS PASS PASS PASS
 eval_semantics            x0               PASS PASS PASS PASS PASS
 eval_errors               ok               PASS PASS PASS PASS PASS
 eval_errors               assert_fail      FAIL FAIL FAIL FAIL FAIL
-eval_errors               div_zero         FAIL FAIL FAIL FAIL FAIL
-eval_errors               while_bound      FAIL FAIL FAIL FAIL FAIL
-eval_errors               meta_oob         FAIL FAIL FAIL FAIL FAIL
-eval_errors               meta_missing_value FAIL FAIL FAIL FAIL FAIL
-eval_errors               meta_negative_offset FAIL FAIL FAIL FAIL FAIL
+eval_errors               div_zero         UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
+eval_errors               while_bound      UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
+eval_errors               meta_oob         FAIL UNDECIDED UNDECIDED UNDECIDED UNDECIDED
+eval_errors               meta_missing_value UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
+eval_errors               meta_negative_offset UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
 eval_errors               barrier_index    FAIL FAIL FAIL FAIL FAIL
 eval_errors               for_step_zero    FAIL FAIL FAIL FAIL FAIL
 eval_errors               for_step_zero_no_trips PASS PASS PASS PASS PASS
-eval_errors               tensor_div_zero_masked FAIL FAIL FAIL FAIL FAIL
+eval_errors               tensor_div_zero_masked UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
 eval_errors               negative_grid    FAIL FAIL FAIL FAIL FAIL
-eval_errors               negative_barrier_num FAIL FAIL FAIL FAIL FAIL
+eval_errors               negative_barrier_num UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
 arrival_counts            count_128        PASS PASS PASS PASS PASS
 arrival_counts            count_32         PASS FAIL PASS PASS PASS
 arrival_counts            count_96         PASS FAIL PASS PASS PASS
@@ -71,7 +73,7 @@ atomic_outside_intended   store_outside    PASS PASS FAIL PASS PASS
 segmented_gload           ok               PASS PASS PASS PASS PASS
 segmented_gload           mask_total       PASS PASS PASS PASS PASS
 segmented_gload           stray            PASS PASS PASS PASS PASS
-segmented_gload           bad_layout       FAIL FAIL FAIL FAIL FAIL
+segmented_gload           bad_layout       UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
 segmented_gload           store_ok         PASS PASS PASS PASS PASS
 segmented_gload           store_spill      FAIL PASS FAIL PASS PASS
 segmented_gload           store_stray      FAIL PASS PASS PASS PASS
@@ -162,21 +164,21 @@ ambiguous_shares          y_after_two_x_phases PASS PASS PASS PASS PASS
 ambiguous_shares          y_after_all_x_phases PASS FAIL PASS PASS PASS
 # An out-of-range metadata load is a P0-1 FAIL; the other specs are undecided with their certain lines.
 meta_oob_load             in_range         PASS PASS PASS PASS PASS
-meta_oob_load             out_of_range     FAIL FAIL FAIL FAIL FAIL
+meta_oob_load             out_of_range     FAIL UNDECIDED FAIL UNDECIDED UNDECIDED
 # assume (KIR change 16): false in CTA 1 on fails, oob_before, dup_before; its role stops
 # there (P0-1..P0-5 undecided, the read after it never evaluated); the P0-1 read and the
 # P0-3 duplicate store of CTA 0, where no trace stopped, stay certain FAILs
 assume                    holds            PASS PASS PASS PASS PASS
-assume                    fails            FAIL FAIL FAIL FAIL FAIL
-assume                    oob_before       FAIL FAIL FAIL FAIL FAIL
-assume                    dup_before       FAIL FAIL FAIL FAIL FAIL
+assume                    fails            UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
+assume                    oob_before       FAIL UNDECIDED UNDECIDED UNDECIDED UNDECIDED
+assume                    dup_before       UNDECIDED UNDECIDED FAIL UNDECIDED UNDECIDED
 # assume_reader: the writer's assumption false in CTA 1 (fails, fails_both); the reader's
 # out-of-bounds read there may use a value the broken assumption made wrong (P0-1
 # undecided); the same read in CTA 0 (fails_both) or with the assumption holding stays a
 # certain FAIL
 assume_reader             holds            FAIL PASS PASS PASS PASS
-assume_reader             fails            FAIL FAIL FAIL FAIL FAIL
-assume_reader             fails_both       FAIL FAIL FAIL FAIL FAIL
+assume_reader             fails            UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
+assume_reader             fails_both       FAIL UNDECIDED UNDECIDED UNDECIDED UNDECIDED
 # More seeded inputs per rule, each with its control.
 # Progress pass: a late join (R = K) that only the pass sees; a three-role ring with a commit hop.
 progress_latejoin_cycle   parity0_deadlock PASS FAIL PASS PASS PASS
@@ -200,10 +202,10 @@ init_commit_release       init_is_commit_early_release PASS FAIL PASS PASS PASS
 # A scalar select evaluates only its chosen operand: a masked metadata load reads nothing.
 meta_masked_load          masked_empty     PASS PASS PASS PASS PASS
 meta_masked_load          masked_one_tile  PASS PASS PASS PASS PASS
-meta_masked_load          unmasked_empty   FAIL FAIL FAIL FAIL FAIL
+meta_masked_load          unmasked_empty   FAIL UNDECIDED UNDECIDED UNDECIDED UNDECIDED
 # An out-of-range metadata load on an elided input is P0-1's; P0-2 lists the complete CTA's hang only.
 meta_oob_elided           in_range         PASS FAIL PASS PASS PASS
-meta_oob_elided           out_of_range     FAIL FAIL FAIL FAIL FAIL
+meta_oob_elided           out_of_range     FAIL FAIL UNDECIDED UNDECIDED UNDECIDED
 # Lockstep credit spares a stale FAIL but never makes a wait need more completions.
 positive_share_preferred  z_after_waits    PASS PASS PASS PASS PASS
 nonuniform_contents       z_joins_at_phase3 PASS PASS PASS PASS PASS
@@ -238,7 +240,7 @@ cluster_dsmem_relay       short_copy       PASS PASS PASS FAIL PASS
 cluster_dsmem_relay       uneven_copies    PASS PASS PASS FAIL PASS
 # negative_bytes: a negative complete_tx count (it cancels an excess copy) is an evaluation
 # error (unexpected), never a balanced phase.
-cluster_dsmem_relay       negative_bytes   FAIL FAIL FAIL FAIL FAIL
+cluster_dsmem_relay       negative_bytes   UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
 # A cta_group::2 pair whose first phase also carries a prologue load (a CuTe DSL backward): the
 # peer's bytes per phase are 192, 64, 64, ..., matched per iteration by its waits on its empty
 # slot, which the leader's MMA releases after each phase (before, no uniform share fit 3 or more
@@ -251,7 +253,7 @@ cluster_pair_prologue     n3               PASS PASS PASS PASS PASS
 cluster_pair_prologue     n4               PASS PASS PASS PASS PASS
 cluster_pair_prologue     short_peer       PASS PASS PASS FAIL PASS
 cluster_pair_prologue     extra_peer_box   PASS PASS PASS FAIL PASS
-cluster_pair_prologue     peer_unordered   PASS PASS PASS FAIL PASS
+cluster_pair_prologue     peer_unordered   PASS PASS PASS UNDECIDED PASS
 cluster_pair_prologue     peer_extra_iteration PASS PASS PASS FAIL PASS
 cluster_multicast         ok               PASS PASS PASS PASS PASS
 cluster_multicast         leader_only_mask PASS PASS PASS FAIL PASS
@@ -263,12 +265,12 @@ cluster_multicast         leader_only_mask PASS PASS PASS FAIL PASS
 cluster_multicast_pipeline n4               PASS PASS PASS PASS PASS
 cluster_multicast_pipeline s2_n6            PASS PASS PASS PASS PASS
 cluster_multicast_pipeline swapped_slices   PASS PASS PASS FAIL PASS
-cluster_multicast_pipeline local_release    PASS PASS PASS FAIL PASS
+cluster_multicast_pipeline local_release    PASS PASS PASS UNDECIDED PASS
 # Two share assignments fit slot x's arrivals, and another CTA's copies balance under one of
 # them only if a copy completes a later phase than its issue order shows: not decided, never
 # the representative assignment's lines as certain counterexamples.
-cluster_lander_shares     ordered          PASS PASS PASS FAIL PASS
-cluster_lander_shares     unordered        PASS PASS PASS FAIL PASS
+cluster_lander_shares     ordered          PASS PASS PASS UNDECIDED PASS
+cluster_lander_shares     unordered        PASS PASS PASS UNDECIDED PASS
 # TLX's cluster launch control with 2-CTA clusters: the rank-0 CTA multicasts each try_cancel
 # response into both CTAs after waiting on its empty slot, which both roles of both CTAs
 # release after their waits on their own response slot. Only the response's transaction bytes
@@ -278,7 +280,7 @@ cluster_lander_shares     unordered        PASS PASS PASS FAIL PASS
 cluster_clc_response      n1               PASS PASS PASS PASS PASS
 cluster_clc_response      n3               PASS PASS PASS PASS PASS
 cluster_clc_response      n5               PASS PASS PASS PASS PASS
-cluster_clc_response      unordered        PASS PASS PASS FAIL PASS
+cluster_clc_response      unordered        PASS PASS PASS UNDECIDED PASS
 # A cta_group::2 pipeline whose empty slot counts the leader MMA's commit and the arrive of
 # a second role per CTA that waits for the MMA's commit on another slot (TLX 2-CTA GEMMs
 # with a bias-partial role): the peer's landings are ordered only through both releases,
@@ -289,17 +291,17 @@ cluster_clc_response      unordered        PASS PASS PASS FAIL PASS
 cluster_pair_two_release  n1               PASS PASS PASS PASS PASS
 cluster_pair_two_release  n3               PASS PASS PASS PASS PASS
 cluster_pair_two_release  n5               PASS PASS PASS PASS PASS
-cluster_pair_two_release  early_release    PASS PASS PASS FAIL PASS
+cluster_pair_two_release  early_release    PASS PASS PASS UNDECIDED PASS
 cluster_launch            grid4            PASS PASS PASS PASS PASS
 cluster_launch            grid3            FAIL FAIL FAIL FAIL FAIL
 cluster_barrier           ok               PASS PASS PASS PASS PASS
 cluster_barrier           follower_skips_arrive PASS FAIL PASS PASS PASS
 # A barrier ledger that does not converge (in CTA 0 the lockstep contents of s0 and s2 alternate, each round's evidencing the other's) leaves P0-2 and P0-4 undecided there, whatever the round count (before, P0-2 failed with 0 or 2 spins of the unrelated role pad and passed with 1 or 3); a certain hang in CTA 1 still FAILs.
-ledger_cycle              extra0           PASS FAIL PASS FAIL PASS
-ledger_cycle              extra1           PASS FAIL PASS FAIL PASS
-ledger_cycle              hang_elsewhere   PASS FAIL PASS FAIL PASS
+ledger_cycle              extra0           PASS UNDECIDED PASS UNDECIDED PASS
+ledger_cycle              extra1           PASS UNDECIDED PASS UNDECIDED PASS
+ledger_cycle              hang_elsewhere   PASS FAIL PASS UNDECIDED PASS
 # Bounds and contents stable while a wait's classification still changes is no fixpoint: at the round budget (at_budget) the ledger has not converged (P0-2/P0-4 undecided), one round more (one_more) it has (P0-2 a certain hang, P0-4 PASS).
-ledger_confirm            at_budget        PASS FAIL PASS FAIL PASS
+ledger_confirm            at_budget        PASS UNDECIDED PASS UNDECIDED PASS
 ledger_confirm            one_more         PASS FAIL PASS PASS PASS
 # handoff (KIR change 17): the putter's values reach the reader through the waits that pair
 # with its arrives (paired; one of them out of bounds: value_oob); a putter that puts again
@@ -310,10 +312,10 @@ ledger_confirm            one_more         PASS FAIL PASS PASS PASS
 # record different values (parts_differ) are a limit.
 handoff                   paired           PASS PASS PASS PASS PASS
 handoff                   value_oob        FAIL PASS PASS PASS PASS
-handoff                   overwritten      FAIL FAIL FAIL FAIL FAIL
-handoff                   other_arrival    FAIL FAIL FAIL FAIL FAIL
-handoff                   read_before_wait FAIL FAIL FAIL FAIL FAIL
-handoff                   no_value         FAIL FAIL FAIL FAIL FAIL
-handoff                   parity_order     FAIL FAIL FAIL FAIL FAIL
+handoff                   overwritten      UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
+handoff                   other_arrival    UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
+handoff                   read_before_wait UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
+handoff                   no_value         UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
+handoff                   parity_order     UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED
 handoff_group             parts            PASS PASS PASS PASS PASS
-handoff_group             parts_differ     FAIL FAIL FAIL FAIL FAIL
+handoff_group             parts_differ     UNDECIDED UNDECIDED UNDECIDED UNDECIDED UNDECIDED

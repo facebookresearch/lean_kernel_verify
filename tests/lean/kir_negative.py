@@ -11,6 +11,8 @@ message; every mutation in ACCEPTED must stay valid.
 """
 
 import copy
+import functools
+import importlib.util
 import json
 import os
 import sys
@@ -25,9 +27,22 @@ def c(v, w=32):
     return {"e": "const", "v": v, "w": w}
 
 
+@functools.cache
+def generated(sub):
+    """The fixtures tests/lean/<sub>/make_fixtures.py writes, by name, as JSON reads them."""
+    path = os.path.join(HERE, sub, "make_fixtures.py")
+    spec = importlib.util.spec_from_file_location(f"make_fixtures_{sub}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return json.loads(json.dumps(module.fixtures()))
+
+
 def load(sub, name):
-    """Fixture `name` of tests/lean/`sub` ("": tests/lean; p1, p1_2, nb, gsync)."""
-    with open(os.path.join(HERE, sub, f"{name}.kir.json")) as f:
+    """Fixture `name` of tests/lean/`sub` ("": tests/lean; p1, p1_2, nb, gsync: as its
+    make_fixtures.py writes it)."""
+    if sub:
+        return generated(sub)[name]
+    with open(os.path.join(HERE, f"{name}.kir.json")) as f:
         return json.load(f)
 
 

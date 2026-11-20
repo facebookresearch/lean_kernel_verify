@@ -4,8 +4,8 @@
 # ordered only under the lockstep reading, or only by a same-thread program order the KIR
 # does not pin down, a landing not shown to complete before the store, a pair after a
 # blocked wait, an unordered pair under an inconsistent named barrier, a stopped role
-# trace) is a refuted theorem: FAIL here; expected_messages.txt checks its `not decided`
-# line.
+# trace) is a refuted theorem without a certain counterexample: UNDECIDED here (Lean prints
+# `UNDECIDED <input> P1-2`); expected_messages.txt checks its `not decided` line.
 # fixture       input                      P1-2
 staging         read_bar_1                 PASS
 staging         read_bar_3                 PASS
@@ -18,49 +18,49 @@ staging         double_wait2_3             FAIL
 staging         full_wait_3                PASS
 staging         bar_before_wait_2          FAIL
 staging         no_bar_before_store_1      FAIL
-staging         inconsistent_bar_2         FAIL
+staging         inconsistent_bar_2         UNDECIDED
 staging         cta_wide_bar_3             PASS
-staging_wide    cta_wide_bar_3             FAIL
+staging_wide    cta_wide_bar_3             UNDECIDED
 tmap_rebuild    unfixed_1                  PASS
 tmap_rebuild    unfixed_2                  FAIL
 tmap_rebuild    fixed_3                    PASS
 tmap_rebuild    fixed_read_3               PASS
 tmap_rebuild    other_warp_2               FAIL
-tmap_rebuild    issuer_warp_2              FAIL
+tmap_rebuild    issuer_warp_2              UNDECIDED
 tmap_rebuild    shared_slot_2ctas          FAIL
 tmap_rebuild    own_slots_2ctas            PASS
-handoff         mbarrier_only_2            FAIL
+handoff         mbarrier_only_2            UNDECIDED
 handoff         named_2                    PASS
 handoff         named_3                    PASS
 handoff         no_wait_1                  PASS
 handoff         no_wait_2                  FAIL
 same_thread     lane0_lane0                PASS
-same_thread     lane0_lane5                FAIL
-same_thread     lane0_warp_after_wait      FAIL
-same_thread     elect_lane3                FAIL
+same_thread     lane0_lane5                UNDECIDED
+same_thread     lane0_warp_after_wait      UNDECIDED
+same_thread     elect_lane3                UNDECIDED
 same_thread     elect_elect                PASS
 same_thread     collective_before          PASS
-same_thread     lane7_before_elect         FAIL
+same_thread     lane7_before_elect         UNDECIDED
 same_thread     elect_elect_no_wait        FAIL
 same_thread     never_completed            PASS
-same_thread     landing_before             FAIL
+same_thread     landing_before             UNDECIDED
 same_thread     landing_after_wait         PASS
 landing         resolved_1                 PASS
 landing         resolved_2                 PASS
-landing         store_before_wait_2        FAIL
-landing         load_ahead_1               FAIL
-landing         no_slot_1                  FAIL
+landing         store_before_wait_2        UNDECIDED
+landing         load_ahead_1               UNDECIDED
+landing         no_slot_1                  UNDECIDED
 pair_chain      leader_slot_2              PASS
 pair_chain      leader_slot_3              PASS
-pair_chain      no_slot_3                  FAIL
+pair_chain      no_slot_3                  UNDECIDED
 pair_chain      store_early_3              FAIL
 pair_chain      own_cta_3                  PASS
-blocked         after_blocked_wait         FAIL
+blocked         after_blocked_wait         UNDECIDED
 blocked         no_wait                    FAIL
-blocked_cross   after_blocked_wait         FAIL
+blocked_cross   after_blocked_wait         UNDECIDED
 blocked_cross   no_wait                    FAIL
 cluster_remote  into_source                FAIL
 cluster_remote  elsewhere                  PASS
 assume_stop     holds                      FAIL
-assume_stop     fails                      FAIL
-assume_stop     pair_before                FAIL
+assume_stop     fails                      UNDECIDED
+assume_stop     pair_before                UNDECIDED
