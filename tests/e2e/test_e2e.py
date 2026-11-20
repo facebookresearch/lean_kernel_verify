@@ -17,8 +17,9 @@
   model limit: UNDECIDED, unexpected: ERROR), and an INCONSISTENT verdict is an ERROR; a
   variant without verdicts is UNDECIDED if the frontend refuses it by design, else an
   ERROR (a refused all-preferred cluster geometry `<spec>@cluster<dims>` for the inputs
-  of its spec whose grid the dims divide); a spec, or its all-preferred geometry, for
-  which to_kir wrote neither a P0-6 KIR nor a P0-6 failure is an ERROR too; the outcome
+  of its spec; once a checked KIR has sync tensors, for P0-7 too); both frontends'
+  report.json are read alike (to_kir's gives a result it
+  did not reach as an error), and a frontend that wrote none failed; the outcome
   and exit status are FAIL (1) on
   any FAIL, else ERROR (2) on any failure, else UNDECIDED (0) on anything a known limit
   leaves open, else PASS (0); the P1 specs' ERRORs always count, their FAIL and
@@ -178,6 +179,11 @@ LANDER_UNDECIDED = {
 
 def render(f: dict) -> str:
     return f"{f['loc']}: {f['context']}: {f['msg']}"
+
+
+def markdown(report: dict) -> str:
+    """report.md of `report` (lkv.py markdown), with the result write_report gives it."""
+    return lkv_py.markdown({**report, "result": lkv_py.result(report)})
 
 
 def env_section(md: str) -> str:
@@ -446,7 +452,7 @@ class Unit(unittest.TestCase):
 
     def test_report_lists_notes_by_source_line(self):
         report = self.report(LEAN_OUT, 1)
-        md = lkv_py.markdown(report)
+        md = markdown(report)
         self.assertIn(
             "| k | `a` | PASS; notes (2/2) | PASS | **FAIL** (2/2); notes (2/2) | PASS | PASS |",
             md,
@@ -506,7 +512,7 @@ class Unit(unittest.TestCase):
         )
         # Certain violations decide the outcome, whatever else is undecided.
         self.assertEqual(lkv_py.exit_status(report), 1)
-        md = lkv_py.markdown(report)
+        md = markdown(report)
         self.assertIn("## Result: FAIL (exit status 1)", md)
         self.assertIn("- FAIL: 4 certain violation(s) (P0-1: 2, P0-3: 2)", md)
         self.assertIn(
@@ -547,7 +553,7 @@ class Unit(unittest.TestCase):
             self.assertEqual({s["outcome"] for s in inp["specs"].values()}, {outcome})
             report = self.report(EVAL_ERRORS[kind], 1)
             self.assertEqual(lkv_py.exit_status(report), status, kind)
-            md = lkv_py.markdown(report)
+            md = markdown(report)
             self.assertIn(f"## Result: {outcome} (exit status {status})", md)
             self.assertIn("| k | `a` | " + " | ".join([cell] * 5) + " |", md)
             section = md.split(f"## {outcome}\n")[1].split("\n## ")[0]
@@ -576,7 +582,7 @@ class Unit(unittest.TestCase):
         )
 
     def test_report_shows_the_frontend_environment(self):
-        env = env_section(lkv_py.markdown(self.report(LEAN_OUT, 1, env=ENV)))
+        env = env_section(markdown(self.report(LEAN_OUT, 1, env=ENV)))
         for line in (
             "- case `env`: `FLASH_ATTENTION_ARCH=sm_100`",
             "- shell values ignored (unset before the compiler and kernel imports): `TRITON_X=1`",
@@ -588,10 +594,10 @@ class Unit(unittest.TestCase):
             self.assertIn(line, env)
         cute = {k: v for k, v in ENV.items() if k != "triton_cache_invalidating"}
         self.assertNotIn(
-            "Triton", env_section(lkv_py.markdown(self.report(LEAN_OUT, 1, env=cute)))
+            "Triton", env_section(markdown(self.report(LEAN_OUT, 1, env=cute)))
         )
         # `check` runs no frontend: no environment section.
-        self.assertNotIn("## Environment", lkv_py.markdown(self.report(LEAN_OUT, 1)))
+        self.assertNotIn("## Environment", markdown(self.report(LEAN_OUT, 1)))
 
     def test_cute_ptx_locations_are_best_effort(self):
         # The CuTe binary stands in as its to_kir alone, on the recorded DSL 4.4.2
@@ -647,63 +653,106 @@ class Unit(unittest.TestCase):
         rejected = [{"input": "b", "error": "the host rejected input b: ValueError"}]
         report = self.report(PASSING, 0, host_rejected=rejected)
         self.assertEqual(lkv_py.exit_status(report), 0)
-        md = lkv_py.markdown(report)
+        md = markdown(report)
         self.assertIn("## Result: PASS (exit status 0)", md)
         self.assertIn("## Inputs the host code rejected", md)
 
-    def test_ttgir_p1_per_cluster_geometry(self):
-        # the P1-2 KIR of a preferred cluster geometry (<spec>@cluster<dims>.p1.json) is
-        # checked as its own variant, and a refused one is not checked, with its inputs
-        self.addCleanup(lkv_py.P1_NOT_CHECKED.clear)
-        la = lambda spec: {"spec": spec, "launch": {"grid": [8, 1, 1]}}  # noqa: E731
-        dump = {"kernel": "k", "specs": {"s": {}, "t": {}},
-                "inputs": [{"name": "i", "launches": [la("s")]},
-                           {"name": "j", "launches": [la("t")]}]}  # fmt: skip
-        with tempfile.TemporaryDirectory() as d:
-            fe, logs = Path(d) / "fe", Path(d) / "logs"
-            fe.mkdir()
-            logs.mkdir()
-            for name in ("s", "s@cluster4x1x1", "t"):
-                (fe / f"{name}.p1.json").write_text("{}")
-            (logs / "to_kir.log").write_text(
-                "[to_kir] LKV_FRONTEND=ptx: translating the PTX\n"
-                "[to_kir] t@cluster4x1x1: P1 refused: a gap\n"
-            )
-            kirs = lkv_py.ttgir_p1(dump, fe, logs)
-        self.assertEqual(
-            [k.name for k in kirs], ["s.p1.json", "t.p1.json", "s@cluster4x1x1.p1.json"]
-        )
-        self.assertEqual(
-            [(x["variant"], x["status"], x["inputs"]) for x in lkv_py.P1_NOT_CHECKED],
-            [("t@cluster4x1x1", "refused", ["j"])],
-        )
+    def test_frontend_reports(self):
+        # Both frontends' report.json, one entry per variant, are read alike: the KIRs, a
+        # P0 failure with the inputs of its variant, the P0-6 and P1 results without a
+        # KIR (to_kir writes a result it did not reach as an error); P1-1 is not checked
+        # on the TTGIR variants with a P0 KIR, before the P1-2 entries; a frontend that
+        # wrote no report.json failed (a pipeline error).
+        def stub(entries):
+            def buck_run(target, args, log_path):
+                Path(log_path).write_text("[to_kir] ...\n")
+                if target == "frontend/ttgir:to_kir" and entries is not None:
+                    fe = Path(str(args[args.index("--dump") + 1])).parent
+                    (fe / "report.json").write_text(json.dumps(entries))
+                return 0 if target == "frontend/ttgir:dump" else 1
 
-    def test_ttgir_p1_geometry_inputs(self):
-        # a refused all-preferred P1-2 KIR counts for the inputs whose grid its dims
-        # divide (as a failed P0 KIR of that geometry, variant_inputs); one refused because
-        # the launches disagree on the preferred dims (`<spec>@cluster`) for every input
-        self.addCleanup(lkv_py.P1_NOT_CHECKED.clear)
-        la = lambda grid: {"spec": "s", "launch": {"grid": grid}}  # noqa: E731
-        dump = {"kernel": "k", "specs": {"s": {}},
-                "inputs": [{"name": "a", "launches": [la([8, 1, 1])]},
-                           {"name": "b", "launches": [la([6, 1, 1])]}]}  # fmt: skip
-        with tempfile.TemporaryDirectory() as d:
-            fe, logs = Path(d) / "fe", Path(d) / "logs"
-            fe.mkdir()
-            logs.mkdir()
-            (fe / "s.p1.json").write_text("{}")
-            (logs / "to_kir.log").write_text(
-                "[to_kir] LKV_FRONTEND=ptx: translating the PTX\n"
-                "[to_kir] s@cluster4x1x1: P1 refused: a gap\n"
-                "[to_kir] s@cluster: P1 refused: launches differ\n"
-            )
-            kirs = lkv_py.ttgir_p1(dump, fe, logs)
-        self.assertEqual([k.name for k in kirs], ["s.p1.json"])
+            return buck_run
+
+        def p1(status, why):
+            return {"status": status, "error": why, "specs": ["P1-2"]}
+
+        stopped = "to_kir stopped before the P0-6 pass of this variant ended"
+        ttgir = [
+            {"variant": "s", "kernel": "k", "inputs": ["a", "b"], "kir": "s.kir.json",
+             "nb": {"status": "checked", "kir": "s.nb.json"},
+             "p1": {"status": "checked", "kir": "s.p1.json", "specs": ["P1-2"]}},
+            {"variant": "s@cluster4x1x1", "kernel": "k", "inputs": ["a", "b"],
+             "kir": "s@cluster4x1x1.kir.json", "nb": {"status": "error", "error": stopped},
+             "p1": p1("refused", "a gap")},
+            {"variant": "t", "kernel": "k", "inputs": ["c"], "error": "x", "kind": "error",
+             "nb": {"status": "refused", "error": "y"},
+             "p1": p1("not_applicable", "the kernel has no bulk async store")},
+            {"variant": "t@cluster", "kernel": "k", "inputs": ["c"], "kind": "gap",
+             "error": "launches differ", "nb": {"status": "refused", "error": "launches differ"},
+             "p1": p1("refused", "launches differ")},
+        ]  # fmt: skip
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(lkv_py, "buck_run", stub(ttgir)), \
+                mock.patch.object(lkv_py, "NB_NOT_CHECKED", []) as nb, \
+                mock.patch.object(lkv_py, "P1_NOT_CHECKED", []) as nc:  # fmt: skip
+            (Path(d) / "report.json").write_text("[]")  # a stale one goes first
+            kirs, failures = lkv_py.run_ttgir(Path(d) / "c.json", Path(d), Path(d),
+                                              Path(d), [], "sm_100")  # fmt: skip
+        self.assertEqual([k.name for k in kirs], ["s.kir.json", "s.nb.json", "s.p1.json",
+                                                  "s@cluster4x1x1.kir.json"])  # fmt: skip
+        self.assertEqual([(f["variant"], f["inputs"], f["kind"]) for f in failures],
+                         [("t", ["c"], "error"), ("t@cluster", ["c"], "gap")])  # fmt: skip
         self.assertEqual(
-            [(x["variant"], x["status"], x["inputs"]) for x in lkv_py.P1_NOT_CHECKED],
-            [("s@cluster", "refused", ["a", "b"]),
-             ("s@cluster4x1x1", "refused", ["a"])],
+            [(x["variant"], x["inputs"], x["kind"], x["error"]) for x in nb],
+            [("s@cluster4x1x1.nb", ["a", "b"], "error", stopped),
+             ("t.nb", ["c"], "gap", "y"), ("t@cluster.nb", ["c"], "gap", "launches differ")],
         )  # fmt: skip
+        self.assertEqual(
+            [
+                u["outcome"]
+                for u in lkv_py.no_verdicts({"nb_not_checked": nb}, ["P0-6"])
+            ],
+            ["ERROR", "UNDECIDED", "UNDECIDED"],
+        )
+        self.assertEqual(
+            [(x["variant"], x["status"], x["specs"], x.get("inputs")) for x in nc],
+            [("s", "not_checked", ["P1-1"], None),
+             ("s@cluster4x1x1", "not_checked", ["P1-1"], None),
+             ("s@cluster4x1x1", "refused", ["P1-2"], ["a", "b"]),
+             ("t", "not_applicable", ["P1-2"], ["c"]),
+             ("t@cluster", "refused", ["P1-2"], ["c"])],
+        )  # fmt: skip
+        # The CuTe frontend's names its variants by kernel and digest; a `(host)` entry
+        # is a rejected input (dump.json has those); its P1 entries name no specs.
+        cute = [
+            {"kernel": "K", "digest": "d1", "inputs": ["a"], "kir": "K__d1.json",
+             "loc_quality": "line_only", "nb": {"status": "checked", "kir": "K__d1.nb.json"},
+             "p1": {"status": "refused", "error": "R4"}},
+            {"kernel": "K", "digest": "d2", "inputs": ["b"], "error": "z", "kind": "gap",
+             "nb": {"status": "error", "error": "w"}},
+            {"kernel": "(host)", "digest": "-", "inputs": ["r"], "error": "rejected"},
+        ]  # fmt: skip
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(lkv_py, "NB_NOT_CHECKED", []) as nb, \
+                mock.patch.object(lkv_py, "P1_NOT_CHECKED", []) as nc, \
+                mock.patch.object(lkv_py, "LOC_QUALITY", {}) as quality:  # fmt: skip
+            (Path(d) / "report.json").write_text(json.dumps(cute))
+            kirs, failures = lkv_py.frontend_report(Path(d) / "report.json", None, "x")
+        self.assertEqual([k.name for k in kirs], ["K__d1.json", "K__d1.nb.json"])
+        self.assertEqual(failures, [{"variant": "K__d2", "kernel": "K", "inputs": ["b"],
+                                     "kind": "gap", "error": "z"}])  # fmt: skip
+        self.assertEqual(nb, [{"variant": "K__d2.nb", "kernel": "K", "inputs": ["b"],
+                               "kind": "error", "error": "w"}])  # fmt: skip
+        self.assertEqual(nc, [{"variant": "K__d1", "kernel": "K", "inputs": ["a"],
+                               "status": "refused", "error": "R4"}])  # fmt: skip
+        self.assertEqual(quality, {"K__d1": "line_only"})
+        # No report.json: to_kir stopped before it wrote one (a stale one is gone).
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(lkv_py, "buck_run", stub(None)):  # fmt: skip
+            (Path(d) / "report.json").write_text(json.dumps(ttgir))
+            with self.assertRaisesRegex(RuntimeError, "TTGIR to_kir failed"):
+                lkv_py.run_ttgir(Path(d) / "c.json", Path(d), Path(d), Path(d), [],
+                                 "sm_100")  # fmt: skip
 
     def test_variants_without_verdicts_by_kind(self):
         refused = {
@@ -716,7 +765,7 @@ class Unit(unittest.TestCase):
         report = self.report(PASSING, 0, frontend_failures=[refused])
         self.assertEqual(lkv_py.exit_status(report), 0)  # a known limit, not an error
         report["totals"] = lkv_py.totals(
-            report["variants"], lkv_py.LABELS, lkv_py.unchecked(report)
+            report["variants"], lkv_py.LABELS, lkv_py.no_verdicts(report, lkv_py.LABELS)
         )
         self.assertEqual(
             report["totals"]["P0-1"],
@@ -729,7 +778,7 @@ class Unit(unittest.TestCase):
                 "with_notes": 2,
             },
         )
-        md = lkv_py.markdown(report)
+        md = markdown(report)
         self.assertIn("## Result: UNDECIDED (exit status 0)", md)
         self.assertIn(
             "- not decided (known limit): 1 variant(s) the frontend refuses by design: "
@@ -755,7 +804,7 @@ class Unit(unittest.TestCase):
         }
         report = self.report(PASSING, 0, frontend_failures=[failed])
         self.assertEqual(lkv_py.exit_status(report), 2)
-        md = lkv_py.markdown(report)
+        md = markdown(report)
         self.assertIn("## Result: ERROR (exit status 2)", md)
         self.assertIn(
             "- ERROR: 1 variant(s) that failed to translate or check: `k__3`", md
@@ -799,6 +848,62 @@ class Unit(unittest.TestCase):
             lkv_py.result(report)["undecided"],
         )
 
+    def test_p0_7_counts_the_variants_without_verdicts(self):
+        # kir.md change 18: once a checked KIR has sync tensors (P0-7), a P0 variant without
+        # verdicts counts for P0-7 too, as for P0-1..P0-5: in its record, the totals and
+        # report.md's table, on its inputs (a KIR's: one per outcome of a protocol region;
+        # a frontend failure's: the launch inputs); a PASS on the representative claim
+        # schedule is UNDECIDED there, with its reason.
+        sync = {**ONE_INPUT, "tensors": [{"name": "w", "sync": {"width": 64}}]}
+        text = PASSING.replace(
+            "P0-5 mask-elision soundness: PASS\n",
+            "P0-5 mask-elision soundness: PASS\n"
+            "P0-7 global waits reached, co-residency: PASS\n",
+        ).replace("VERDICT a P0-5 PASS\n", "VERDICT a P0-5 PASS\nVERDICT a P0-7 PASS\n")
+        variants = []
+        for name, k in (
+            ("k__1", sync),
+            ("k__2", {**sync, "representative": ["claims"]}),
+        ):
+            inputs = lkv_py.parse_lean(text, k, 0)
+            for s in inputs[0]["specs"].values():
+                for f in s["counterexamples"] + s["notes"]:
+                    f["source"], f["line_text"] = None, None
+            variants.append({"variant": name, "kernel": "k", "status": "checked",
+                             "inputs": inputs, "global": True})  # fmt: skip
+        refused = {"variant": "k__3", "kernel": "k", "inputs": ["c"], "kind": "gap",
+                   "error": "refused"}  # fmt: skip
+        timeout = {"variant": "k__4", "kernel": "k", "status": "lean_error", "error": "timeout",
+                   "input_names": ["c@proto:team:100", "c@proto:team:111"], "global": True}  # fmt: skip
+        report = {"case": "unit", "host_rejected": [], "frontend_failures": [refused],
+                  "variants": [*variants, timeout]}  # fmt: skip
+        self.addCleanup(lkv_py.GLOBAL_ON.clear)
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(lkv_py, "NB_NOT_CHECKED", []), \
+                mock.patch.object(lkv_py, "P1_NOT_CHECKED", []):  # fmt: skip
+            self.assertEqual(lkv_py.write_report(report, Path(d)), 2)
+            md = (Path(d) / "report.md").read_text()
+        self.assertEqual(
+            [(u["variant"], u["inputs"], u["outcome"], u["labels"])
+             for u in lkv_py.no_verdicts(report, ["P0-7"])],
+            [("k__4", timeout["input_names"], "ERROR", lkv_py.LABELS + ["P0-7"]),
+             ("k__3", ["c"], "UNDECIDED", lkv_py.LABELS + ["P0-7"])],
+        )  # fmt: skip
+        self.assertEqual({o: report["totals"]["P0-7"][o] for o in lkv_py.OUTCOMES},
+                         {"PASS": 1, "FAIL": 0, "ERROR": 2, "UNDECIDED": 2})  # fmt: skip
+        self.assertIn(
+            "| kernel | input | P0-1 | P0-2 | P0-3 | P0-4 | P0-5 | P0-6 | P0-7 |", md
+        )
+        self.assertIn("| k | `c` | " + " | ".join(["UNDECIDED (1/1)"] * 5)
+                      + " | - | UNDECIDED (1/1) |", md)  # fmt: skip
+        self.assertIn("| k | `c@proto:team:111` | " + " | ".join(["**ERROR** (1/1)"] * 5)
+                      + " | - | **ERROR** (1/1) |", md)  # fmt: skip
+        self.assertIn(
+            "not decided: PASS on one feasible schedule only (the claiming CTAs claim in "
+            "turn)",
+            md.split("## UNDECIDED")[1],
+        )
+
     def test_p1_verdicts_are_reported_apart_and_keep_the_exit_status(self):
         text = (
             "== k / input a\ngrid (1,1,1): 1 CTA(s) x 2 role(s), 9 events; P1: 3 TMEM accesses\n"
@@ -832,7 +937,7 @@ class Unit(unittest.TestCase):
 
         report = with_p1(inputs)
         self.assertEqual(lkv_py.exit_status(report), 0)  # P1-1 is not part of it
-        md = lkv_py.markdown(report)
+        md = markdown(report)
         self.assertIn(
             "## P1-1 TMEM reuse ordered (P1; CuTe only; its FAIL and UNDECIDED are not "
             "part of the outcome, its ERRORs are)",
@@ -862,7 +967,7 @@ class Unit(unittest.TestCase):
         report["p1_strict"] = True
         self.assertEqual(lkv_py.result(report)["outcome"], "UNDECIDED")
         self.assertEqual(lkv_py.exit_status(report), 0)
-        md = lkv_py.markdown(report)
+        md = markdown(report)
         p1 = md.split("## P1-1 TMEM reuse ordered")[1]
         self.assertIn("| k | `a` | UNDECIDED (1/1) |", p1)
         self.assertIn("### P1-1 UNDECIDED", p1)
@@ -877,6 +982,11 @@ class Unit(unittest.TestCase):
         self.assertEqual(
             lkv_py.result(report)["undecided"],
             ["P1-1: 1 variant(s) the frontend refuses by design: `k__1`"],
+        )
+        # Its section renders though no input names it (no per-input table: that used to
+        # stop report.md with StopIteration).
+        self.assertIn(
+            "- `k__1`: P1 translation refused: R4: inline PTX", markdown(report)
         )
         # A failed P1 translation is an ERROR, with or without --p1-strict.
         report = self.report(PASSING, 0)
@@ -910,13 +1020,15 @@ class Unit(unittest.TestCase):
         report["p1_not_checked"] = [{"variant": "s", "status": "not_checked", "error": "x",
                                      "specs": ["P1-1"]}]  # fmt: skip
         report["totals_p1"] = lkv_py.totals(
-            report["variants_p1"], lkv_py.LABELS_P1, lkv_py.unchecked(report, p1=True)
+            report["variants_p1"],
+            lkv_py.LABELS_P1,
+            lkv_py.no_verdicts(report, lkv_py.LABELS_P1),
         )
         self.assertEqual(
             lkv_py.result(report)["fail"], ["P1-2: 1 certain violation(s) (P1-2: 1)"]
         )
         self.assertEqual(report["totals_p1"]["P1-1"]["FAIL"], 0)
-        md = lkv_py.markdown(report)
+        md = markdown(report)
         self.assertIn(
             "## P1-2 async store sources reuse ordered (P1; PTX translation;", md
         )
@@ -938,18 +1050,6 @@ class Unit(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "same name: k "):
                 lkv_py.layer2(kirs, Path(d) / "out", None, 1, 1)
             self.assertFalse((Path(d) / "out").exists())
-
-    def test_variant_inputs_of_a_geometry(self):
-        # a to_kir failure line names `<spec>` or `<spec>@cluster<dims>`: the inputs of
-        # the spec, those whose grid the dims divide (a bare `@cluster`: every one)
-        la = lambda spec, grid: {"spec": spec, "launch": {"grid": grid}}  # noqa: E731
-        dump = {"inputs": [{"name": "a", "launches": [la("s", [4, 1, 1])]},
-                           {"name": "b", "launches": [la("s", [6, 1, 1])]},
-                           {"name": "c", "launches": [la("t", [4, 1, 1])]}]}  # fmt: skip
-        self.assertEqual(lkv_py.variant_inputs(dump, "s"), ["a", "b"])
-        self.assertEqual(lkv_py.variant_inputs(dump, "s@cluster4x1x1"), ["a"])
-        self.assertEqual(lkv_py.variant_inputs(dump, "s@cluster2x1x1"), ["a", "b"])
-        self.assertEqual(lkv_py.variant_inputs(dump, "s@cluster"), ["a", "b"])
 
     def test_target_reaches_the_ttgir_dump(self):
         calls = []
@@ -1008,85 +1108,6 @@ class Unit(unittest.TestCase):
         self.assertEqual(seen, [("0", False), ("1", True)])
         self.assertEqual([a[0] for a in calls], ["run", "run"])
         self.assertEqual([("--no-p1" in a) for a in calls], [True, False])
-
-    def test_geometry_failure_counts_for_its_spec(self):
-        # a to_kir failure of another cluster geometry of a variant (`<spec>@cluster`:
-        # launches that disagree on the preferred dims) counts for the inputs of <spec>,
-        # next to the regular KIR
-        def buck_run(target, args, log_path):
-            args = list(map(str, args))
-            if target == "frontend/ttgir:dump":
-                la = {"spec": "s", "launch": {"grid": [4, 1, 1]}}
-                dump = {"kernel": "k", "specs": {"s": {}},
-                        "inputs": [{"name": "a", "launches": [la]}, {"name": "b", "launches": [la]}]}  # fmt: skip
-                (Path(args[args.index("--out") + 1]) / "dump.json").write_text(
-                    json.dumps(dump)
-                )
-                Path(log_path).write_text("")
-                return 0
-            (Path(args[args.index("--dump") + 1]).parent / "s.kir.json").write_text(
-                "{}"
-            )
-            Path(log_path).write_text("[to_kir] s@cluster: FAILED (gap): launches differ in "
-                                      "their (preferred) cluster dims\n")  # fmt: skip
-            return 1
-
-        with tempfile.TemporaryDirectory() as d, \
-                mock.patch.object(lkv_py, "buck_run", buck_run), \
-                mock.patch.object(lkv_py, "NB_NOT_CHECKED", []), \
-                mock.patch.object(lkv_py, "P1_NOT_CHECKED", []):  # fmt: skip
-            kirs, failures = lkv_py.run_ttgir(Path(d) / "c.json", Path(d), Path(d),
-                                              Path(d), [], "sm_100")  # fmt: skip
-        self.assertEqual([k.name for k in kirs], ["s.kir.json"])
-        self.assertEqual([(f["variant"], f["inputs"], f["kind"]) for f in failures],
-                         [("s@cluster", ["a", "b"], "gap")])  # fmt: skip
-
-    def test_lost_p0_6_kir_is_an_error(self):
-        # to_kir stopped after its P0 lines (a P0 failure keeps lkv.py going): a spec
-        # without a P0-6 KIR or `P0-6 FAILED` line, and a spec's all-preferred geometry
-        # without one, get an ERROR entry instead of no verdict
-        def buck_run(target, args, log_path):
-            args = list(map(str, args))
-            if target == "frontend/ttgir:dump":
-                la = lambda spec, attrs: {"spec": spec, "launch": {  # noqa: E731
-                    "grid": [4, 1, 1], "cluster": [1, 1, 1], "attrs": attrs}}  # fmt: skip
-                launches = [
-                    la("s", {}),
-                    la("t", {}),
-                    la("u", {"preferred_cluster": [2, 1, 1]}),
-                ]
-                dump = {"kernel": "k", "specs": {"s": {}, "t": {}, "u": {}},
-                        "inputs": [{"name": "a", "launches": launches}]}  # fmt: skip
-                (Path(args[args.index("--out") + 1]) / "dump.json").write_text(
-                    json.dumps(dump)
-                )
-                Path(log_path).write_text("")
-                return 0
-            fe = Path(args[args.index("--dump") + 1]).parent
-            for name in ("s.kir.json", "s.nb.json", "u.kir.json", "u.nb.json"):
-                (fe / name).write_text("{}")
-            Path(log_path).write_text(
-                "[to_kir] t: FAILED (gap): x\nTraceback (most recent call last):\n"
-            )
-            return 1
-
-        with tempfile.TemporaryDirectory() as d, \
-                mock.patch.object(lkv_py, "buck_run", buck_run), \
-                mock.patch.object(lkv_py, "NB_NOT_CHECKED", []) as nb, \
-                mock.patch.object(lkv_py, "P1_NOT_CHECKED", []):  # fmt: skip
-            kirs, failures = lkv_py.run_ttgir(Path(d) / "c.json", Path(d), Path(d),
-                                              Path(d), [], "sm_100")  # fmt: skip
-        self.assertEqual(
-            [k.name for k in kirs],
-            ["s.kir.json", "u.kir.json", "s.nb.json", "u.nb.json"],
-        )
-        self.assertEqual([f["variant"] for f in failures], ["t"])
-        self.assertEqual([(x["variant"], x["inputs"], x["kind"]) for x in nb],
-                         [("t.nb", ["a"], "error"), ("u@cluster.nb", ["a"], "error")])  # fmt: skip
-        report = {"variants_nb": [], "nb_not_checked": nb}
-        self.assertEqual(
-            [x["outcome"] for x in lkv_py.unchecked_nb(report)], ["ERROR", "ERROR"]
-        )
 
     def test_run_outside_a_checkout_is_an_error(self):
         # A copy of the skill outside an fbsource checkout cannot build the frontend.

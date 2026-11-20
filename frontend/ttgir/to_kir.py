@@ -46,6 +46,16 @@ Tasks (translate_all): the P0 translation, the P0-6 pass and the P1 pass of each
 (one KIR each), each child sending back only its log line's contents (the KIR's summary,
 or the failure's kind and message); the lines come in task order (P0, then P0-6, then
 P1, each in spec order), each as soon as the tasks before it ended.
+
+report.json (Report), next to dump.json, is what lkv.py reads (the log lines are for
+humans): one entry per variant (`<spec>`, `<spec>@cluster<dims>`, `<spec>@cluster`; in
+spec order, each specialization's regular variant first), as in the CuTe frontend's
+kir/report.json: {variant, kernel, inputs (those with a launch of the specialization),
+the P0 translation's "kir" or "error" and "kind" (none for a geometry the legacy P0
+translation does not check), "nb": {status, kir | error} (P0-6), "p1": {status, kir |
+error, specs} (P1-2; not_checked in the legacy translation)}. It is written before the
+first task, every result still to come an error (to_kir stopped before it), and again as
+each line is logged, so a to_kir that stops leaves every result it logged.
 """
 
 import argparse
@@ -62,6 +72,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from .. import kir as kir_contract
+from ..ptx import launch as ptx_launch
 from . import kir_build as K, op_table, var_names
 from .mlir_text import (
     Block,
@@ -1597,8 +1608,8 @@ def build_ptx(
     core's Facts (frontend/ptx/translate.py) assembled as build() assembles the
     Translator's, with the same names, tensors (host descriptors and the CLC tables
     included), params, inputs and checks. `geometry`: the cluster dims every cluster
-    of the launches has instead of their regular ones (preferred_geometry), with the
-    inputs whose grid they divide. With `p1` the P1 KIR of P1-2 (policy p1 ["P1-2"];
+    of the launches has instead of their regular ones (preferred_geometry: dims that
+    divide every grid). With `p1` the P1 KIR of P1-2 (policy p1 ["P1-2"];
     top-level `p1`), None if the kernel has no bulk store (seen in the parsed PTX, before
     anything is translated) or none the P1 pass finds. The PTX is parsed once: the core
     translates the parsed module. A launch's required cluster is refused by the caller
@@ -1736,12 +1747,11 @@ def check_preferred_cluster(dump: dict, key: str) -> None:
     cluster dims: the device may then run clusters of either size, and this translation
     checks one geometry (the PTX translation checks both: preferred_geometry)."""
     for inp, la in _launches(dump, key):
-        rec = la.get("launch") or {}  # (a dump without launch records: no preference)
-        pref = (rec.get("attrs") or {}).get("preferred_cluster")
-        cluster = tuple(rec.get("cluster") or (1, 1, 1))
-        if pref and tuple(pref) != cluster:
+        # (a dump without launch records: no preference)
+        dims = ptx_launch.preferred_cluster(la.get("launch") or {})
+        if dims:
             raise KirError(f"the launch of input {inp['name']} asks for a preferred cluster "
-                           f"{tuple(pref)} beside its cluster dims {cluster} (gap: a preferred "
+                           f"{dims[0]} beside its cluster dims {dims[1]} (gap: a preferred "
                            "cluster geometry: the TTGIR translation checks one geometry; the "
                            "PTX translation checks both)")  # fmt: skip
 
@@ -1861,9 +1871,9 @@ PASS_NAME = {"p0": "P0 translation", "nb": "P0-6 pass", "p1": "P1 pass"}
 class Done(NamedTuple):
     """What a task (translate_all) sends back, all its log line needs (_line): `kind`
     "kir" with the KIR's summary in `text` (and for a P1 KIR the P1 specs it decides,
-    `p1`), "none" for a P1 pass on a kernel without a bulk store, or the failure kind
-    "gap" or "error" (failure_kind) with its message in `text` and the exception's class
-    in `exc` (_loaded gives it back)."""
+    `p1`), "none" for a P1 pass on a kernel without a bulk store (why in `text`), or the
+    failure kind "gap" or "error" (failure_kind) with its message in `text` and the
+    exception's class in `exc` (_loaded gives it back)."""
 
     kind: str
     text: str = ""
@@ -1947,7 +1957,7 @@ def _task(where: Path, dump: dict, case: dict, task: tuple) -> Done:
         why = PASS_NAME[pas] + ("" if pas == "nb" else " internal error")
         return Done("error", f"{why}: {type(e).__name__}: {e}")
     if kir is None:
-        return Done("none")
+        return Done("none", "the kernel has no bulk async store")
     (where / f"{name}{KIR_SUFFIX[pas]}").write_text(json.dumps(kir))
     return Done("kir", summary(kir), tuple(kir["p1"]) if pas == "p1" else ())
 
@@ -2005,17 +2015,81 @@ def _plan(dump: dict, passes: tuple) -> tuple[list, list]:
     return order, tasks
 
 
+# report.json's status of a P0-6 or P1 result (Report), by the kind of its Done.
+STATUS = {"kir": "checked", "none": "not_applicable", "gap": "refused", "error": "error",
+          "not_checked": "not_checked"}  # fmt: skip
+# The P1 result of a variant of the legacy translation, which has no P1 pass.
+LEGACY_P1 = Done(
+    "not_checked", "P1-2 not checked: the legacy TTGIR translation has no P1 pass"
+)
+
+
+class Report:
+    """report.json (module doc) of translate_all's results `order`, at `path`: written
+    here, each result still to come the error that to_kir stopped before it, and again
+    with each result (put)."""
+
+    def __init__(self, path: Path, dump: dict, order: list):
+        rank = {key: i for i, key in enumerate(dump["specs"])}
+        self.path, self.kernel = path, dump["kernel"]
+        self.inputs = {key: [inp["name"] for inp in dump["inputs"]
+                             if any(la["spec"] == key for la in inp.get("launches", []))]
+                       for key in rank}  # fmt: skip
+        # variant -> {pass: Done}, the variants in spec order, their passes in task order
+        self.results: dict[str, dict[str, Done]] = {}
+        for pas, name, _x in sorted(order, key=lambda o: rank[o[1].partition("@")[0]]):
+            stopped = (
+                f"to_kir stopped before the {PASS_NAME[pas]} of this variant ended"
+            )
+            self.results.setdefault(name, {})[pas] = Done("error", stopped)
+        if frontend() == "legacy":  # no P1 pass: P1-2 is not checked on its P0 variants
+            for passes in self.results.values():
+                if "p0" in passes:
+                    passes.setdefault("p1", LEGACY_P1)
+        self.write()
+
+    def put(self, pas: str, name: str, r: Done) -> None:
+        self.results[name][pas] = r
+        self.write()
+
+    def write(self) -> None:
+        """The entries, replacing the file whole (a reader never sees half of it)."""
+        entries = []
+        for name, passes in self.results.items():
+            e = {"variant": name, "kernel": self.kernel,
+                 "inputs": self.inputs[name.partition("@")[0]]}  # fmt: skip
+            for pas, r in passes.items():
+                out = (
+                    {"kir": str(self.path.parent / f"{name}{KIR_SUFFIX[pas]}")}
+                    if r.kind == "kir"
+                    else {"error": r.text}
+                )
+                if pas == "p0":  # at the top, as in the CuTe frontend's kir/report.json
+                    e |= out if r.kind == "kir" else {**out, "kind": r.kind}
+                elif pas == "nb":
+                    e["nb"] = {"status": STATUS[r.kind], **out}
+                else:
+                    specs = list(r.p1) if r.kind == "kir" else ["P1-2"]
+                    e["p1"] = {"status": STATUS[r.kind], **out, "specs": specs}
+            entries.append(e)
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps(entries, indent=1))
+        os.replace(tmp, self.path)
+
+
 def translate_all(dump_path: Path, case: dict, passes: tuple = PASSES, jobs: int = 1,
-                  emit=None) -> dict:  # fmt: skip
+                  emit=None, report: bool = False) -> dict:  # fmt: skip
     """Passes `passes` of every specialization of a dump and of its other geometries
     (_variants): {(pass, name): Done}, in task order: pass by pass, in spec order. Each
     KIR is written next to dump.json (<name>.kir.json, .nb.json, .p1.json). The tasks are
     independent: with jobs > 1 they run in up to `jobs` forked processes (_forked), else
     here one after another; the results and files are the same. emit(pass, name, Done)
-    for each result in task order, as soon as the tasks before it ended."""
+    for each result in task order, as soon as the tasks before it ended; with `report`,
+    report.json next to dump.json (Report) gets each result just before."""
     dump = json.loads(dump_path.read_text())
     where = dump_path.parent
     order, tasks = _plan(dump, passes)
+    rep = Report(where / "report.json", dump, order) if report else None
     finished: dict[int, Done] = {}
     got: dict[tuple, Done] = {}
 
@@ -2025,6 +2099,8 @@ def translate_all(dump_path: Path, case: dict, passes: tuple = PASSES, jobs: int
             if isinstance(x, int) and x not in finished:
                 return
             got[(pas, name)] = finished.pop(x) if isinstance(x, int) else x
+            if rep is not None:
+                rep.put(pas, name, got[(pas, name)])
             if emit is not None:
                 emit(pas, name, got[(pas, name)])
 
@@ -2683,7 +2759,7 @@ def translate_p1(dump_path: Path, case: dict) -> dict:
 
 
 def _line(pas: str, name: str, r: Done) -> str:
-    """The log line of a task's result (lkv.py reads the KIR files and these lines)."""
+    """The log line of a task's result, for humans (lkv.py reads report.json)."""
     if pas == "p0":
         if r.kind == "kir":
             return f"[to_kir] {name}: {name}.kir.json ({r.text})"
@@ -2695,7 +2771,7 @@ def _line(pas: str, name: str, r: Done) -> str:
     if r.kind == "kir":
         return f"[to_kir] {name}: P1 ({', '.join(r.p1)}): {name}.p1.json ({r.text})"
     if r.kind == "none":
-        return f"[to_kir] {name}: P1 not_applicable: the kernel has no bulk async store"
+        return f"[to_kir] {name}: P1 not_applicable: {r.text}"
     return (
         f"[to_kir] {name}: P1 {'error' if r.kind == 'error' else 'refused'}: {r.text}"
     )
@@ -2737,7 +2813,8 @@ def main() -> None:
     # P0-6 whatever the translation; P1 in the PTX translation unless LKV_P1=0
     passes = PASSES if ptx and os.environ.get("LKV_P1") != "0" else ("p0", "nb")
     got = translate_all(args.dump, case, passes, args.jobs,
-                        lambda pas, name, r: print(_line(pas, name, r), file=sys.stderr))  # fmt: skip
+                        lambda pas, name, r: print(_line(pas, name, r), file=sys.stderr),
+                        report=True)  # fmt: skip
     sys.exit(
         1 if any(p == "p0" and r.kind != "kir" for (p, _), r in got.items()) else 0
     )

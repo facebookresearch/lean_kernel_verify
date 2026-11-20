@@ -31,7 +31,8 @@ library shared with the CuTe frontend.
 #   specialization
 # to_kir (frontend/ttgir/to_kir.py --dump DIR/dump.json --case CASE [--jobs N]): per
 #   compiled specialization its KIR, its P0-6 KIR and (PTX translation) its P1-2 KIR,
-#   next to dump.json; --jobs: processes for these translations (one KIR each)
+#   and report.json, next to dump.json; --jobs: processes for these translations (one
+#   KIR each)
 python3 -I scripts/lkv.py run CASE.json --src DIR [--inputs a,b] [--target sm_100|sm_103]
 # tests (CPU): tests/ttgir/test_translate.py (translation of handwritten TTGIR),
 # tests/ttgir/test_ttgir.py (dump + to_kir on small TLX kernels, LKV_FRONTEND=legacy pinned;
@@ -58,7 +59,17 @@ specialization and geometry are independent tasks (`translate_all`): up to `--jo
 at a time, each in a process forked for it, which sends back only its log line's
 contents (a KIR's summary, a failure's kind and message); the lines come in task order
 (the P0 lines, then the P0-6 and the P1 ones, each in spec order), each as soon as the
-tasks before it ended.
+tasks before it ended. The lines are for humans: `lkv.py` reads `report.json`, which
+`to_kir` writes next to dump.json, one entry per variant (`<spec>`, `<spec>@cluster<dims>`,
+`<spec>@cluster`; in spec order, each specialization's regular variant first) as in the
+CuTe frontend's `kir/report.json`: the inputs with a launch of its specialization, its P0
+KIR (`kir`) or why it has none (`error`, `kind`), and its P0-6 and P1-2 results (`nb`,
+`p1`: `{status, kir | error}`, `p1` with its `specs`; status `checked`, `refused`,
+`error`, `not_applicable` or, in the legacy translation, which has no P1 pass,
+`not_checked`). It is written before the first task, with every result still to come an
+`error` (to_kir stopped before it), and again as each line is logged: a `to_kir` that
+stops leaves the results it logged, and one that wrote no `report.json` fails the run (a
+pipeline error).
 
 The inputs run in order in one process. If the host refuses an input (`host_errors.py`:
 the innermost frame of the exception is under `src_root` and a `raise` or `assert`

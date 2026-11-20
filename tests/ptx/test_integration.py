@@ -22,7 +22,9 @@ of Facts.descs (a segmented base's segments on the walking dim; a bulk descripto
 extent). TTGIR assembly (frontend/ttgir/to_kir.py build_ptx): host descriptor blocks
 (equal in every launch), the KIR desc tensors of Facts.descs (annotations, role) and the
 CLC tables; translate_nb in forked processes (the sequential results) and its
-all-preferred `<spec>@cluster<dims>` P0-6 KIR, and translate_p1's P1 KIR per geometry.
+all-preferred `<spec>@cluster<dims>` P0-6 KIR, translate_p1's P1 KIR per geometry, and
+to_kir's report.json (the variants, their inputs and results; what a to_kir that stops
+leaves; the legacy translation's).
 """
 
 import contextlib
@@ -422,8 +424,9 @@ class TtgirProbe(unittest.TestCase):
 
     def test_tasks_in_forked_processes(self):
         """to_kir's tasks (P0, P0-6 and P1 of every specialization) in forked processes
-        (--jobs) give the sequential results: the same exit status, log lines and files;
-        the lines in task order, the P0 ones, then the P0-6 and the P1 ones."""
+        (--jobs) give the sequential results: the same exit status, log lines, files and
+        report.json; the lines in task order, the P0 ones, then the P0-6 and the P1
+        ones."""
         case = SKILL / "tests/e2e/cases/probe_tlx.json"
 
         def to_kir(jobs: int):
@@ -447,8 +450,9 @@ class TtgirProbe(unittest.TestCase):
                 self.assertRaises(SystemExit) as stop,
             ):
                 ttgir_to_kir.main()
-            files = {f.name: f.read_bytes() for f in sorted(self.tmp.glob("*.*.json"))
-                     if f.name.endswith((".kir.json", ".nb.json", ".p1.json"))}  # fmt: skip
+            files = {f.name: f.read_bytes() for f in sorted(self.tmp.glob("*.json"))
+                     if f.name.endswith((".kir.json", ".nb.json", ".p1.json"))
+                     or f.name == "report.json"}  # fmt: skip
             return stop.exception.code, err.getvalue().splitlines(), files
 
         seq = to_kir(1)
@@ -472,7 +476,19 @@ class TtgirProbe(unittest.TestCase):
                 ": P1 not_applicable: the kernel has no bulk async store"
             )
         )
-        self.assertEqual(len(files), 4)  # the P0 and P0-6 KIRs
+        self.assertEqual(len(files), 5)  # the P0 and P0-6 KIRs, report.json
+        not_applicable = {"status": "not_applicable", "specs": ["P1-2"],
+                          "error": "the kernel has no bulk async store"}  # fmt: skip
+        self.assertEqual(
+            json.loads(files["report.json"]),
+            [{"variant": k, "kernel": "probe", "inputs": inputs,
+              "kir": str(self.tmp / f"{k}.kir.json"),
+              "nb": {"status": "checked", "kir": str(self.tmp / f"{k}.nb.json")},
+              "p1": not_applicable}
+             for k, inputs in (("1691f771b8a0", ["aligned", "empty"]),
+                               ("6614c8dcb51d", ["partial", "partial_floor", "below_block",
+                                                 "below_block_floor"]))],
+        )  # fmt: skip
 
     def test_p1_without_a_bulk_store_before_any_translation(self):
         """A kernel without a bulk store has no P1 KIR, decided on its parsed PTX before
@@ -705,6 +721,123 @@ class TtgirPassGeometries(unittest.TestCase):
         self.assertEqual(str(got["s"]), "a construct of the regular geometry")
         self.assertEqual(ttgir_to_kir.failure_kind(got["s"]), "gap")
         self.assertEqual(got["s@cluster4x1x1"]["geometry"], [4, 1, 1])
+
+
+class TtgirReport(unittest.TestCase):
+    """to_kir's report.json (Report), what lkv.py reads: one entry per variant in spec
+    order (each specialization's regular variant first) with the inputs of its
+    specialization and every pass's result; written before the first task with every
+    result still to come an error, so a to_kir that stops leaves the results it logged;
+    in the legacy translation, P1-2 not checked on its P0 variants (it has no P1 pass)."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
+        rec = {"cluster": [2, 1, 1], "grid": [8, 1, 1],
+               "attrs": {"preferred_cluster": [4, 1, 1]}}  # fmt: skip
+        self.dump = self.tmp / "dump.json"
+        self.dump.write_text(json.dumps({
+            "kernel": "k", "specs": {"t": {"ttgir": "t.ttgir"}, "s": {"ttgir": "s.ttgir"}},
+            "inputs": [{"name": "a", "launches": [{"spec": "s", "launch": rec},
+                                                  {"spec": "t", "launch": {}}]},
+                       {"name": "b", "launches": [{"spec": "s", "launch": rec}]},
+                       {"name": "r", "host_error": "rejected", "launches": []}]}))  # fmt: skip
+        for key in ("s", "t"):
+            (self.tmp / f"{key}.ttgir").write_text("")
+        (self.tmp / "case.json").write_text("{}")
+
+    def to_kir(self, env, stop=None):
+        """to_kir's main on the dump with stand-in translations (the P0-6 KIR of
+        s@cluster4x1x1 refused, no bulk store in t); `stop`: the task at which to_kir
+        stops. report.json."""
+
+        def kir(where, dump, key, case, geometry=None, p1=False):
+            if p1 and key == "t":
+                return None
+            return dict(TtgirP1Geometry.BARE, **({"p1": ["P1-2"]} if p1 else {}))
+
+        def nb(where, dump, key, case, geometry=None):
+            if geometry:
+                raise ttgir_to_kir.KirError("a refusal")
+            return TtgirP1Geometry.BARE
+
+        real, calls = ttgir_to_kir._task, []
+
+        def task(*args):
+            calls.append(args)
+            if len(calls) == stop:
+                raise KeyboardInterrupt
+            return real(*args)
+
+        argv = [
+            "to_kir",
+            "--dump",
+            str(self.dump),
+            "--case",
+            str(self.tmp / "case.json"),
+        ]
+        with (
+            mock.patch.dict(os.environ, env),
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(ttgir_to_kir, "build_ptx", kir),
+            mock.patch.object(
+                ttgir_to_kir, "build", lambda t, d, key, case: kir(0, d, key, case)
+            ),
+            mock.patch.object(ttgir_to_kir, "build_nb", nb),
+            mock.patch.object(ttgir_to_kir, "_task", task),
+            mock.patch.object(ttgir_to_kir.kir_contract, "validate", lambda k: []),
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(KeyboardInterrupt if stop else SystemExit),
+        ):
+            ttgir_to_kir.main()
+        return json.loads((self.tmp / "report.json").read_text())
+
+    def kir(self, name, suffix=".kir.json"):
+        return str(self.tmp / f"{name}{suffix}")
+
+    def test_ptx(self):
+        got = self.to_kir({"LKV_FRONTEND": "ptx", "LKV_P1": "1"})
+        p1 = {"status": "checked", "kir": self.kir("s", ".p1.json"), "specs": ["P1-2"]}
+        self.assertEqual(got, [
+            {"variant": "t", "kernel": "k", "inputs": ["a"], "kir": self.kir("t"),
+             "nb": {"status": "checked", "kir": self.kir("t", ".nb.json")},
+             "p1": {"status": "not_applicable", "error": "the kernel has no bulk async store",
+                    "specs": ["P1-2"]}},
+            {"variant": "s", "kernel": "k", "inputs": ["a", "b"], "kir": self.kir("s"),
+             "nb": {"status": "checked", "kir": self.kir("s", ".nb.json")}, "p1": p1},
+            {"variant": "s@cluster4x1x1", "kernel": "k", "inputs": ["a", "b"],
+             "kir": self.kir("s@cluster4x1x1"),
+             "nb": {"status": "refused", "error": "a refusal"},
+             "p1": {**p1, "kir": self.kir("s@cluster4x1x1", ".p1.json")}},
+        ])  # fmt: skip
+        # LKV_P1=0: no P1 results
+        got = self.to_kir({"LKV_FRONTEND": "ptx", "LKV_P1": "0"})
+        self.assertEqual([("p1" in e) for e in got], [False, False, False])
+
+    def test_stopped(self):
+        # stopped at the 4th task, the first P0-6 one: the 3 P0 results stay, the rest
+        # are errors
+        got = self.to_kir({"LKV_FRONTEND": "ptx", "LKV_P1": "1"}, stop=4)
+        self.assertEqual([e.get("kir") for e in got],
+                         [self.kir("t"), self.kir("s"), self.kir("s@cluster4x1x1")])  # fmt: skip
+        for e in got:
+            for pas, what in (("nb", "P0-6 pass"), ("p1", "P1 pass")):
+                self.assertEqual(e[pas]["status"], "error")
+                self.assertEqual(e[pas]["error"],
+                                 f"to_kir stopped before the {what} of this variant ended")  # fmt: skip
+
+    def test_legacy(self):
+        # one geometry per P0 variant, P1-2 not checked on them; the P0-6 pass checks both
+        got = self.to_kir({"LKV_FRONTEND": "legacy", "LKV_P1": "1"})
+        not_checked = {"status": "not_checked", "specs": ["P1-2"],
+                       "error": "P1-2 not checked: the legacy TTGIR translation has no P1 pass"}  # fmt: skip
+        self.assertEqual(
+            [(e["variant"], e.get("kir"), e["nb"]["status"], e.get("p1")) for e in got],
+            [("t", self.kir("t"), "checked", not_checked),
+             ("s", self.kir("s"), "checked", not_checked),
+             ("s@cluster4x1x1", None, "refused", None)],
+        )  # fmt: skip
+        self.assertNotIn("error", got[2])
 
 
 class CuteProbe(unittest.TestCase):

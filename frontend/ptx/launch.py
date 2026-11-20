@@ -12,6 +12,7 @@ descriptors and the tensors behind global addresses. Pure stdlib.
                        encoder_variant}
     kir_desc(decoded, elem_bytes) -> {shape, strides, box, elem_bytes, dim0_ratio}
     resolve(address, tensors, desc=None) -> [{tensor, storage, elem_off, match}]
+    preferred_cluster(record) -> (preferred, regular) cluster dims | None
 
 Every refusal raises LaunchError with the reason.
 
@@ -272,6 +273,16 @@ def resolve(address: int, tensors: dict, desc: dict | None = None) -> list:
             }
         )
     return sorted(out, key=lambda c: _MATCH_ORDER[c["match"]])
+
+
+def preferred_cluster(record: dict) -> tuple | None:
+    """(preferred, regular) cluster dims of a LaunchRecord whose launch asks for a
+    preferred cluster other than its cluster dims (attrs.preferred_cluster, the launch
+    attribute cudaLaunchAttributePreferredClusterDimension; regular: its cluster, 1 x 1 x 1
+    without one): the device may then run clusters of either size. None otherwise."""
+    pref = (record.get("attrs") or {}).get("preferred_cluster")
+    regular = tuple(record.get("cluster") or (1, 1, 1))
+    return (tuple(pref), regular) if pref and tuple(pref) != regular else None
 
 
 def _span_end(d: dict) -> int:

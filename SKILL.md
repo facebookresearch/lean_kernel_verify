@@ -229,10 +229,9 @@ for a launch with a preferred cluster also `<spec>@cluster<dims>.p1.json` (all
 clusters preferred) (`frontend_ptx.md`, "P1-2 pass"; top-level `p1: ["P1-2"]`),
 reported in a section of its own after P1-1's (FAIL and UNDECIDED count only with
 `--p1-strict`). A refused P1-2 translation is UNDECIDED on every input of its
-specialization (of an all-preferred geometry: those whose grid its dims divide), with
-its reason (a failed one an ERROR); a specialization without a bulk store is "not
-applicable", and the legacy TTGIR translation and the CuTe frontend do not check P1-2
-("not checked").
+specialization, with its reason (a failed one an ERROR); a specialization without a
+bulk store is "not applicable", and the legacy TTGIR translation and the CuTe frontend
+do not check P1-2 ("not checked").
 
 **How a verdict is decided.** Each host flag set compiles to its own KIR
 variant, paired with the inputs that select it. For each (variant, input, spec),

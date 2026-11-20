@@ -1631,11 +1631,10 @@ def preferred_cluster_gap(las: list) -> str | None:
     references/frontend_ptx.md "Clusters"); None otherwise."""
     for la in las:
         for r in la.get("launch_records", []):
-            pref = (r.get("attrs") or {}).get("preferred_cluster")
-            cluster = tuple(r.get("cluster") or (1, 1, 1))
-            if pref and tuple(pref) != cluster:
-                return (f"cuda.launch_ex: a preferred cluster {tuple(pref)} beside the cluster "
-                        f"dims {cluster} (gap: clusters of either size may run; the CuTe "
+            dims = _ptx("launch").preferred_cluster(r)
+            if dims:
+                return (f"cuda.launch_ex: a preferred cluster {dims[0]} beside the cluster "
+                        f"dims {dims[1]} (gap: clusters of either size may run; the CuTe "
                         "frontend checks only the regular geometry)")  # fmt: skip
     return None
 

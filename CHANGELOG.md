@@ -241,3 +241,11 @@ First public release.
   runs, with its write set (`nbar.writes`), so it runs once per P0-6 KIR, on the PTX
   parsed once; it ran again for each tensor the input checks rejected. KIRs are
   unchanged.
+- TTGIR to_kir writes `report.json` next to dump.json: one entry per variant (also each
+  cluster geometry) with the inputs of its specialization and its P0, P0-6 and P1-2
+  results, as the CuTe frontend's `kir/report.json`, and `lkv.py` reads both frontends'
+  alike instead of to_kir's log lines (which stay, for humans). It is written before the
+  first task, every result still to come an error, and again with each line, so a to_kir
+  that stops leaves the results it logged (a stop failed the whole run, unless a P0 KIR
+  had failed, and could leave a geometry's P1-2 neither checked nor listed); no
+  `report.json` is a pipeline error.

@@ -161,7 +161,6 @@ class CudaDevice:
             raise RuntimeError(
                 f"torch.cuda.device({device!r}): the CPU-only host has CUDA device 0 only"
             )
-        self.idx = -1 if device == -1 else 0
 
     def __enter__(self):
         return self

@@ -919,8 +919,7 @@ class TtgirFrontendTest(unittest.TestCase):
             (
                 "other_attribute",
                 RuntimeError,
-                r"cuFuncSetAttribute\(8: CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES\) "
-                "is not modeled",
+                r"cuFuncSetAttribute\(8\) is not modeled",
             ),
             ("other_function", AttributeError, "not cuFuncGetAttribute"),
             # the host loaded the handle but set no attribute through the stand-in

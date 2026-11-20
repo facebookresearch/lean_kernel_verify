@@ -854,7 +854,8 @@ the instruction, its source line, its PTX line and the reason:
 [to_kir] 946e2014bc4d: FAILED (gap): bra at fbcode/k.py:118 (PTX line 9861): data value from setp of data at fbcode/k.py:117 reaches a branch condition (slice soundness)
 ```
 
-TLX writes these lines to `logs/to_kir.log`; CuTe records them in `kir/report.json`
+TLX writes these lines to `logs/to_kir.log` and records them in to_kir's `report.json`
+(`frontend_ttgir.md`, "Running"); CuTe records them in `kir/report.json`
 (`"error"` prefixed `PTX at <file>.ptx: `, and `"kind"`). Both reach report.md and
 report.json `frontend_failures`. `gap` is a construct refused by design: every spec of the
 variant's inputs is UNDECIDED, not an error. `error` is something the case, the dump or

@@ -117,15 +117,8 @@ class Launch:
 
 # CUfunction_attribute values (cuda.h) that cuFuncSetAttribute may set: the ones the CPU
 # run models (CU_FUNC_ATTRIBUTE_REQUIRED_CLUSTER_{WIDTH,HEIGHT,DEPTH}, by the index of the
-# LaunchRecord `func_attributes` entry `required_cluster` they set), and the others by
-# name, for the refusal.
+# LaunchRecord `func_attributes` entry `required_cluster` they set).
 REQUIRED_CLUSTER = {11: 0, 12: 1, 13: 2}
-OTHER_FUNC_ATTRIBUTES = {
-    8: "CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES",
-    9: "CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT",
-    14: "CU_FUNC_ATTRIBUTE_NON_PORTABLE_CLUSTER_SIZE_ALLOWED",
-    15: "CU_FUNC_ATTRIBUTE_CLUSTER_SCHEDULING_POLICY_PREFERENCE",
-}
 CUDA_ERROR_NOT_PERMITTED = 800
 LIBCUDA = ("libcuda.so", "libcuda.so.1")
 
@@ -192,8 +185,6 @@ class _CuFuncSetAttribute:
     time (`.reqnctapercluster`) is CUDA_ERROR_NOT_PERMITTED, as the driver documents;
     otherwise it is recorded (unset dimensions stay 0, the driver's default)."""
 
-    argtypes = restype = None  # ctypes declarations the host may assign; not used
-
     def __init__(self, functions: Functions):
         self.functions = functions
 
@@ -206,9 +197,8 @@ class _CuFuncSetAttribute:
                 "the CPU run compiled with warmup"
             )
         if attrib not in REQUIRED_CLUSTER:
-            name = OTHER_FUNC_ATTRIBUTES.get(attrib, "unknown attribute")
             raise RuntimeError(
-                f"cuFuncSetAttribute({attrib}: {name}) is not modeled by the CPU-only dump"
+                f"cuFuncSetAttribute({attrib}) is not modeled by the CPU-only dump"
             )
         if type(value) is not int or value < 0:
             raise RuntimeError(f"cuFuncSetAttribute({attrib}, {value!r}): not modeled")
@@ -223,9 +213,9 @@ class _CuFuncSetAttribute:
 @dataclass
 class Capture:
     reads: HostReads  # the dump's source tracking (shared by every input of the run)
-    target: str = "sm_100"  # gpu_free.TARGETS key: what warmups compile for
+    target: str  # gpu_free.TARGETS key: what warmups compile for
     # The run's warmup kernels, shared by its inputs.
-    functions: Functions = field(default_factory=Functions)
+    functions: Functions
     launches: list = field(default_factory=list)
 
     def __enter__(self):
