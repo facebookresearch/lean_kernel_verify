@@ -222,3 +222,22 @@ First public release.
   searches run per CTA or cluster in parallel and serve the decision and the report alike
   (`TmemReuse.holdsB_eq`, `StoreReuse.holdsOnB_eq`). The self-check also compares every
   spec's report lines with the ones computed from scratch. Same verdicts and reports.
+- TTGIR to_kir: the P0, P0-6 and P1-2 translations of every specialization and cluster
+  geometry are tasks of one fork pool, up to `--jobs` processes (one KIR each; `lkv.py
+  run --jobs`), so the specializations of a kernel translate in parallel; each process
+  sends back only its log line's contents. The three passes check the same geometries,
+  decided before anything is translated (`to_kir.geometries`): the P0 pass also
+  translates the all-preferred geometry where the regular P0 KIR fails (its own line,
+  `<spec>@cluster<dims>`, or the refused `<spec>@cluster`), and a launch whose function's
+  required cluster differs from its cluster dims refuses each geometry's P0 KIR, as it
+  did the P0-6 and P1-2 ones. Each translation parses its PTX once. KIRs and verdicts
+  are unchanged; the log lines come in task order.
+- TTGIR to_kir: the P1-2 pass of a kernel without a bulk store is `not_applicable` as
+  soon as its PTX is parsed, also where its translation would fail (that was a P1-2
+  `refused` or `error`). `lkv.py run --no-p1` makes the frontends skip their P1 pass
+  (`LKV_P1=0` for the TTGIR to_kir, `--no-p1` for the CuTe binary) and sets `LKV_P1=1`
+  otherwise: an `LKV_P1=0` in the shell made every TLX/Triton P1-2 an ERROR.
+- P0-6 (both frontends): the metadata tensors of the barrier pass are chosen before it
+  runs, with its write set (`nbar.writes`), so it runs once per P0-6 KIR, on the PTX
+  parsed once; it ran again for each tensor the input checks rejected. KIRs are
+  unchanged.

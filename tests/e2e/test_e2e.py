@@ -26,6 +26,8 @@
   (`<spec>@cluster<dims>.p1.json`) is a P1 variant of its own; inputs the host rejects
   count as none; an export's revision marker names the analyzed revision;
   --target reaches the TTGIR dump and is refused for CuTe cases (exit status 2, never 1);
+  --no-p1 reaches the frontends (LKV_P1=0 for the TTGIR to_kir, --no-p1 for the CuTe
+  binary), and without it the TTGIR to_kir gets LKV_P1=1 whatever the shell's value;
   `run` translates with --frontend, else $LKV_FRONTEND, else the family's default (ptx for
   TLX/Triton, legacy for CuTe);
   the report renders the frontend's environment record, and there marks the source lines
@@ -63,6 +65,7 @@ Outputs: $LKV_E2E_OUT (default ${TMPDIR:-/tmp}/lkv_e2e_$USER), one directory per
 
 from __future__ import annotations
 
+import argparse
 import getpass
 import importlib.util
 import json
@@ -968,6 +971,43 @@ class Unit(unittest.TestCase):
         ((target, args),) = calls
         self.assertEqual(target, "frontend/ttgir:dump")
         self.assertEqual(args[args.index("--target") + 1], "sm_103")
+
+    def test_no_p1_reaches_the_frontends(self):
+        # run --no-p1: the frontends skip their P1 pass (LKV_P1=0 for the TTGIR to_kir,
+        # --no-p1 for the CuTe binary); without it LKV_P1=1 even if the shell has
+        # LKV_P1=0 (which made every TLX P1-2 an ERROR: to_kir wrote no P1 line)
+        seen, calls = [], []
+
+        def run_frontend(case_path, case, root, out, inputs, target, jobs=1, p1=True):
+            seen.append((os.environ.get("LKV_P1"), p1))
+            raise RuntimeError("stop")
+
+        def buck_run(target, args, log_path):
+            calls.append(list(map(str, args)))
+            Path(log_path).write_text("stub")
+            return 1
+
+        with tempfile.TemporaryDirectory() as d:
+            case = Path(d) / "c.json"
+            case.write_text(json.dumps({"name": "c", "src_root": "."}))
+            for p1 in (False, True):
+                args = argparse.Namespace(case=str(case), out=d, src=None, inputs=None,
+                                          target="sm_100", frontend="ptx", jobs=1, timeout=1,
+                                          p1_strict=False, p1=p1)  # fmt: skip
+                with mock.patch.dict(os.environ, {"LKV_P1": "0"}), \
+                        mock.patch.object(lkv_py, "run_frontend", run_frontend), \
+                        mock.patch.object(lkv_py, "write_report", lambda r, o: 2), \
+                        mock.patch.object(lkv_py, "FBCODE", Path(d)), \
+                        mock.patch.object(lkv_py, "log"):  # fmt: skip
+                    lkv_py.cmd_run(args)
+            with mock.patch.object(lkv_py, "buck_run", buck_run):
+                for p1 in (False, True):
+                    with self.assertRaisesRegex(RuntimeError, "CuTe frontend failed"):
+                        lkv_py.run_frontend(case, {"builder": "b"}, Path(d), Path(d), None,
+                                            "sm_100", 1, p1)  # fmt: skip
+        self.assertEqual(seen, [("0", False), ("1", True)])
+        self.assertEqual([a[0] for a in calls], ["run", "run"])
+        self.assertEqual([("--no-p1" in a) for a in calls], [True, False])
 
     def test_geometry_failure_counts_for_its_spec(self):
         # a to_kir failure of another cluster geometry of a variant (`<spec>@cluster`:

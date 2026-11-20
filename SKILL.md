@@ -110,7 +110,7 @@ python3 -I $S/scripts/lkv.py check K.kir.json... --out DIR   # Layer 2 alone on 
 
 - The frontend is CuTe if the case has a `builder`, else TTGIR. `run` options:
   `--inputs a,b`, `--target sm_103` (TTGIR only), `--jobs N` (Lean files at a time and
-  the TTGIR frontend's P0-6 processes; default min(8, CPUs); each Lean file gets
+  the TTGIR frontend's processes, one per P0, P0-6 or P1-2 KIR; default min(8, CPUs); each Lean file gets
   `LKV_LEAN_THREADS` threads, default max(2, CPUs // N)),
   `--timeout S` (per Lean file, default 3600), `--src DIR` (default: the case's
   `src_root` / `source.src`), `--frontend ptx|legacy` (the Layer-1 translation: `ptx`

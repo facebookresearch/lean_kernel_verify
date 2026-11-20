@@ -17,7 +17,8 @@ barrier in a Triton kernel a gap,
 a control-flow shape a gap, an exception of the core an error at its instruction); work
 anchors under both rules (TTGIR gate: one event after the definition; CuTe each: -1 at
 the role's start, then the anchored load's index), and an anchored load counting only
-where its predicate holds. param_table names a struct's pointer field only by the tensor
+where its predicate holds. A switch is a compare chain (a module the caller parsed stays
+as parsed: the chain goes into a copy of the entry function). param_table names a struct's pointer field only by the tensor
 its address starts in every record that has a non-null pointer. Captures: forwarded
 (also bytewise), unknown where the store may not happen (a predicate or a branch on a
 uniform runtime condition), runs in only some of the default's threads, differs between
@@ -48,6 +49,7 @@ from .fixtures.kernels import (  # noqa: E402
     kernel,
     kir_errors,
     run,
+    SRC,
     statements,
 )
 
@@ -779,6 +781,28 @@ class Switches(unittest.TestCase):
         self.assertEqual(
             [r["name"] for r in ws_facts().roles], ["default", "partition0"]
         )
+
+    def test_parsed_module_stays_as_parsed(self):
+        # a module the caller parsed (to_kir parses each PTX once per task): the compare
+        # chain goes into a copy of the entry function, so the module keeps its brx.idx
+        # and translating it again gives the Facts of the text
+        text = kernel(SWITCH)
+        module = parse.parse(text)
+        fn = module.function("k")
+        parsed = (list(fn.body), dict(fn.regs))
+        params = [{"ptx": "k_param_0", "kind": "ptr", "name": "x", "size": 8, "fields": {}},
+                  {"ptx": "k_param_1", "kind": "scalar", "name": "n", "size": 4, "fields": {}}]  # fmt: skip
+        pol = T.policy(
+            "ttgir", src_root=SRC, params=params, tensors={"x": {"elem_bytes": 4}}
+        )
+        recs = [{"block": [128, 1, 1], "cluster": [1, 1, 1]}]
+        got = [T.translate(text, "k", recs, pol, module) for _ in range(2)]
+        self.assertEqual((list(fn.body), dict(fn.regs)), parsed)
+        want = run(SWITCH)
+        self.assertEqual(want.refusals, [])
+        for f in got:
+            self.assertEqual((f.roles, f.barriers, f.tensors, f.params, f.refusals),
+                             (want.roles, want.barriers, want.tensors, want.params, []))  # fmt: skip
 
 
 class ParamTable(unittest.TestCase):

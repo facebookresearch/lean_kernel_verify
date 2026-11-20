@@ -18,10 +18,16 @@ Translation switch: LKV_FRONTEND=ptx, the default (unset or empty), translates e
 specialization's PTX instead (build_ptx: the PTX core's Facts, frontend/ptx/translate.py,
 with this file's naming, tensors, inputs and checks; KIR `ir` "ptx"), and where its
 launches prefer other cluster dims also the all-preferred geometry, <spec>@cluster<dims>
-(preferred_geometry; launches that disagree on the preferred dims or break a CUDA rule
+(geometries; launches that disagree on the preferred dims or break a CUDA rule
 for them: `<spec>@cluster` refused, the regular KIR kept); "legacy" is the TTGIR
 translation above, which refuses such a specialization (check_preferred_cluster: it
 checks one geometry).
+
+Geometries (geometries, one rule for the P0 translation of the PTX, P0-6 and P1-2): a
+specialization's regular cluster dims, `<spec>`, and where its launches prefer other
+cluster dims the all-preferred geometry `<spec>@cluster<dims>` or the refused
+`<spec>@cluster`, decided before anything is translated; a launch whose function's
+required cluster differs from its cluster dims refuses each of them.
 
 P1 pass (LKV_FRONTEND=ptx only; LKV_P1=0 skips it): the PTX core's P1-2 events
 (frontend/ptx/bulk.py; references/kir.md change 15) give a P1 KIR <spec>.p1.json per
@@ -32,9 +38,14 @@ changes the P0 KIR or the exit status.
 
 P0-6 pass (whatever the translation): the PTX's barrier pass (build_nb,
 frontend/ptx/nbar.py; references/kir.md change 14) gives a P0-6 KIR <spec>.nb.json per
-specialization (and per all-preferred geometry), in up to --jobs forked processes,
-logged as `[to_kir] <spec>: P0-6 ...`, or `P0-6 FAILED (<kind>): <why>`; it never
-changes the P0 KIR or the exit status.
+specialization (and per all-preferred geometry), logged as `[to_kir] <spec>: P0-6 ...`,
+or `P0-6 FAILED (<kind>): <why>`; it never changes the P0 KIR or the exit status.
+
+Tasks (translate_all): the P0 translation, the P0-6 pass and the P1 pass of each
+(specialization, geometry) are independent tasks, run in up to --jobs forked processes
+(one KIR each), each child sending back only its log line's contents (the KIR's summary,
+or the failure's kind and message); the lines come in task order (P0, then P0-6, then
+P1, each in spec order), each as soon as the tasks before it ended.
 """
 
 import argparse
@@ -46,8 +57,9 @@ import multiprocessing.connection
 import os
 import re
 import sys
+import traceback
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from .. import kir as kir_contract
 from . import kir_build as K, op_table, var_names
@@ -1587,12 +1599,14 @@ def build_ptx(
     included), params, inputs and checks. `geometry`: the cluster dims every cluster
     of the launches has instead of their regular ones (preferred_geometry), with the
     inputs whose grid they divide. With `p1` the P1 KIR of P1-2 (policy p1 ["P1-2"];
-    top-level `p1`), None if the kernel has no bulk store."""
+    top-level `p1`), None if the kernel has no bulk store (seen in the parsed PTX, before
+    anything is translated) or none the P1 pass finds. The PTX is parsed once: the core
+    translates the parsed module. A launch's required cluster is refused by the caller
+    (geometries), as for every pass."""
     # Imported here: the legacy translation must not depend on the new core while both run.
     from ..ptx import anchors, parse as ptx_parse, translate as T
 
     launches: list[tuple[dict, dict]] = _launches(dump, key)
-    check_required_cluster(dump, key)
     if geometry is not None:
         launches = _geometry_launches(launches, geometry)
     spec = dump["specs"][key]
@@ -1601,9 +1615,12 @@ def build_ptx(
     records = [la["launch"] for _, la in launches]
     text = (where / spec["ptx"]).read_text()
     try:
-        fn = ptx_parse.parse(text).function(records[0]["entry"])
+        module = ptx_parse.parse(text)
+        fn = module.function(records[0]["entry"])
     except (ptx_parse.PtxSyntaxError, KeyError) as e:
         raise KirError(f"{spec['ptx']}: {type(e).__name__}: {e}", kind="error") from e
+    if p1 and not any(T._BULK_STORE.match(i.opcode) for i in fn.instructions()):
+        return None  # nothing for P1-2 to check, whatever the translation would give
     work = case.get("work", {})
     try:
         sites, _notes = anchors.resolve(
@@ -1617,7 +1634,7 @@ def build_ptx(
                             for n, a in snap0.items() if a["kind"] == "tensor"}, blocks=_desc_blocks(launches),
                    work={"fields": list(work), "mode": "gate", "per": per, "sites": sites},
                    **({"p1": ["P1-2"]} if p1 else {}), **_gsync_policy(case))  # fmt: skip
-    facts = T.translate(text, fn.name, records, pol)
+    facts = T.translate(text, fn.name, records, pol, module)
     if facts.refusals:
         raise KirError(facts.refusals[0]["msg"], kind=facts.refusals[0]["kind"])
     if p1 and not facts.p1:
@@ -1776,17 +1793,18 @@ def build_nb(
     where: Path, dump: dict, key: str, case: dict, geometry: tuple | None = None
 ) -> dict:
     """The P0-6 KIR of a specialization (frontend/ptx/nbar.py) from its PTX, whatever
-    the translation; KirError if the barrier pass refuses it, or a launch's required
-    cluster refuses the P0 KIR (check_required_cluster). Its integer loads of 1-D
+    the translation; KirError if the barrier pass refuses it (a launch's required cluster
+    is refused by the caller, geometries, as for the P0 KIR). Its integer loads of 1-D
     tensors with recorded contents that the kernel never writes are exact metadata loads
-    (as in the P0 translation; _input checks each metadata tensor's contents), except for
-    a tensor _input rejects: the pass then runs again without it. `geometry`: the
-    all-preferred cluster geometry, as build_ptx's (the cluster dims, and with them the
-    CTA's rank and the cluster special registers that may decide which warps reach a
-    barrier)."""
+    (as in the P0 translation), except for a tensor some launch cannot hold as metadata
+    (_metadata_problem: the checks _input makes of each metadata tensor's contents, with
+    the pass's write set, nbar.writes, which does not depend on them; none where the case
+    gives the input's contents, metadata_contents, as in _input): such tensors are left
+    out before the pass, which runs once. `geometry`: the all-preferred cluster
+    geometry, as build_ptx's (the cluster dims, and with them the CTA's rank and the
+    cluster special registers that may decide which warps reach a barrier)."""
     from ..ptx import nbar, parse as ptx_parse, translate as T
 
-    check_required_cluster(dump, key)
     launches = _launches(dump, key)
     if geometry is not None:
         launches = _geometry_launches(launches, geometry)
@@ -1799,39 +1817,30 @@ def build_nb(
         fn = module.function(records[0]["entry"])
     except (ptx_parse.PtxSyntaxError, KeyError) as e:
         raise KirError(f"{spec['ptx']}: {type(e).__name__}: {e}", kind="error") from e
-    meta = {n for n, a in snap0.items()
-            if a["kind"] == "tensor" and "values" in a and len(a["shape"]) == 1}  # fmt: skip
-    while True:
-        pol = T.policy("ttgir", src_root=dump["src_root"], params=T.param_table(records, "ttgir", fn),
-                       tensors={n: {"elem_bytes": a["elem_bytes"]} for n, a in snap0.items()
-                                if a["kind"] == "tensor"})  # fmt: skip
-        pol["nb_meta"] = frozenset(meta)
-        facts = nbar.translate(text, fn.name, records, pol, module)
-        if facts.refusals:
-            raise KirError(facts.refusals[0]["msg"], kind=facts.refusals[0]["kind"])
-        tensors = [{"name": n, "kind": "global", "elem_bytes": eb,
-                    "shape": [K.var(f"{n}.shape.0", 64)], "strides": [K.var(f"{n}.stride.0", 64)],
-                    "role": "input", "segments": None, "metadata": True}
-                   for n, eb in facts.meta.items()]  # fmt: skip
-        tparams = {f"{n}.{f}.0": 64 for n in facts.meta for f in ("shape", "stride")}
-        params = [
-            {"name": n, "type": f"i{w}"} for n, w in {**facts.params, **tparams}.items()
-        ]
-        written = set(facts.written or ())
-        try:
-            inputs = []
-            for inp, launch in launches:
-                name = _input_name(inp, launch, key)
-                inputs.append(
-                    _input(name, inp, launch, params, tensors, spec, case, written, {})
-                )
-        except KirError as e:
-            bad = {n for n in facts.meta if f"metadata tensor {n} " in str(e)}
-            if not bad:
-                raise
-            meta -= bad
-            continue
-        break
+    pol = T.policy("ttgir", src_root=dump["src_root"], params=T.param_table(records, "ttgir", fn),
+                   tensors={n: {"elem_bytes": a["elem_bytes"]} for n, a in snap0.items()
+                            if a["kind"] == "tensor"})  # fmt: skip
+    pol["nb_written"] = nbar.writes(text, fn.name, pol["params"], module)
+    written = set(pol["nb_written"] or ())
+    pol["nb_meta"] = frozenset(
+        n for n, a in snap0.items()
+        if a["kind"] == "tensor" and "values" in a and len(a["shape"]) == 1
+        and not any(_metadata_problem(n, la, written) for inp, la in launches
+                    if _given(case, inp, n) is None))  # fmt: skip
+    facts = nbar.translate(text, fn.name, records, pol, module)
+    if facts.refusals:
+        raise KirError(facts.refusals[0]["msg"], kind=facts.refusals[0]["kind"])
+    tensors = [{"name": n, "kind": "global", "elem_bytes": eb,
+                "shape": [K.var(f"{n}.shape.0", 64)], "strides": [K.var(f"{n}.stride.0", 64)],
+                "role": "input", "segments": None, "metadata": True}
+               for n, eb in facts.meta.items()]  # fmt: skip
+    tparams = {f"{n}.{f}.0": 64 for n in facts.meta for f in ("shape", "stride")}
+    params = [
+        {"name": n, "type": f"i{w}"} for n, w in {**facts.params, **tparams}.items()
+    ]
+    inputs = [_input(_input_name(inp, launch, key), inp, launch, params, tensors, spec,
+                     case, written, {})
+              for inp, launch in launches]  # fmt: skip
     compiler = {
         "name": dump["compiler"]["name"],
         "version": dump["compiler"]["version"],
@@ -1841,49 +1850,134 @@ def build_nb(
                          compiler, tensors, tparams)  # fmt: skip
 
 
-def _nb_spec(where: Path, dump: dict, task: tuple, case: dict) -> dict | KirError:
-    """translate_nb's work for one P0-6 KIR, task (name, specialization, geometry):
-    the KIR, written to <name>.nb.json, or the KirError that stopped it."""
-    name, key, geometry = task
+# The passes of to_kir (translate_all), in the order of their log lines: the P0
+# translation, the P0-6 barrier pass (whatever the translation) and the P1 pass (P1-2,
+# LKV_FRONTEND=ptx only); per pass the suffix of its KIR files and its name in a message.
+PASSES = ("p0", "nb", "p1")
+KIR_SUFFIX = {"p0": ".kir.json", "nb": ".nb.json", "p1": ".p1.json"}
+PASS_NAME = {"p0": "P0 translation", "nb": "P0-6 pass", "p1": "P1 pass"}
+
+
+class Done(NamedTuple):
+    """What a task (translate_all) sends back, all its log line needs (_line): `kind`
+    "kir" with the KIR's summary in `text` (and for a P1 KIR the P1 specs it decides,
+    `p1`), "none" for a P1 pass on a kernel without a bulk store, or the failure kind
+    "gap" or "error" (failure_kind) with its message in `text` and the exception's class
+    in `exc` (_loaded gives it back)."""
+
+    kind: str
+    text: str = ""
+    p1: tuple = ()
+    exc: str = ""
+
+
+def geometries(dump: dict, key: str) -> list:
+    """The variants of a specialization, (name, geometry, refusal), that the PTX passes
+    check, the same in each (the P0 translation of the PTX, P0-6, P1-2): its regular
+    cluster dims (`key`, geometry None) and, where its launches prefer other cluster dims,
+    the all-preferred geometry `<key>@cluster<dims>` (preferred_geometry: a CTA of such a
+    launch runs as in one of the two geometries), or `<key>@cluster` refused with
+    preferred_geometry's KirError where the launches disagree on the preferred dims or
+    break a CUDA rule for them (the preferred geometry is never silently unchecked).
+    Decided before anything is translated, whether or not a geometry translates. A launch
+    whose function's required cluster differs from its cluster dims refuses each
+    geometry with check_required_cluster's KirError (gap): the geometry checked may not be
+    the one that runs (a refused `<key>@cluster` keeps its own reason)."""
     try:
-        kir = build_nb(where, dump, key, case, geometry)
-        violations = kir_contract.validate(kir)
-        if violations:
-            raise KirError(f"P0-6 KIR contract (frontend/kir.py): "
-                           f"{'; '.join(violations[:5])}", kind="error")  # fmt: skip
+        check_required_cluster(dump, key)
+        required = None
     except KirError as e:
-        return e
-    except Exception as e:  # noqa: BLE001 - the P0-6 pass must never stop the P0 KIRs
-        return KirError(f"P0-6 pass: {type(e).__name__}: {e}", kind="error")
-    (where / f"{name}.nb.json").write_text(json.dumps(kir))
+        required = e
+    try:
+        pref = preferred_geometry(dump, key)
+    except KirError as e:
+        return [(key, None, required), (key + "@cluster", None, e)]
+    out: list[tuple[str, tuple | None, KirError | None]] = [(key, None, required)]
+    if pref is not None:
+        out.append((key + geometry_suffix(pref), pref, required))
+    return out
+
+
+def _variants(dump: dict, key: str, pas: str) -> list:
+    """The variants (geometries) of a specialization that pass `pas` checks: every
+    geometry, except in the legacy P0 translation, which checks one (build refuses a
+    launch's required cluster and a preferred cluster itself)."""
+    if pas == "p0" and frontend() == "legacy":
+        return [(key, None, None)]
+    return geometries(dump, key)
+
+
+def _kir(
+    where: Path, dump: dict, case: dict, pas: str, key: str, geometry
+) -> dict | None:
+    """Pass `pas` of one variant: its KIR, checked against the KIR contract, or None (the
+    P1 pass on a kernel without a bulk store)."""
+    if pas == "nb":
+        kir, what = build_nb(where, dump, key, case, geometry), "P0-6 KIR contract"
+    elif pas == "p1":
+        kir, what = (
+            build_ptx(where, dump, key, case, geometry, p1=True),
+            "P1 KIR contract",
+        )
+    elif frontend() == "ptx":
+        kir, what = build_ptx(where, dump, key, case, geometry), "KIR contract"
+    else:
+        ttgir = (where / dump["specs"][key]["ttgir"]).read_text()
+        kir, what = build(ttgir, dump, key, case), "KIR contract"
+    violations = [] if kir is None else kir_contract.validate(kir)
+    if violations:
+        raise KirError(f"{what} (frontend/kir.py): {'; '.join(violations[:5])}",
+                       kind="error")  # fmt: skip
     return kir
 
 
-def _nb_child(where: Path, dump: dict, task: tuple, case: dict, conn) -> None:
-    """A forked child's _nb_spec, sent back as (KIR,) or (message, kind) (a KirError by
-    value: its `kind` does not survive pickling)."""
-    r = _nb_spec(where, dump, task, case)
-    conn.send((str(r), r.kind) if isinstance(r, KirError) else (r,))
+def _task(where: Path, dump: dict, case: dict, task: tuple) -> Done:
+    """One task, (pass, name, specialization, geometry): its KIR written to
+    <name>.kir.json / .nb.json / .p1.json next to dump.json, or why it has none. A
+    construct a pass refuses or a failure it reports is the task's; any other exception
+    too (with its traceback on stderr): one variant never stops the others (the P0-6 and
+    P1 passes never stop the P0 KIRs)."""
+    pas, name, key, geometry = task
+    try:
+        kir = _kir(where, dump, case, pas, key, geometry)
+    except (KirError, SliceError, OpError, ParseError) as e:
+        return Done(failure_kind(e), str(e), exc=type(e).__name__)
+    except Exception as e:  # noqa: BLE001 - see the docstring
+        traceback.print_exc()
+        why = PASS_NAME[pas] + ("" if pas == "nb" else " internal error")
+        return Done("error", f"{why}: {type(e).__name__}: {e}")
+    if kir is None:
+        return Done("none")
+    (where / f"{name}{KIR_SUFFIX[pas]}").write_text(json.dumps(kir))
+    return Done("kir", summary(kir), tuple(kir["p1"]) if pas == "p1" else ())
+
+
+def _child(where: Path, dump: dict, case: dict, task: tuple, conn) -> None:
+    """A forked child's task, its Done sent to the parent: never the KIR, nor an
+    exception (a KirError's `kind` does not survive pickling)."""
+    conn.send(_task(where, dump, case, task))
     conn.close()
 
 
-def _nb_forked(where: Path, dump: dict, tasks: list, case: dict, jobs: int) -> dict:
-    """_nb_spec of every task, each in a child process forked for it, up to `jobs` at a
-    time (the parent starts no thread, so it forks single-threaded); a child that dies
-    gives its task a KirError."""
+def _forked(where: Path, dump: dict, case: dict, tasks: list, jobs: int, done) -> None:
+    """Every task, each in a child process forked for it, up to `jobs` at a time (the
+    parent starts no thread, so it forks single-threaded; one KIR per child, so the
+    expression tables it builds are freed with it); done(k, Done) as the k-th ends. A
+    child that dies gives its task an error."""
     ctx = multiprocessing.get_context("fork")
-    todo, running, got = list(tasks), {}, {}
+    todo, running = list(enumerate(tasks)), {}
     while todo or running:
         while todo and len(running) < jobs:
-            task = todo.pop(0)
+            k, task = todo.pop(0)
             recv, send = ctx.Pipe(duplex=False)
-            child = ctx.Process(target=_nb_child, args=(where, dump, task, case, send))
+            sys.stderr.flush()  # nothing buffered to be written again by a child
+            child = ctx.Process(target=_child, args=(where, dump, case, task, send))
             child.start()
             send.close()
-            running[recv] = (task, child)
+            running[recv] = (k, task, child)
         for conn in multiprocessing.connection.wait(list(running)):
             assert isinstance(conn, multiprocessing.connection.Connection)
-            task, child = running.pop(conn)
+            k, task, child = running.pop(conn)
             try:
                 r = conn.recv()
             except EOFError:
@@ -1891,48 +1985,91 @@ def _nb_forked(where: Path, dump: dict, tasks: list, case: dict, jobs: int) -> d
             conn.close()
             child.join()
             if r is None:
-                r = (
-                    f"P0-6 pass: its process died (exit status {child.exitcode})",
-                    "error",
-                )
-            got[task[0]] = r[0] if len(r) == 1 else KirError(r[0], kind=r[1])
+                r = Done("error", f"{PASS_NAME[task[0]]}: its process died "
+                                  f"(exit status {child.exitcode})")  # fmt: skip
+            done(k, r)
+
+
+def _plan(dump: dict, passes: tuple) -> tuple[list, list]:
+    """translate_all's results in task order, (pass, name, a refusal's Done or the index
+    of its task), and its tasks, (pass, name, specialization, geometry)."""
+    order, tasks = [], []
+    for pas in passes:
+        for key in dump["specs"]:
+            for name, geometry, refusal in _variants(dump, key, pas):
+                if refusal is not None:
+                    order.append((pas, name, Done(failure_kind(refusal), str(refusal))))
+                else:
+                    order.append((pas, name, len(tasks)))
+                    tasks.append((pas, name, key, geometry))
+    return order, tasks
+
+
+def translate_all(dump_path: Path, case: dict, passes: tuple = PASSES, jobs: int = 1,
+                  emit=None) -> dict:  # fmt: skip
+    """Passes `passes` of every specialization of a dump and of its other geometries
+    (_variants): {(pass, name): Done}, in task order: pass by pass, in spec order. Each
+    KIR is written next to dump.json (<name>.kir.json, .nb.json, .p1.json). The tasks are
+    independent: with jobs > 1 they run in up to `jobs` forked processes (_forked), else
+    here one after another; the results and files are the same. emit(pass, name, Done)
+    for each result in task order, as soon as the tasks before it ended."""
+    dump = json.loads(dump_path.read_text())
+    where = dump_path.parent
+    order, tasks = _plan(dump, passes)
+    finished: dict[int, Done] = {}
+    got: dict[tuple, Done] = {}
+
+    def flush() -> None:  # the results in task order, as far as they go
+        while len(got) < len(order):
+            pas, name, x = order[len(got)]
+            if isinstance(x, int) and x not in finished:
+                return
+            got[(pas, name)] = finished.pop(x) if isinstance(x, int) else x
+            if emit is not None:
+                emit(pas, name, got[(pas, name)])
+
+    def done(k: int, r: Done) -> None:
+        finished[k] = r
+        flush()
+
+    flush()  # the refusals before the first task
+    jobs = max(1, min(jobs, len(tasks), os.cpu_count() or 1))
+    if jobs == 1:
+        for k, task in enumerate(tasks):
+            done(k, _task(where, dump, case, task))
+        return got
+    try:  # imported once, before the children fork (each would import it again)
+        from ..ptx import anchors, nbar  # noqa: F401
+    except Exception:  # noqa: BLE001 - then each task's own import fails, as without
+        pass
+    _forked(where, dump, case, tasks, jobs, done)
     return got
 
 
-def _nb_tasks(dump: dict) -> tuple[list, dict]:
-    """The P0-6 KIRs of a dump, (name, specialization, geometry): each specialization's
-    (regular cluster dims) and, where its launches prefer other cluster dims, its
-    all-preferred geometry's `<spec>@cluster<dims>` (as translate: a CTA of a launch with
-    a preferred cluster runs as in one of the two geometries, and P0-6 is decided per
-    CTA); with the KirError of each specialization whose launches disagree on them or
-    break a CUDA rule for them (preferred_geometry)."""
-    tasks, errors = [], {}
-    for key in dump["specs"]:
-        tasks.append((key, key, None))
-        try:
-            pref = preferred_geometry(dump, key)
-        except KirError as e:
-            errors[key + "@cluster"] = e
-            continue
-        if pref is not None:
-            tasks.append((key + geometry_suffix(pref), key, pref))
-    return tasks, errors
+def _loaded(dump_path: Path, got: dict) -> dict:
+    """translate_all's results of one pass by name: the KIR (read back from its file),
+    None (no bulk store) or the exception that stopped it, of its class (a KirError with
+    its kind, a SliceError, OpError or ParseError)."""
+    errors = {"SliceError": SliceError, "OpError": OpError, "ParseError": ParseError}
+    out: dict[str, dict | Exception | None] = {}
+    for (pas, name), r in got.items():
+        if r.kind == "kir":
+            path = dump_path.parent / f"{name}{KIR_SUFFIX[pas]}"
+            out[name] = json.loads(path.read_text())
+        elif r.kind == "none":
+            out[name] = None
+        else:
+            cls = errors.get(r.exc)
+            out[name] = cls(r.text) if cls else KirError(r.text, kind=r.kind)
+    return out
 
 
 def translate_nb(dump_path: Path, case: dict, jobs: int = 1) -> dict:
     """The P0-6 KIR (or the error that stopped it) of every specialization of a dump, and
-    of its all-preferred cluster geometry (_nb_tasks): writes <name>.nb.json next to
-    dump.json for each one the barrier pass translates. They are independent: with
-    jobs > 1 they run in up to `jobs` forked processes (one KIR each, so the expression
-    tables one builds are freed with it); the results, in spec order, are the same."""
-    dump = json.loads(dump_path.read_text())
-    tasks, errors = _nb_tasks(dump)
-    jobs = max(1, min(jobs, len(tasks), os.cpu_count() or 1))
-    if jobs == 1:
-        got = {t[0]: _nb_spec(dump_path.parent, dump, t, case) for t in tasks}
-    else:
-        got = _nb_forked(dump_path.parent, dump, tasks, case, jobs)
-    return {**{t[0]: got[t[0]] for t in tasks}, **errors}
+    of its all-preferred cluster geometry (geometries): writes <name>.nb.json next to
+    dump.json for each one the barrier pass translates (translate_all's P0-6 pass, in up
+    to `jobs` forked processes)."""
+    return _loaded(dump_path, translate_all(dump_path, case, ("nb",), jobs))
 
 
 def _gsync_policy(case: dict) -> dict:
@@ -2199,36 +2336,9 @@ def _input(
             metadata[t["name"]] = given
             continue
         if t["metadata"]:
-            if "values" not in rec:
-                raise KirError(
-                    f"input {name}: metadata tensor {t['name']} contents were not recorded"
-                )
-            if rec["storage_offset"] != 0:
-                raise KirError(f"input {name}: metadata tensor {t['name']} is a view")
-            if rec["shape"][0] > 1 and rec["strides"] != [1]:
-                raise KirError(
-                    f"input {name}: metadata tensor {t['name']} has strides {rec['strides']}: its "
-                    "contents are recorded in index order, but `load` indices are element offsets"
-                )
-            stale = launch["stale"].get(t["name"])
-            if stale:
-                w = stale[0]
-                raise KirError(
-                    f"input {name}: metadata tensor {t['name']} may hold data that launch {w['launch']} "
-                    f"of {w['kernel']} (argument {w['param']}) writes before this launch (directly or "
-                    "through host computation); the CPU run skipped it, so the recorded contents are "
-                    "not what the kernel would read"
-                )
-            lo, hi = rec["storage"]
-            for w in sorted(written):
-                wlo, whi = (snap[w]["base"] if snap[w]["kind"] == "desc" else snap[w])[
-                    "storage"
-                ]
-                if lo < whi and wlo < hi:
-                    raise KirError(
-                        f"input {name}: metadata tensor {t['name']} shares storage with {w}, "
-                        "which the analyzed kernel writes"
-                    )
+            problem = _metadata_problem(t["name"], launch, written)
+            if problem is not None:
+                raise KirError(f"input {name}: {problem}")
             metadata[t["name"]] = rec["values"]
     intended = _intended(case, inp, tensors)
     return {
@@ -2249,9 +2359,7 @@ def _given_contents(case: dict, inp: dict, tensor: str, shape: list):
     case's), zero-padded to its elements, or None: the contents an earlier launch of the run
     writes (the dump's CPU run skips it, so the recorded ones are stale), as that launch
     computes them (trusted)."""
-    per = next((i for i in case["inputs"] if i["name"] == inp["name"]), {})
-    got = next((g for src in (per, case)
-                if (g := (src.get("metadata_contents") or {}).get(tensor)) is not None), None)  # fmt: skip
+    got = _given(case, inp, tensor)
     if got is None:
         return None
     numel = 1
@@ -2263,6 +2371,14 @@ def _given_contents(case: dict, inp: dict, tensor: str, shape: list):
     return [int(v) for v in got] + [0] * (numel - len(got))
 
 
+def _given(case: dict, inp: dict, tensor: str) -> list | None:
+    """The case's `metadata_contents` of `tensor` for an input (its own, else the case's), as
+    the case gives them, or None (_given_contents checks and pads them)."""
+    per = next((i for i in case["inputs"] if i["name"] == inp["name"]), {})
+    return next((g for src in (per, case)
+                 if (g := (src.get("metadata_contents") or {}).get(tensor)) is not None), None)  # fmt: skip
+
+
 def _intended(case: dict, inp: dict, tensors: list) -> dict:
     """The input's intended writes (its own, else the case's). An `unchecked` entry asks for no
     check: one of a tensor that is no output of this KIR (a specialization or cluster geometry
@@ -2271,6 +2387,41 @@ def _intended(case: dict, inp: dict, tensors: list) -> dict:
     intended = per.get("intended_writes", case.get("intended_writes", {})) or {}
     outputs = {t["name"] for t in tensors if t.get("role") == "output"}
     return {t: v for t, v in intended.items() if v != "unchecked" or t in outputs}
+
+
+def _metadata_problem(name: str, launch: dict, written: set) -> str | None:
+    """Why tensor `name` of a launch cannot be a metadata tensor of it, whose contents in
+    the KIR are the recorded ones (`metadata tensor <name> ...`; _input's KirError puts the
+    input first), or None. The checks need nothing but the launch and the kernel's write
+    set `written`, so a pass can make them before it translates (build_nb)."""
+    snap = launch["args"]
+    rec = snap[name]
+    if "values" not in rec:
+        return f"metadata tensor {name} contents were not recorded"
+    if rec["storage_offset"] != 0:
+        return f"metadata tensor {name} is a view"
+    if rec["shape"][0] > 1 and rec["strides"] != [1]:
+        return (
+            f"metadata tensor {name} has strides {rec['strides']}: its "
+            "contents are recorded in index order, but `load` indices are element offsets"
+        )
+    stale = launch["stale"].get(name)
+    if stale:
+        w = stale[0]
+        return (
+            f"metadata tensor {name} may hold data that launch {w['launch']} "
+            f"of {w['kernel']} (argument {w['param']}) writes before this launch (directly or "
+            "through host computation); the CPU run skipped it, so the recorded contents are "
+            "not what the kernel would read"
+        )
+    lo, hi = rec["storage"]
+    for w in sorted(written):
+        wlo, whi = (snap[w]["base"] if snap[w]["kind"] == "desc" else snap[w])[
+            "storage"
+        ]
+        if lo < whi and wlo < hi:
+            return f"metadata tensor {name} shares storage with {w}, which the analyzed kernel writes"
+    return None
 
 
 def _host_value(e: dict, values: dict, input_name: str) -> int:
@@ -2512,87 +2663,42 @@ def frontend() -> str:
 
 
 def translate(dump_path: Path, case: dict) -> dict:
-    """KIR (or the error that stopped extraction) for every specialization of a dump.
+    """KIR (or the error that stopped extraction) for every specialization of a dump,
+    and in the PTX translation for its other geometries (geometries: `<spec>@cluster<dims>`,
+    or the refused `<spec>@cluster`; the regular KIR is kept either way).
 
-    Writes <spec>.kir.json next to dump.json for each specialization that translates.
+    Writes <name>.kir.json next to dump.json for each one that translates (translate_all's
+    P0 pass).
     """
-    dump = json.loads(dump_path.read_text())
-    ptx = frontend() == "ptx"
-    results: dict[str, dict | Exception] = {}
-    for key, spec in dump["specs"].items():
-        # PTX: also the all-preferred cluster geometry, `<key>@cluster<dims>.kir.json`;
-        # where preferred_geometry fails (launches that disagree on the preferred dims or
-        # break a CUDA rule for them), `<key>@cluster` is refused and the regular KIR is kept
-        todo: list[tuple[str, tuple | None]] = [(key, None)]
-        unchecked: KirError | None = None
-        for name, geometry in todo:
-            try:
-                if ptx:
-                    kir = build_ptx(dump_path.parent, dump, key, case, geometry)
-                    assert kir is not None  # None only for the P1 pass (p1=True)
-                    if geometry is None:
-                        try:
-                            pref = preferred_geometry(dump, key)
-                        except KirError as e:
-                            pref, unchecked = None, e
-                        if pref is not None:
-                            todo.append((key + geometry_suffix(pref), pref))
-                else:
-                    ttgir = (dump_path.parent / spec["ttgir"]).read_text()
-                    kir = build(ttgir, dump, key, case)
-                violations = kir_contract.validate(kir)
-                if violations:
-                    raise KirError(
-                        f"KIR contract (frontend/kir.py): {'; '.join(violations[:5])}",
-                        kind="error",
-                    )
-            except (KirError, SliceError, OpError, ParseError) as e:
-                results[name] = e
-                continue
-            (dump_path.parent / f"{name}.kir.json").write_text(json.dumps(kir))
-            results[name] = kir
-        if unchecked is not None:
-            results[key + "@cluster"] = unchecked
-    return results
+    return _loaded(dump_path, translate_all(dump_path, case, ("p0",)))
 
 
 def translate_p1(dump_path: Path, case: dict) -> dict:
     """The P1 pass (module doc): {name: P1 KIR, None (no bulk store) or the exception that
     refused it} per specialization and, with a preferred cluster geometry, also for the
-    all-preferred geometry (`<spec>@cluster<dims>`, as translate; `<spec>@cluster` with
-    preferred_geometry's KirError where it fails, e.g. launches that disagree on the
-    preferred dims, as translate records it); writes <name>.p1.json for each P1 KIR."""
-    dump = json.loads(dump_path.read_text())
-    results: dict[str, dict | Exception | None] = {}
-    for key in dump["specs"]:
-        try:
-            pref, unchecked = preferred_geometry(dump, key), None
-        except KirError as e:  # the preferred geometry is never silently unchecked
-            pref, unchecked = None, e
-        todo = [(key, None)] + (
-            [] if pref is None else [(key + geometry_suffix(pref), pref)]
-        )
-        for name, geometry in todo:
-            try:
-                kir = build_ptx(dump_path.parent, dump, key, case, geometry, p1=True)
-                violations = [] if kir is None else kir_contract.validate(kir)
-                if violations:
-                    raise KirError(f"P1 KIR contract (frontend/kir.py): {'; '.join(violations[:5])}",
-                                   kind="error")  # fmt: skip
-            except (KirError, SliceError, OpError, ParseError) as e:
-                results[name] = e
-                continue
-            except Exception as e:  # noqa: BLE001 - the P1 pass never stops the P0 KIR
-                results[name] = KirError(
-                    f"P1 pass internal error: {type(e).__name__}: {e}", kind="error"
-                )
-                continue
-            if kir is not None:
-                (dump_path.parent / f"{name}.p1.json").write_text(json.dumps(kir))
-            results[name] = kir
-        if unchecked is not None:
-            results[key + "@cluster"] = unchecked
-    return results
+    all-preferred geometry (`<spec>@cluster<dims>`, or `<spec>@cluster` refused: the
+    variants of translate, geometries); writes <name>.p1.json for each P1 KIR
+    (translate_all's P1 pass)."""
+    return _loaded(dump_path, translate_all(dump_path, case, ("p1",)))
+
+
+def _line(pas: str, name: str, r: Done) -> str:
+    """The log line of a task's result (lkv.py reads the KIR files and these lines)."""
+    if pas == "p0":
+        if r.kind == "kir":
+            return f"[to_kir] {name}: {name}.kir.json ({r.text})"
+        return f"[to_kir] {name}: FAILED ({r.kind}): {r.text}"
+    if pas == "nb":
+        if r.kind == "kir":
+            return f"[to_kir] {name}: P0-6 {name}.nb.json ({r.text})"
+        return f"[to_kir] {name}: P0-6 FAILED ({r.kind}): {r.text}"
+    if r.kind == "kir":
+        return f"[to_kir] {name}: P1 ({', '.join(r.p1)}): {name}.p1.json ({r.text})"
+    if r.kind == "none":
+        return f"[to_kir] {name}: P1 not_applicable: the kernel has no bulk async store"
+    return (
+        f"[to_kir] {name}: P1 {'error' if r.kind == 'error' else 'refused'}: {r.text}"
+    )
 
 
 def events_of(stmts: list):
@@ -2621,38 +2727,20 @@ def main() -> None:
     ap.add_argument("--dump", required=True, type=Path)
     ap.add_argument("--case", required=True, type=Path)
     ap.add_argument("--jobs", type=int, default=1,
-                    help="processes for the P0-6 barrier pass (one P0-6 KIR each)")  # fmt: skip
+                    help="processes for the translations (one KIR each: the P0, P0-6 and "
+                         "P1 KIRs of every specialization and geometry)")  # fmt: skip
     args = ap.parse_args()
-    if frontend() == "ptx":  # shows in lkv.py's logs/to_kir.log that the switch arrived
+    ptx = frontend() == "ptx"
+    if ptx:  # shows in lkv.py's logs/to_kir.log that the switch arrived
         print("[to_kir] LKV_FRONTEND=ptx: translating the PTX", file=sys.stderr)
     case = json.loads(args.case.read_text())
-    results = translate(args.dump, case)
-    for key, r in results.items():
-        if isinstance(r, Exception):
-            print(f"[to_kir] {key}: FAILED ({failure_kind(r)}): {r}", file=sys.stderr)
-        else:
-            print(f"[to_kir] {key}: {key}.kir.json ({summary(r)})", file=sys.stderr)
-    for key, r in translate_nb(
-        args.dump, case, args.jobs
-    ).items():  # P0-6, whatever the translation
-        if isinstance(r, Exception):
-            print(
-                f"[to_kir] {key}: P0-6 FAILED ({failure_kind(r)}): {r}", file=sys.stderr
-            )
-        else:
-            print(f"[to_kir] {key}: P0-6 {key}.nb.json ({summary(r)})", file=sys.stderr)
-    if frontend() == "ptx" and os.environ.get("LKV_P1") != "0":
-        for key, r in translate_p1(args.dump, case).items():
-            if r is None:
-                print(f"[to_kir] {key}: P1 not_applicable: the kernel has no bulk async store",
-                      file=sys.stderr)  # fmt: skip
-            elif isinstance(r, Exception):
-                st = "error" if failure_kind(r) == "error" else "refused"
-                print(f"[to_kir] {key}: P1 {st}: {r}", file=sys.stderr)
-            else:
-                print(f"[to_kir] {key}: P1 ({', '.join(r['p1'])}): {key}.p1.json ({summary(r)})",
-                      file=sys.stderr)  # fmt: skip
-    sys.exit(1 if any(isinstance(r, Exception) for r in results.values()) else 0)
+    # P0-6 whatever the translation; P1 in the PTX translation unless LKV_P1=0
+    passes = PASSES if ptx and os.environ.get("LKV_P1") != "0" else ("p0", "nb")
+    got = translate_all(args.dump, case, passes, args.jobs,
+                        lambda pas, name, r: print(_line(pas, name, r), file=sys.stderr))  # fmt: skip
+    sys.exit(
+        1 if any(p == "p0" and r.kind != "kir" for (p, _), r in got.items()) else 0
+    )
 
 
 if __name__ == "__main__":

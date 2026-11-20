@@ -907,7 +907,7 @@ def translate_ptx(
     if locs is None:
         raise Unsupported("dump", "dsl", f"CuTe DSL {dump['dsl']['version']}: the PTX frontend knows the "
                                          f"locations of {sorted(PTX_LOCS)}", kind="error")  # fmt: skip
-    v, text, fn, records, table = _ptx_variant(case, dump, recs, launches, las)
+    v, text, fn, records, table, module = _ptx_variant(case, dump, recs, launches, las)
     work = v.notes.get("work", {})
     try:
         sites, _notes = anchors.resolve(
@@ -921,7 +921,7 @@ def translate_ptx(
                    tensors={n: {"elem_bytes": t["elem_bytes"], **t["first"]} for n, t in v.k.tensors.items()},
                    max_iters=int(case.get("max_iters", 4096)), p1=p1,
                    work={"fields": list(work), "mode": "each", "per": per, "sites": sites})  # fmt: skip
-    facts = T.translate(text, fn.name, records, pol)
+    facts = T.translate(text, fn.name, records, pol, module)
     if facts.refusals:
         where = Path(recs[0]["ptx"]["file"]).name
         refusal = facts.refusals[0]
@@ -949,10 +949,12 @@ def ptx_writer(case: dict, dump: dict, recs: list, launches: list, las: list):
     them (then every argument of its launches may be written, as for the legacy
     translation's refusals)."""
     try:
-        v, text, fn, records, table = _ptx_variant(case, dump, recs, launches, las)
+        v, text, fn, records, table, module = _ptx_variant(
+            case, dump, recs, launches, las
+        )
     except Unsupported:
         return None
-    written = _ptx("translate").writes(text, fn.name, table)
+    written = _ptx("translate").writes(text, fn.name, table, module=module)
     if written is None:
         return None
     for name in written:
@@ -980,7 +982,8 @@ def translate_nb(case: dict, dump: dict, recs: list, launches: list, las: list,
     cluster, preferred_cluster_gap). Integer loads of 1-D contiguous tensors whose
     contents every launch recorded, that the kernel never writes and that share no storage
     with a tensor it writes, are exact metadata loads (flat buffers, as in the P0
-    translation)."""
+    translation): the pass's write set (nbar.writes) is known before the pass, so it runs
+    once, on the PTX parsed once."""
     gap = preferred_cluster_gap(las)
     if gap is not None:  # one geometry would be checked, as for the P0 KIR
         return {"status": "refused", "error": gap}
@@ -990,31 +993,29 @@ def translate_nb(case: dict, dump: dict, recs: list, launches: list, las: list,
         return {"status": "error", "error": f"CuTe DSL {dump['dsl']['version']}: the PTX "
                                             f"frontend knows the locations of {sorted(PTX_LOCS)}"}  # fmt: skip
     try:
-        v, text, fn, records, table = _ptx_variant(case, dump, recs, launches, las)
+        v, text, fn, records, table, module = _ptx_variant(
+            case, dump, recs, launches, las
+        )
         args = [{n: a for (n, kind, _i), a in zip(v.host_args, _flatten(la_args)) if kind == "tensor"}
                 for _n, la_args in launches]  # fmt: skip
-        meta = {n for n in args[0] if all(
+        pol = T.policy("cute", src_root=dump["source"]["src"], params=table, **locs,
+                       tensors={n: {"elem_bytes": t["elem_bytes"], **t["first"]}
+                                for n, t in v.k.tensors.items()},
+                       max_iters=int(case.get("max_iters", 4096)))  # fmt: skip
+        pol["nb_written"] = nbar.writes(text, fn.name, table, module)
+        written = set(pol["nb_written"] or ())
+        pol["nb_meta"] = frozenset(n for n in args[0] if all(
             n in a and "data" in a[n] and len(a[n]["shape"]) == 1
-            and (a[n]["shape"][0] <= 1 or list(a[n]["stride"]) == [1]) for a in args)}  # fmt: skip
-        while True:
-            pol = T.policy("cute", src_root=dump["source"]["src"], params=table, **locs,
-                           tensors={n: {"elem_bytes": t["elem_bytes"], **t["first"]}
-                                    for n, t in v.k.tensors.items()},
-                           max_iters=int(case.get("max_iters", 4096)))  # fmt: skip
-            pol["nb_meta"] = frozenset(meta)
-            facts = nbar.translate(text, fn.name, records, pol)
-            if facts.refusals:
-                r = facts.refusals[0]
-                return {
-                    "status": "error" if r["kind"] == "error" else "refused",
-                    "error": r["msg"],
-                }
-            written = set(facts.written or ())
-            shared = {m for m in facts.meta for a in args for w in written & set(a)
-                      if _overlap(_byte_span(a[m]), _byte_span(a[w]))}  # fmt: skip
-            if not shared:
-                break
-            meta -= shared
+            and (a[n]["shape"][0] <= 1 or list(a[n]["stride"]) == [1])
+            and not any(_overlap(_byte_span(a[n]), _byte_span(a[w])) for w in written & set(a))
+            for a in args))  # fmt: skip
+        facts = nbar.translate(text, fn.name, records, pol, module)
+        if facts.refusals:
+            r = facts.refusals[0]
+            return {
+                "status": "error" if r["kind"] == "error" else "refused",
+                "error": r["msg"],
+            }
         tensors = [{"name": n, "kind": "global", "elem_bytes": eb,
                     "shape": [{"e": "var", "w": 64, "name": f"{n}.nb_len"}],
                     "strides": [{"e": "const", "w": 64, "v": 1}], "segments": None,
@@ -1045,7 +1046,8 @@ def translate_nb(case: dict, dump: dict, recs: list, launches: list, las: list,
 
 
 def _ptx_variant(case: dict, dump: dict, recs: list, launches: list, las: list):
-    """(PtxVariant, PTX text, parsed entry, LaunchRecord per launch, param_table)."""
+    """(PtxVariant, PTX text, parsed entry, LaunchRecord per launch, param_table, parsed
+    PTX module: the passes take it instead of parsing the text again)."""
     T, parse = _ptx("translate"), _ptx("parse")
     rec = recs[0]
     if len({c.get("ptx", {}).get("sha256") for c in recs}) != 1 or "ptx" not in rec:
@@ -1060,7 +1062,8 @@ def _ptx_variant(case: dict, dump: dict, recs: list, launches: list, las: list):
         records.append(got[0])
     text = Path(rec["ptx"]["file"]).read_text()
     try:
-        fn = parse.parse(text).function(records[0]["entry"])
+        module = parse.parse(text)
+        fn = module.function(records[0]["entry"])
     except (parse.PtxSyntaxError, KeyError) as e:
         raise Unsupported("PTX", Path(rec["ptx"]["file"]).name, f"{type(e).__name__}: {e}",
                           kind="error") from e  # fmt: skip
@@ -1070,7 +1073,7 @@ def _ptx_variant(case: dict, dump: dict, recs: list, launches: list, las: list):
     v = PtxVariant(case, dump, rec, launched, launches[0][1])
     leaves = [x for p in rec["params"] if not p["constexpr"] for x in p["leaves"]]
     table = _jit_named(T.param_table(records, "cute", fn, leaves), records, v.k.tensors)
-    return v, text, fn, records, table
+    return v, text, fn, records, table, module
 
 
 def _byte_span(a: dict):

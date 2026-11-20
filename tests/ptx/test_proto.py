@@ -20,8 +20,12 @@ the value half; a tagged store with a data value half is a store of `tag << 32` 
 `data_lo`; an exit condition that reads the value half is refused. A relay ring slot written as
 `X - ((X + (X lshr 31)) & -2)` (C's `%` by 2) is keyed by X. A work cursor's fetch-add whose
 old value is a work index is a `gclaim` under policy claims "representative", else refused.
+A module the caller parsed (TTGIR to_kir parses a PTX once per task) is read by the census,
+by every round of the translation (a sync tensor the census missed restarts it) and by the
+region's rewrite, never changed: the Facts are those of the text.
 """
 
+import contextlib
 import sys
 import unittest
 from pathlib import Path
@@ -35,7 +39,7 @@ if __package__ in (None, ""):
     sys.modules["lkv_root"] = _root
     __package__ = "lkv_root.tests.ptx"  # noqa: A001
 
-from ...frontend.ptx import cfg as C, parse, proto  # noqa: E402
+from ...frontend.ptx import cfg as C, gsync, parse, proto, translate as T  # noqa: E402
 from .fixtures.kernels import events, kernel, kir_errors, run  # noqa: E402
 
 JOIN = """
@@ -436,6 +440,58 @@ class Claims(unittest.TestCase):
 
     def test_claim_without_the_policy_is_refused(self):
         self.assertTrue(self.claim().refusals)
+
+
+class ParsedOnce(unittest.TestCase):
+    """translate.translate of a module the caller parsed under policy gsync: no parse of
+    the text, the module as parsed afterwards, and the Facts of the text, twice."""
+
+    def rounds(self, body, ptrs, census=True, **pol) -> int:
+        """The rounds of one translation of the module (1: the census missed nothing)."""
+        kw = dict(family="ttgir", ptrs=ptrs, scalars=(), threads=32, gsync=True, **pol)
+        module = parse.parse(kernel(body, ptrs, (), 32))
+        fn = module.function("k")
+        parsed = (list(fn.body), dict(fn.regs))
+        translate, translate_round, modules = T.translate, T._translate, []
+
+        def of_module(text, entry, records, policy):
+            return translate(text, entry, records, policy, module)
+
+        def counted(*args):
+            modules.append(args[-1])
+            return translate_round(*args)
+
+        # without the census (it only saves restarts) the first round's gsev.Restart finds
+        # the sync tensors and the translation runs again
+        missed = mock.patch.object(gsync, "function_census", side_effect=RuntimeError)
+        with missed if not census else contextlib.nullcontext():
+            want = run(body, **kw)
+            for _ in range(2):
+                with (
+                    mock.patch.object(T, "translate", of_module),
+                    mock.patch.object(T, "_translate", counted),
+                    mock.patch.object(parse, "parse", side_effect=AssertionError),
+                ):
+                    got = run(body, **kw)
+                self.assertEqual((list(fn.body), dict(fn.regs)), parsed)
+                self.assertEqual((got.roles, got.sync, got.representative, got.refusals),
+                                 (want.roles, want.sync, want.representative, []))  # fmt: skip
+                self.assertEqual([r.k for r, _ in got.protocols],
+                                 [r.k for r, _ in want.protocols])  # fmt: skip
+        self.assertTrue(all(m is module for m in modules))
+        return len(modules) // 2
+
+    def test_rounds_of_a_missed_sync_tensor(self):
+        self.assertEqual(
+            self.rounds(TAKE, ("mail", "out"), census=False, elem={"mail": 8}), 2
+        )
+        self.assertEqual(self.rounds(CLAIM, ("ctr", "out"), census=False,
+                                     claims="representative"), 2)  # fmt: skip
+
+    def test_census_and_protocol_region(self):
+        self.assertEqual(self.rounds(TAKE, ("mail", "out"), elem={"mail": 8}), 1)
+        self.assertEqual(self.rounds(JOIN.replace("TESTS", COUNT), PTRS,
+                                     protocols=[{"tensor": "team"}]), 1)  # fmt: skip
 
 
 class RingRemainder(unittest.TestCase):

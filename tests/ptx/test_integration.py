@@ -25,6 +25,8 @@ CLC tables; translate_nb in forked processes (the sequential results) and its
 all-preferred `<spec>@cluster<dims>` P0-6 KIR, and translate_p1's P1 KIR per geometry.
 """
 
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -44,8 +46,9 @@ if __package__ in (None, ""):
 
 from ...frontend import kir  # noqa: E402
 from ...frontend.cute import to_kir as cute_to_kir  # noqa: E402
-from ...frontend.ptx import parse, translate as T  # noqa: E402
+from ...frontend.ptx import nbar, parse, translate as T  # noqa: E402
 from ...frontend.ttgir import to_kir as ttgir_to_kir  # noqa: E402
+from ...frontend.ttgir.slicing import SliceError  # noqa: E402
 from .fixtures.kernels import evaluate, kernel, run  # noqa: E402
 
 # The source tree (buck runs link trees: resolve() leads back to it, as tests/cute does).
@@ -110,6 +113,55 @@ class PreferredGeometryRules(unittest.TestCase):
                     geo(self.dump(*launches), "s")
                 self.assertIn(msg, str(e.exception))
                 self.assertEqual(ttgir_to_kir.failure_kind(e.exception), "gap")
+
+
+class Geometries(unittest.TestCase):
+    """geometries: the variants the P0 translation of the PTX, P0-6 and P1-2 check alike,
+    decided before anything is translated: the regular cluster dims, the all-preferred
+    geometry or the refused `<spec>@cluster`, each refused with a launch's required
+    cluster that differs from its cluster dims (a refused `@cluster` keeps its reason)."""
+
+    dump = staticmethod(PreferredGeometryRules.dump)
+    launch = staticmethod(PreferredGeometryRules.launch)
+
+    def variants(self, *launches) -> list:
+        got = ttgir_to_kir.geometries(self.dump(*launches), "s")
+        return [(n, g, r if r is None else (ttgir_to_kir.failure_kind(r), str(r)))
+                for n, g, r in got]  # fmt: skip
+
+    def test_variants(self):
+        la = self.launch
+        self.assertEqual(
+            self.variants(la([2, 1, 1], None, [8, 1, 1])), [("s", None, None)]
+        )
+        self.assertEqual(self.variants(la([2, 1, 1], [4, 1, 1], [8, 1, 1])),
+                         [("s", None, None), ("s@cluster4x1x1", (4, 1, 1), None)])  # fmt: skip
+        regular, refused = self.variants(
+            la([2, 1, 1], [4, 1, 1], [8, 1, 1]), la([2, 1, 1], [8, 1, 1], [8, 1, 1])
+        )
+        self.assertEqual(regular, ("s", None, None))
+        self.assertEqual(refused[:2], ("s@cluster", None))
+        self.assertEqual(refused[2][0], "gap")
+        self.assertIn("differ in their (preferred) cluster dims", refused[2][1])
+
+    def test_required_cluster_refuses_every_geometry(self):
+        la = self.launch
+        required = (
+            "function's required cluster (cuFuncSetAttribute REQUIRED_CLUSTER) is"
+        )
+        got = self.variants(la([1, 1, 1], [2, 1, 1], [4, 1, 1], required=[2, 1, 1]))
+        self.assertEqual([(n, g) for n, g, _ in got],
+                         [("s", None), ("s@cluster2x1x1", (2, 1, 1))])  # fmt: skip
+        for _n, _g, (kind, msg) in got:
+            self.assertEqual(kind, "gap")
+            self.assertIn(required, msg)
+        regular, refused = self.variants(
+            la([1, 1, 1], [2, 1, 1], [4, 1, 1], required=[2, 1, 1]),
+            la([1, 1, 1], [4, 1, 1], [4, 1, 1], required=[2, 1, 1]),
+        )
+        self.assertIn(required, regular[2][1])
+        self.assertEqual(refused[0], "s@cluster")
+        self.assertIn("differ in their (preferred) cluster dims", refused[2][1])
 
 
 class TtgirProbe(unittest.TestCase):
@@ -336,10 +388,236 @@ class TtgirProbe(unittest.TestCase):
             self.assertEqual(str(e), str(p0[key]))
         self.assertEqual(list(self.tmp.glob("*.nb.json")), [])
 
+    def test_required_cluster_in_every_pass(self):
+        """A launch whose function's required cluster differs from its cluster dims
+        refuses each geometry of its specialization, the same variants with the same
+        reasons in the P0, P0-6 and P1-2 passes (a refused `<spec>@cluster` keeps its
+        own); no KIR is written."""
+        dump = json.loads(self.dump.read_text())
+        for inp in dump["inputs"]:
+            for la in inp["launches"]:
+                la["launch"]["attrs"]["preferred_cluster"] = [2, 1, 1]
+                la["launch"]["attrs"]["func_attributes"] = {
+                    "required_cluster": [2, 1, 1]
+                }
+        self.dump.write_text(json.dumps(dump))
+        with mock.patch.dict(os.environ, PTX_MODE):
+            p0 = ttgir_to_kir.translate(self.dump, self.case)
+        nb = ttgir_to_kir.translate_nb(self.dump, self.case)
+        p1 = ttgir_to_kir.translate_p1(self.dump, self.case)
+        self.assertEqual(list(p0), ["1691f771b8a0", "1691f771b8a0@cluster2x1x1",
+                                    "6614c8dcb51d", "6614c8dcb51d@cluster"])  # fmt: skip
+        for got in (p0, nb, p1):
+            self.assertEqual({k: (ttgir_to_kir.failure_kind(e), str(e)) for k, e in got.items()},
+                             {k: ("gap", str(e)) for k, e in p0.items()})  # fmt: skip
+        for key, e in p0.items():
+            want = (
+                "do not divide the grid"
+                if key == "6614c8dcb51d@cluster"
+                else "function's required cluster"
+            )
+            self.assertIn(want, str(e))
+        kirs = [p for s in ("kir", "nb", "p1") for p in self.tmp.glob(f"*.{s}.json")]
+        self.assertEqual(kirs, [])
+
+    def test_tasks_in_forked_processes(self):
+        """to_kir's tasks (P0, P0-6 and P1 of every specialization) in forked processes
+        (--jobs) give the sequential results: the same exit status, log lines and files;
+        the lines in task order, the P0 ones, then the P0-6 and the P1 ones."""
+        case = SKILL / "tests/e2e/cases/probe_tlx.json"
+
+        def to_kir(jobs: int):
+            for f in self.tmp.glob("*.*.json"):
+                if f.name.endswith((".kir.json", ".nb.json", ".p1.json")):
+                    f.unlink()
+            err = io.StringIO()
+            argv = [
+                "to_kir",
+                "--dump",
+                str(self.dump),
+                "--case",
+                str(case),
+                "--jobs",
+                str(jobs),
+            ]
+            with (
+                mock.patch.dict(os.environ, {**PTX_MODE, "LKV_P1": "1"}),
+                mock.patch.object(sys, "argv", argv),
+                contextlib.redirect_stderr(err),
+                self.assertRaises(SystemExit) as stop,
+            ):
+                ttgir_to_kir.main()
+            files = {f.name: f.read_bytes() for f in sorted(self.tmp.glob("*.*.json"))
+                     if f.name.endswith((".kir.json", ".nb.json", ".p1.json"))}  # fmt: skip
+            return stop.exception.code, err.getvalue().splitlines(), files
+
+        seq = to_kir(1)
+        self.assertEqual(to_kir(3), seq)
+        code, lines, files = seq
+        self.assertEqual(code, 0)
+        self.assertEqual(lines[0], "[to_kir] LKV_FRONTEND=ptx: translating the PTX")
+        self.assertEqual(
+            [x.split(": ", 1)[1].split(" ")[0] for x in lines[1:]],
+            [
+                "1691f771b8a0.kir.json",
+                "6614c8dcb51d.kir.json",
+                "P0-6",
+                "P0-6",
+                "P1",
+                "P1",
+            ],
+        )
+        self.assertTrue(
+            lines[-1].endswith(
+                ": P1 not_applicable: the kernel has no bulk async store"
+            )
+        )
+        self.assertEqual(len(files), 4)  # the P0 and P0-6 KIRs
+
+    def test_p1_without_a_bulk_store_before_any_translation(self):
+        """A kernel without a bulk store has no P1 KIR, decided on its parsed PTX before
+        it is translated, so also where the translation would fail (that used to be
+        P1-2 refused or error instead of not applicable)."""
+
+        def translate(*args, **kw):
+            raise AssertionError("translated")
+
+        with mock.patch.object(T, "translate", translate):
+            got = ttgir_to_kir.translate_p1(self.dump, self.case)
+        self.assertEqual(got, {"1691f771b8a0": None, "6614c8dcb51d": None})
+
+    def test_ptx_parsed_once_per_task(self):
+        """Each P0 and P0-6 KIR parses its PTX once: the core translates the parsed module
+        (it used to parse it again)."""
+        real, texts = parse.parse, []
+
+        def counted(text, *args, **kw):
+            texts.append(text)
+            return real(text, *args, **kw)
+
+        with (
+            mock.patch.dict(os.environ, PTX_MODE),
+            mock.patch.object(parse, "parse", counted),
+        ):
+            p0 = ttgir_to_kir.translate(self.dump, self.case)
+            nb = ttgir_to_kir.translate_nb(self.dump, self.case)
+        self.assertTrue(all(isinstance(k, dict) for k in [*p0.values(), *nb.values()]))
+        self.assertEqual(len(texts), 4)
+
+    def test_ptx_parsed_once_per_task_with_gsync(self):
+        """With the case's `gsync` too: gsync.py's census and every round of the
+        translation read the task's parsed module (each parsed the PTX again); the probe
+        has no sync tensor, so its KIRs are those without `gsync`."""
+        real, texts = parse.parse, []
+
+        def counted(text, *args, **kw):
+            texts.append(text)
+            return real(text, *args, **kw)
+
+        with mock.patch.dict(os.environ, PTX_MODE):
+            want = ttgir_to_kir.translate(self.dump, self.case)
+            with mock.patch.object(parse, "parse", counted):
+                got = ttgir_to_kir.translate(self.dump, {**self.case, "gsync": True})
+        self.assertEqual(got, want)
+        self.assertTrue(all(isinstance(k, dict) for k in got.values()))
+        self.assertEqual(len(texts), 2)
+
+    def test_nb_metadata_checked_before_the_pass(self):
+        """A 1-D tensor with recorded contents that a launch cannot hold as metadata
+        (_metadata_problem: here it shares storage with a written tensor, itself) is left
+        out of the barrier pass's metadata before the pass, which runs once per P0-6 KIR
+        (it used to run again for each tensor _input rejected), with the write set it
+        would compute itself (nb_written)."""
+        dump = json.loads(self.dump.read_text())
+        for inp in dump["inputs"]:
+            for la in inp["launches"]:
+                la["args"]["x_ptr"]["values"] = [0] * la["args"]["x_ptr"]["shape"][0]
+        self.dump.write_text(json.dumps(dump))
+        real, pols = nbar.translate, []
+
+        def spy(text, entry, records, pol, module=None):
+            pols.append(pol)
+            self.assertIsNotNone(module)
+            return real(text, entry, records, pol, module)
+
+        with mock.patch.object(nbar, "translate", spy):
+            got = ttgir_to_kir.translate_nb(self.dump, self.case)
+        self.assertTrue(all(isinstance(k, dict) for k in got.values()), got)
+        self.assertEqual([(p["nb_meta"], p["nb_written"]) for p in pols],
+                         [(frozenset(), ["x_ptr"])] * 2)  # fmt: skip
+
+    def test_nb_metadata_contents_given_by_the_case(self):
+        """A tensor whose contents the case gives (`metadata_contents`: an earlier launch
+        writes them, so the recorded ones are stale) is not checked for the inputs it
+        gives them for, as _input does not check it: it stays in the barrier pass's
+        metadata where _metadata_problem would leave it out (the test above), and is
+        checked for the other inputs."""
+        dump = json.loads(self.dump.read_text())
+        for inp in dump["inputs"]:
+            for la in inp["launches"]:
+                la["args"]["x_ptr"]["values"] = [0] * la["args"]["x_ptr"]["shape"][0]
+        self.dump.write_text(json.dumps(dump))
+        real, pols = nbar.translate, []
+
+        def spy(text, entry, records, pol, module=None):
+            pols.append(pol)
+            return real(text, entry, records, pol, module)
+
+        # `partial` gives them, the other inputs of its specialization do not
+        one = {**self.case, "inputs": [{**i, "metadata_contents": {"x_ptr": []}}
+                                       if i["name"] == "partial" else i
+                                       for i in self.case["inputs"]]}  # fmt: skip
+        with mock.patch.object(nbar, "translate", spy):
+            every = ttgir_to_kir.translate_nb(
+                self.dump, {**self.case, "metadata_contents": {"x_ptr": []}}
+            )
+            some = ttgir_to_kir.translate_nb(self.dump, one)
+        self.assertTrue(
+            all(isinstance(k, dict) for k in [*every.values(), *some.values()])
+        )
+        self.assertEqual([p["nb_meta"] for p in pols],
+                         [frozenset({"x_ptr"})] * 2 + [frozenset()] * 2)  # fmt: skip
+
+
+class MetadataProblems(unittest.TestCase):
+    """_metadata_problem: why a launch's tensor cannot be a metadata tensor, with the
+    message _input raises after the input's name (build_nb asks it before the pass)."""
+
+    REC = {"kind": "tensor", "shape": [4], "strides": [1], "storage_offset": 0,
+           "storage": [0, 16], "values": [0, 1, 2, 3]}  # fmt: skip
+    OUT = {"kind": "tensor", "shape": [4], "strides": [1], "storage_offset": 0,
+           "storage": [64, 80]}  # fmt: skip
+
+    def problem(self, written=("o",), stale=None, **rec):
+        launch = {
+            "args": {"m": {**self.REC, **rec}, "o": self.OUT},
+            "stale": stale or {},
+        }
+        return ttgir_to_kir._metadata_problem("m", launch, set(written))
+
+    def test_problems(self):
+        self.assertIsNone(self.problem())
+        self.assertEqual(self.problem(storage_offset=1), "metadata tensor m is a view")
+        self.assertIn("metadata tensor m has strides [2]", self.problem(strides=[2]))
+        writer = [{"launch": 0, "kernel": "w", "param": "out"}]
+        self.assertIn("metadata tensor m may hold data that launch 0 of w (argument out)",
+                      self.problem(stale={"m": writer}))  # fmt: skip
+        self.assertEqual(self.problem(storage=[60, 76]),
+                         "metadata tensor m shares storage with o, which the analyzed kernel writes")  # fmt: skip
+        self.assertIsNone(self.problem(written=(), storage=[60, 76]))
+        rec = dict(self.REC)
+        del rec["values"]
+        launch = {"args": {"m": rec, "o": self.OUT}, "stale": {}}
+        self.assertEqual(ttgir_to_kir._metadata_problem("m", launch, set()),
+                         "metadata tensor m contents were not recorded")  # fmt: skip
+
 
 class TtgirP1Geometry(unittest.TestCase):
     """translate_p1: with a preferred cluster geometry also the all-preferred P1 KIR,
     `<spec>@cluster<dims>.p1.json` (as translate's P0 KIRs)."""
+
+    # what to_kir's summary of a KIR reads, for a stand-in build_ptx's KIR
+    BARE = {"roles": [], "tensors": [], "barriers": [], "case": {"inputs": []}}
 
     def test_p1_kir_per_geometry(self):
         tmp = Path(tempfile.mkdtemp())
@@ -353,7 +631,7 @@ class TtgirP1Geometry(unittest.TestCase):
 
         def build(where, d, key, case, geometry=None, p1=False):
             calls.append((key, geometry, p1))
-            return {"p1": ["P1-2"], "geometry": geometry}
+            return {"p1": ["P1-2"], "geometry": geometry, **self.BARE}
 
         with (
             mock.patch.object(ttgir_to_kir, "build_ptx", build),
@@ -380,7 +658,7 @@ class TtgirP1Geometry(unittest.TestCase):
 
         def build(where, d, key, case, geometry=None, p1=False):
             calls.append((key, geometry, p1))
-            return {"p1": ["P1-2"], "geometry": geometry}
+            return {"p1": ["P1-2"], "geometry": geometry, **self.BARE}
 
         with (
             mock.patch.object(ttgir_to_kir, "build_ptx", build),
@@ -389,12 +667,44 @@ class TtgirP1Geometry(unittest.TestCase):
             results = ttgir_to_kir.translate_p1(tmp / "dump.json", {})
         self.assertEqual(calls, [("s", None, True)])
         self.assertEqual(list(results), ["s", "s@cluster"])
-        self.assertEqual(results["s"], {"p1": ["P1-2"], "geometry": None})
+        self.assertEqual(results["s"], {"p1": ["P1-2"], "geometry": None, **self.BARE})
         e = results["s@cluster"]
         self.assertIsInstance(e, ttgir_to_kir.KirError)
         self.assertEqual(ttgir_to_kir.failure_kind(e), "gap")
         self.assertIn("differ", str(e))
         self.assertEqual(sorted(p.name for p in tmp.glob("*.p1.json")), ["s.p1.json"])
+
+
+class TtgirPassGeometries(unittest.TestCase):
+    """The P0 translation checks the variants geometries decides, as P0-6 and P1-2 do: the
+    all-preferred KIR also where the regular one does not translate (translate gives back
+    the exception that stopped it, of its class)."""
+
+    def test_all_preferred_kir_without_the_regular_one(self):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        rec = {"cluster": [2, 1, 1], "grid": [8, 1, 1],
+               "attrs": {"preferred_cluster": [4, 1, 1]}}  # fmt: skip
+        dump = {"specs": {"s": {}},
+                "inputs": [{"name": "i", "launches": [{"spec": "s", "launch": rec}]}]}  # fmt: skip
+        (tmp / "dump.json").write_text(json.dumps(dump))
+
+        def build(where, d, key, case, geometry=None, p1=False):
+            if geometry is None:
+                raise SliceError("a construct of the regular geometry")
+            return {"geometry": geometry, **TtgirP1Geometry.BARE}
+
+        with (
+            mock.patch.dict(os.environ, PTX_MODE),
+            mock.patch.object(ttgir_to_kir, "build_ptx", build),
+            mock.patch.object(ttgir_to_kir.kir_contract, "validate", lambda k: []),
+        ):
+            got = ttgir_to_kir.translate(tmp / "dump.json", {})
+        self.assertEqual(list(got), ["s", "s@cluster4x1x1"])
+        self.assertIsInstance(got["s"], SliceError)
+        self.assertEqual(str(got["s"]), "a construct of the regular geometry")
+        self.assertEqual(ttgir_to_kir.failure_kind(got["s"]), "gap")
+        self.assertEqual(got["s@cluster4x1x1"]["geometry"], [4, 1, 1])
 
 
 class CuteProbe(unittest.TestCase):
@@ -457,6 +767,30 @@ class CuteProbe(unittest.TestCase):
             variant["nb"], {"status": "refused", "error": variant["error"]}
         )
         self.assertEqual(list((self.tmp / "kir").glob("*.nb.json")), [])
+
+    def test_ptx_parsed_once_per_pass(self):
+        # the P0 translation and the P0-6 pass each parse the variant's PTX once
+        # (_ptx_variant) and translate that module; the barrier pass runs once (its
+        # metadata tensors are chosen before it); the P1 pass parses nothing here (no
+        # tcgen05)
+        real_parse, real_nb, texts, modules = parse.parse, nbar.translate, [], []
+
+        def counted(text, *args, **kw):
+            texts.append(text)
+            return real_parse(text, *args, **kw)
+
+        def spy(text, entry, records, pol, module=None):
+            modules.append(module)
+            return real_nb(text, entry, records, pol, module)
+
+        with mock.patch.object(parse, "parse", counted), \
+                mock.patch.object(nbar, "translate", spy):  # fmt: skip
+            variant, _host = self.run_kir()
+        self.assertIn("kir", variant)
+        self.assertEqual(variant["nb"]["status"], "checked")
+        self.assertEqual(len(texts), 2)
+        self.assertEqual(len(modules), 1)
+        self.assertIsNotNone(modules[0])
 
     def test_write_set(self):
         dump = json.loads((self.tmp / "dump.json").read_text())

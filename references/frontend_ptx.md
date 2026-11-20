@@ -501,7 +501,12 @@ Coordinates, footprints, transaction bytes, issuing threads, sub-byte formats:
   is the regular z; the preferred dims divide every launch's grid), the P0, P0-6 and
   P1-2 passes report the failure `<spec>@cluster` for the all-preferred geometry (a gap
   for every input of the specialization: what the device runs for such a launch is not
-  modeled); their regular KIRs are still checked. A CuTe launch with a preferred
+  modeled); their regular KIRs are still checked. The three passes check the same
+  geometries (`to_kir.geometries`), decided before anything is translated: an
+  all-preferred KIR is translated whether or not the regular one translates, and a
+  launch whose function's required cluster differs from its cluster dims refuses each
+  geometry of its specialization (`check_required_cluster`, "Launch records"; a refused
+  `<spec>@cluster` keeps its own reason). A CuTe launch with a preferred
   cluster other than its cluster is refused, its P0-6 KIR too (gap: the CuTe frontend
   checks one geometry; `cute/to_kir.preferred_cluster_gap`).
 * **tcgen05 in P0.** No event except `tcgen05.commit`, an asynchronous `commit_arrive` on
@@ -580,10 +585,11 @@ events plus the P1-2 events and `named_bar` (`kir.md` change 15: top-level
 `p1: ["P1-2"]` and `cta_threads`, the block's threads); with a preferred cluster
 geometry also `<spec>@cluster<dims>.p1.json`, all clusters preferred ("Clusters, tcgen05,
 CLC").
-A specialization without a bulk store is `not_applicable`; a refusal or failure is
-logged as `P1 refused|error: <why>` and leaves its P1-2 "not checked"; the P0 KIR and
-its verdicts never change (`LKV_P1=0` skips the pass of a `to_kir` run by hand;
-`lkv.py run --no-p1` skips the P1 checks). The roles are split as the CuTe
+A specialization without a bulk store is `not_applicable`, seen in its parsed PTX
+before anything is translated (also where the translation would be refused); a refusal
+or failure is logged as `P1 refused|error: <why>` and leaves its P1-2 "not checked"; the
+P0 KIR and its verdicts never change (`LKV_P1=0` skips the pass: `lkv.py run --no-p1`
+sets it, and `LKV_P1=1` otherwise). The roles are split as the CuTe
 pass splits them (a role whose warps issue an mbarrier wait, arrive or commit only in
 part; a TTGIR partition's parts are named `<partition>_w<first>_<last>`), since the P1
 ledger takes a role's mbarrier event as every warp's. The `let`s nothing reads are
@@ -683,10 +689,13 @@ is the control flow, the named barriers and the values that decide them.
   A weak integer load of a 1-D tensor whose contents the dump recorded and the kernel
   never writes is an exact metadata `load` (mem.py, as in the P0 translation): the TTGIR
   hook declares such tensors with their `<t>.shape.0`/`<t>.stride.0` params and
-  `_input`'s checks (recorded, no view, contiguous, not stale, no storage shared with a
-  written tensor; a tensor that fails them is translated again as uniform data), the
-  CuTe hook as flat buffers of `<t>.nb_len` elements (every launch recorded the contents,
-  1-D contiguous, no storage shared with a written tensor).
+  `_input`'s checks (`_metadata_problem`: recorded, no view, contiguous, not stale, no
+  storage shared with a written tensor; none for an input whose contents the case gives,
+  `metadata_contents`), the CuTe hook as flat buffers of `<t>.nb_len`
+  elements (every launch recorded the contents, 1-D contiguous, no storage shared with a
+  written tensor). Both make those checks before the pass, with its write set
+  (`nbar.writes`, policy `nb_written`), so a tensor that fails them is uniform data and
+  the pass runs once, on the PTX parsed once.
   A spin loop's accepted value (every source a strong load of a uniform address its exit
   test accepted; also LLVM's rotated `if accept(v0) skip; else spin`) is published
   (`u`) in the register that holds it as loaded (or a copy) at every exit; a value
@@ -737,8 +746,9 @@ is the control flow, the named barriers and the values that decide them.
   writes). The substitutions are memoized per translator across
   expressions (interp's `memo`; the values of a role share their thread-dependent
   subexpressions). The TTGIR hook makes its P0-6 KIRs (one per specialization and cluster
-  geometry) in up to `--jobs` forked processes, one KIR each (`to_kir --jobs`, which
-  `lkv.py run` passes; the results and files are the same in any order).
+  geometry) as tasks of `to_kir`'s fork pool, with its P0 and P1-2 KIRs: up to `--jobs`
+  forked processes, one KIR each (`to_kir --jobs`, which `lkv.py run` passes; the
+  results and files are the same in any order).
 
 ## Global synchronization (policy `gsync`, gsev.py)
 

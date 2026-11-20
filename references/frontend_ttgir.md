@@ -31,7 +31,7 @@ library shared with the CuTe frontend.
 #   specialization
 # to_kir (frontend/ttgir/to_kir.py --dump DIR/dump.json --case CASE [--jobs N]): per
 #   compiled specialization its KIR, its P0-6 KIR and (PTX translation) its P1-2 KIR,
-#   next to dump.json; --jobs: processes for the P0-6 pass
+#   next to dump.json; --jobs: processes for these translations (one KIR each)
 python3 -I scripts/lkv.py run CASE.json --src DIR [--inputs a,b] [--target sm_100|sm_103]
 # tests (CPU): tests/ttgir/test_translate.py (translation of handwritten TTGIR),
 # tests/ttgir/test_ttgir.py (dump + to_kir on small TLX kernels, LKV_FRONTEND=legacy pinned;
@@ -50,10 +50,15 @@ unsupported constructs: UNDECIDED, not an error), `error` for what the case or L
 fix (a TTGIR or PTX text the parser cannot read, a KIR contract violation, an internal
 error, a case annotation error, a target or location mismatch: an ERROR). Whatever the
 translation, `to_kir` also writes each specialization's P0-6 KIR `<spec>.nb.json` from
-its PTX (`frontend_ptx.md`, "The P0-6 barrier pass"; up to `--jobs` at a time, in forked
-processes) or logs `[to_kir] <spec>: P0-6 FAILED (<kind>): ...` (P0-6 UNDECIDED or
-ERROR); like the PTX translation's P1-2 KIRs ("PTX translation") it never changes the
-exit status. Every KIR it writes has passed `frontend/kir.py`.
+its PTX (`frontend_ptx.md`, "The P0-6 barrier pass") or logs
+`[to_kir] <spec>: P0-6 FAILED (<kind>): ...` (P0-6 UNDECIDED or ERROR); like the PTX
+translation's P1-2 KIRs ("PTX translation") it never changes the exit status. Every KIR
+it writes has passed `frontend/kir.py`. The P0, P0-6 and P1-2 translations of each
+specialization and geometry are independent tasks (`translate_all`): up to `--jobs` run
+at a time, each in a process forked for it, which sends back only its log line's
+contents (a KIR's summary, a failure's kind and message); the lines come in task order
+(the P0 lines, then the P0-6 and the P1 ones, each in spec order), each as soon as the
+tasks before it ended.
 
 The inputs run in order in one process. If the host refuses an input (`host_errors.py`:
 the innermost frame of the exception is under `src_root` and a `raise` or `assert`
@@ -446,9 +451,10 @@ module and unsupported constructs it has its own rules and refusals (`frontend_p
   target.
 * Cluster: a launch whose function's required cluster (`attrs.func_attributes`, patch 13)
   differs from its `cluster` is refused (a gap: which of the two the hardware uses is not
-  modeled; `check_required_cluster`), its P0-6 KIR too. So is one with a preferred
-  cluster (`attrs.preferred_cluster`) other than its `cluster`, after the translation's
-  own refusals (a gap: this translation checks one geometry; `check_preferred_cluster`).
+  modeled; `check_required_cluster`), its P0-6 KIRs too (each geometry's, `geometries`).
+  So is one with a preferred cluster (`attrs.preferred_cluster`) other than its
+  `cluster`, after the translation's own refusals (a gap: this translation checks one
+  geometry; `check_preferred_cluster`).
 * Unsupported constructs: cross-CTA barriers/arrives (`map_to_remote_buffer`,
   `ctaMask`, 2-CTA/multicast MMA, paired-MMA modules, `num-ctas > 1`), CLC with
   clusters or multi-dimensional grids, multicast/two_cta/im2col TMA, tensor-valued
@@ -471,20 +477,20 @@ translates the PTX `dump` writes next to each TTGIR (`<spec>.ptx`) instead of th
 with the shared PTX translation of both frontends and its op table: `frontend_ptx.md` and
 `ir_ops_ptx.md` (TMA and bulk copies, clusters, CLC, refusals). The KIR has `ir` `"ptx"`
 and, for launches in clusters, `cluster` (`kir.md` change 11). It also writes the P1-2
-KIRs (`<spec>.p1.json`, `frontend_ptx.md`, "P1-2 pass"; `LKV_P1=0` skips them in a
-`to_kir` run by hand, `lkv.py run --no-p1` skips their checks). A
+KIRs (`<spec>.p1.json`, `frontend_ptx.md`, "P1-2 pass"; `LKV_P1=0` skips them:
+`lkv.py run --no-p1` sets it, and `LKV_P1=1` otherwise). A
 specialization whose launches prefer other cluster dims (`attrs.preferred_cluster`) is
 also checked in the all-preferred geometry, `<spec>@cluster<dims>`, on every input
 (refused where the launches break a rule CUDA states for the preferred dims): a P0 KIR
-(if the regular one translates) and a P1-2 KIR, both refused with CLC, and, whatever the
-translation, a P0-6 KIR (`frontend_ptx.md`, "Clusters, tcgen05, CLC", also for its
-limits). The case file, the dump, the variant,
-tensor and param names, the inputs, the host-side checks ("Soundness checks") and the
-`[to_kir] ... FAILED` lines stay; barrier and variable names are the PTX translation's
-(`frontend_ptx.md`, "Family conventions"). `--frontend legacy` (`LKV_FRONTEND=legacy`)
-selects the TTGIR translation above: it decides some constructs the PTX translation
-refuses, refuses 2-CTA kernels and launches with a preferred cluster, and checks no P1-2
-(P0-6, whose KIR comes from the PTX, is checked under both).
+(whether or not the regular one translates) and a P1-2 KIR, both refused with CLC, and,
+whatever the translation, a P0-6 KIR, the same geometries for each (`geometries`;
+`frontend_ptx.md`, "Clusters, tcgen05, CLC", also for its limits). The case file, the
+dump, the variant, tensor and param names, the inputs, the host-side checks ("Soundness
+checks") and the `[to_kir] ... FAILED` lines stay; barrier and variable names are the PTX
+translation's (`frontend_ptx.md`, "Family conventions"). `--frontend legacy`
+(`LKV_FRONTEND=legacy`) selects the TTGIR translation above: it decides some constructs
+the PTX translation refuses, refuses 2-CTA kernels and launches with a preferred cluster,
+and checks no P1-2 (P0-6, whose KIR comes from the PTX, is checked under both).
 
 ## Limitations
 

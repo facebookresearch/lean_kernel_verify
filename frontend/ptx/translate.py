@@ -138,7 +138,7 @@ import importlib.util
 import json
 import re
 import sys
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 if __package__ in (None, ""):  # python3 -I path/to/translate.py
@@ -222,14 +222,18 @@ class _Handoffs(Exception):
         self.first, self.channels = first, channels
 
 
-def translate(ptx_text: str, entry: str, launch_records: list, pol: dict) -> Facts:
+def translate(ptx_text: str, entry: str, launch_records: list, pol: dict,
+              module=None) -> Facts:  # fmt: skip
+    """The Facts of one kernel; a refusal stops the variant. `module`: ptx_text already
+    parsed (never modified: the translation works on a copy of the entry function)."""
     facts = Facts(entry)
     run = _translate_gsync if pol.get("gsync") is True else _translate
     try:
-        _refused(facts, run, facts, ptx_text, entry, launch_records, pol)
+        _refused(facts, run, facts, ptx_text, entry, launch_records, pol, None, module)
     except _Handoffs as h:
         facts = Facts(entry)
-        _refused(facts, run, facts, ptx_text, entry, launch_records, pol, h.channels)
+        _refused(facts, run, facts, ptx_text, entry, launch_records, pol, h.channels,
+                 module)  # fmt: skip
         if facts.refusals:  # the first refusal, and why the channels did not carry it
             kind = "error" if facts.refusals[0]["kind"] == "error" else h.first.kind
             facts.refusals = [{"kind": kind, "msg": f"{h.first} (translated again "
@@ -255,7 +259,8 @@ def _refused(facts, fn, *args) -> None:
         facts.refusals.append({"kind": "error", "msg": f"{type(e).__name__}: {e}"})
 
 
-def _translate_gsync(facts, ptx_text, entry, records, pol, handoffs=None) -> None:
+def _translate_gsync(facts, ptx_text, entry, records, pol, handoffs=None,
+                     module=None) -> None:  # fmt: skip
     """_translate with the global-synchronization events (policy gsync): again with more
     sync tensors while a translation finds some (gsev.Restart, or a tensor the variant
     reads as metadata and writes), at most 8 times."""
@@ -265,7 +270,10 @@ def _translate_gsync(facts, ptx_text, entry, records, pol, handoffs=None) -> Non
     }  # proto.py: no sync words
     try:
         sites = gsync.function_census(
-            parse.parse(ptx_text), entry, gsync.HELPERS, pol.get("src_root", "")
+            module or parse.parse(ptx_text),
+            entry,
+            gsync.HELPERS,
+            pol.get("src_root", ""),
         )["sites"]
         sync |= gsev.seed(sites, pol.get("params") or [], pol.get("tensors") or {})
     except Exception:  # noqa: BLE001 - the seed only saves restarts
@@ -274,7 +282,9 @@ def _translate_gsync(facts, ptx_text, entry, records, pol, handoffs=None) -> Non
     for _ in range(8):
         f = Facts(entry)
         try:
-            _translate(f, ptx_text, entry, records, {**pol, "_sync": sync}, handoffs)
+            _translate(
+                f, ptx_text, entry, records, {**pol, "_sync": sync}, handoffs, module
+            )
         except gsev.Restart as r:
             if r.names & confined:
                 raise interp.Unsupported("protocol", entry, f"the protocol tensors "
@@ -309,12 +319,17 @@ def _channels(cands: dict, loads: dict) -> dict:
     return out
 
 
-def _translate(facts, ptx_text, entry, records, pol, handoffs=None) -> None:
+def _translate(
+    facts, ptx_text, entry, records, pol, handoffs=None, module=None
+) -> None:
     if pol.get("ptxas") is None:  # TTGIR: dump.py records it in every LaunchRecord
         got = {r.get("ptxas") for r in records}
         pol = {**pol, "ptxas": got.pop() if len(got) == 1 else None}
-    module = parse.parse(ptx_text)
+    module = module or parse.parse(ptx_text)
     fn = module.function(entry)
+    # a copy, so that the caller's module stays as it is (lower_switches rewrites the
+    # function's body and registers)
+    fn = replace(fn, regs=dict(fn.regs))
     facts.target = module.target.removesuffix("a")
     facts.block, facts.cluster = _launch_dims(fn, records)
     specs = ["P1-1"] if pol.get("p1") is True else list(pol.get("p1") or [])

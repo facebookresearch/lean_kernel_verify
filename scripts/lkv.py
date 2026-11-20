@@ -47,7 +47,9 @@ ordered, the PTX translation of TLX/Triton kernels). The CuTe frontend also writ
 KIR per variant (`<kernel>__<digest>.p1.json`, P1-1), the TTGIR frontend under
 LKV_FRONTEND=ptx one per specialization with a bulk store (`<spec>.p1.json`, P1-2, and
 for a preferred cluster geometry `<spec>@cluster<dims>.p1.json`, as P0; its top-level "p1"
-names the specs it decides); run checks it like a P0 KIR (unless --no-p1)
+names the specs it decides); run checks it like a P0 KIR (unless --no-p1, with which the
+frontends skip their P1 pass: run sets LKV_P1=0 for the TTGIR to_kir and passes --no-p1
+to the CuTe binary, and sets LKV_P1=1 otherwise, whatever the shell's value)
 and reports its verdicts in a section of their own and in report.json "variants_p1" /
 "totals_p1" / "p1_not_checked" (refused, failed or not applicable P1 translations, each
 with the P1 specs it concerns; P1-1 of TTGIR variants is "not checked", and so is P1-2
@@ -353,18 +355,22 @@ def source_rev(case, root, src):
     return case["source"].get("rev") if frontend_of(case) == "cute" else case.get("rev")
 
 
-def run_frontend(case_path, case, root, out, inputs, target, jobs=1):
+def run_frontend(case_path, case, root, out, inputs, target, jobs=1, p1=True):
     """Dump and translate; returns ([KIR paths], [{"variant", "kernel", "inputs", "kind",
     "error"}] for the variants without a KIR, [{"input", "error"}] for the inputs the host
     code rejected: the dump's `host_error`, an exception the exported sources raised or no
-    launch, in either frontend). Raises RuntimeError if the frontend itself failed."""
+    launch, in either frontend). Raises RuntimeError if the frontend itself failed.
+    Without `p1` the CuTe binary skips its P1 pass (--no-p1; the TTGIR to_kir reads
+    LKV_P1, which cmd_run sets)."""
     fe = out / "frontend"
     logs = out / "logs"
     fe.mkdir(parents=True, exist_ok=True)
     logs.mkdir(parents=True, exist_ok=True)
     sel = ["--inputs", inputs] if inputs else []
     if frontend_of(case) == "cute":
-        kirs, failures = run_cute(case_path, case, root, fe, logs, sel)
+        kirs, failures = run_cute(
+            case_path, case, root, fe, logs, sel + ([] if p1 else ["--no-p1"])
+        )
     else:
         kirs, failures = run_ttgir(case_path, root, fe, logs, sel, target, jobs)
     rejected = [
@@ -383,8 +389,9 @@ CUTE_BINARIES = {
 
 
 def run_cute(case_path, case, root, fe, logs, sel):
-    """The CuTe frontend (dump and to_kir in one binary): ([KIR paths], variants without
-    a KIR, each with its kind: "gap" or "error")."""
+    """The CuTe frontend (dump and to_kir in one binary; `sel`: its options --inputs,
+    --no-p1): ([KIR paths], variants without a KIR, each with its kind: "gap" or
+    "error")."""
     dsl = case.get("dsl", "4.4.2")
     if dsl not in CUTE_BINARIES:
         raise RuntimeError(
@@ -1807,6 +1814,7 @@ def cmd_run(args):
     out.mkdir(parents=True, exist_ok=True)
     root = src_root(case_path, case, args.src)
     os.environ["LKV_FRONTEND"] = translation  # read by both frontends' to_kir
+    os.environ["LKV_P1"] = "1" if args.p1 else "0"  # read by the TTGIR to_kir
     report = {
         "case": case["name"],
         "case_file": str(case_path),
@@ -1823,7 +1831,7 @@ def cmd_run(args):
     }
     try:
         kirs, report["frontend_failures"], report["host_rejected"] = run_frontend(
-            case_path, case, root, out, args.inputs, args.target, args.jobs
+            case_path, case, root, out, args.inputs, args.target, args.jobs, args.p1
         )
         if not args.p1:
             kirs = [k for k in kirs if not k.name.endswith(".p1.json")]
@@ -1899,8 +1907,9 @@ def main():
             "--jobs",
             type=int,
             default=min(8, os.cpu_count() or 1),
-            help="Lean files at a time; also the TTGIR frontend's P0-6 processes (each Lean "
-            "file gets LKV_LEAN_THREADS threads, default max(2, CPUs // jobs))",
+            help="Lean files at a time; also the TTGIR frontend's processes (its P0, "
+            "P0-6 and P1-2 translations); each Lean file gets LKV_LEAN_THREADS threads, "
+            "default max(2, CPUs // jobs)",
         )
         p.add_argument(
             "--timeout", type=int, default=3600, help="seconds per Lean file"
@@ -1921,7 +1930,10 @@ def main():
                 "translation: P1-2)",
             )
             p.add_argument(
-                "--no-p1", dest="p1", action="store_false", help="skip the P1 checks"
+                "--no-p1",
+                dest="p1",
+                action="store_false",
+                help="skip the P1 checks (and the frontends' P1 pass)",
             )
     p = sub.add_parser("export")
     p.add_argument("rev")

@@ -45,13 +45,14 @@ blocking wait idiom); `srcs`: the strong loads it derives from. Uniform data, th
 base of a PASS (references/specs.md "P0-6"):
 * kernel parameters and constants (exact), ctaid and cluster rank (exact);
 * a weak global load, at an address uniform over the role, of a tensor the kernel never
-  writes (translate.writes, here ignoring stores of shared memory only and taking a value
-  loaded with a type of 32 bits or less as no pointer; by tensor name: that no other
-  tensor argument shares the storage of a written one is assumed, the callers check
-  storage only for metadata tensors); an integer one of a tensor in the policy's
-  `nb_meta` (the family hook's metadata tensors: recorded contents) is an exact metadata
-  `load` instead (mem.Memory._load, as in the P0 translation), so loops bounded by it
-  are exact KIR loops whose passes Lean counts;
+  writes (writes(): translate.writes, here ignoring stores of shared memory only and
+  taking a value loaded with a type of 32 bits or less as no pointer; by tensor name: that
+  no other tensor argument shares the storage of a written one is assumed, the callers
+  check storage only for metadata tensors; the policy's `nb_written`, where the caller
+  computed that write set to choose `nb_meta`, stands for it); an integer one of a tensor
+  in the policy's `nb_meta` (the family hook's metadata tensors: recorded contents) is an
+  exact metadata `load` instead (mem.Memory._load, as in the P0 translation), so loops
+  bounded by it are exact KIR loops whose passes Lean counts;
 * shared-memory data (a weak ld.shared, ldmatrix, a generic load of a shared address,
   the CLC response; a strong ld.shared is a strong load): a load at an address of class
   u (l, w) has class u (l, w), an ldmatrix at an address of class u or l class l.
@@ -1908,8 +1909,8 @@ def _translate(facts, text, entry, records, pol, module=None) -> None:
     locs, srclocs = T._locs(fn, pol)
     shared = {v.name for v in module.vars if v.space == "shared"}
     align = {v.name: v.align for v in module.vars + fn.vars if v.space == "shared"}
-    written = T.writes(text, entry, pol["params"], ignore=_shared_only, narrow=True,
-                       module=module)  # fmt: skip
+    written = (pol["nb_written"] if "nb_written" in pol
+               else writes(text, entry, pol["params"], module))  # fmt: skip
     mem = _Memory(cfg, pol["params"], pol["tensors"],
                   {**pol, "shared_symbols": shared, "records": records, "target": facts.target,
                    "shared_align": align, "dispatch": False,
@@ -1950,6 +1951,15 @@ def _translate(facts, text, entry, records, pol, module=None) -> None:
     loaded = {n["tensor"] for r in facts.roles for n in T._expr_nodes(r["body"])
               if n.get("e") == "load"}  # fmt: skip
     facts.meta = {t: pol["tensors"][t]["elem_bytes"] for t in sorted(loaded)}
+
+
+def writes(ptx_text: str, entry: str, params: list, module=None) -> list | None:
+    """The tensors the pass takes as written (module doc "Values"): translate.writes with
+    stores of shared memory only ignored and a value loaded with a type of 32 bits or less
+    taken as no pointer; None if unknown. The callers' metadata checks use it too (policy
+    `nb_written`). `module`: ptx_text already parsed (it is only read)."""
+    return T.writes(ptx_text, entry, params, ignore=_shared_only, narrow=True,
+                    module=module)  # fmt: skip
 
 
 def _shared_only(i) -> bool:
