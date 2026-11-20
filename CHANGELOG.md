@@ -192,3 +192,12 @@ First public release.
 - PTX translation: a warp-specialize capture the default stores in a branch on a
   uniform runtime condition or in a loop is no longer forwarded to the workers as if it
   always ran (it may not); the workers' loads of it are data.
+- Lean: one evaluation per input. emit_lean.py writes one `#lkv_check kernel <input>
+  <spec>...` per input (lean/KV/Command.lean): the compiled evaluator runs the input once,
+  prints the report and proves, per spec, `KV.Holds` or its negation from that one run,
+  with the trust of `native_decide` (which evaluates its decision the same way); before,
+  each spec's `native_decide` theorem evaluated the input again. `emit_lean.py
+  --legacy-theorems` keeps the earlier form and lkv.py reads both (THEOREM lines, or
+  refuted theorems). A spec's decision runs only that spec (`SpecId.holdsB`), the signed
+  overflow test of `wraps` uses the sign rule instead of big integers, and the heartbeat
+  limit is lifted for large KIRs. Verdicts are unchanged.

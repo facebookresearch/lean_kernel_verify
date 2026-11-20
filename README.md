@@ -9,8 +9,8 @@ decided in Lean 4, with no GPU and no hand-written model of the kernel: the kern
 real host code and compiler produce its PTX and IR on a CPU-only machine, a mechanical
 frontend turns one of them (TLX/Triton: the PTX by default; CuTe: the IR) into a small
 kernel IR (KIR), and Lean evaluates every role of
-every CTA on the concrete inputs of a case file and proves or refutes each spec by
-`native_decide`.
+every CTA on the concrete inputs of a case file and proves each spec or its negation
+from one native evaluation per input (the trust of `native_decide`).
 
 Verdicts cover the inputs of the case file, not every shape. LKV does not check
 numerics, performance, CUDA C++ kernels, or race and deadlock freedom in general
@@ -61,7 +61,7 @@ KIR (JSON): roles, structured control flow, exact-width integer expressions, eve
   |  frontend/kir.py checks the contract; frontend/emit_lean.py writes Lean
   v
 lean/KV: every role of every CTA evaluated per input into event traces, then per spec
-  |  theorem : KV.Holds .<spec> kernel input := by native_decide
+  |  per input one evaluation, then per spec the theorem KV.Holds .<spec> kernel input or its negation
   v
 report.md / report.json: a verdict per (variant, input, spec), findings at source file:line
 ```

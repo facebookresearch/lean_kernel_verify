@@ -26,11 +26,11 @@ reference for what each verdict means. The Lean definitions are the authority; e
   the data values. Findings that can be harmless depending on data or on how the
   kernel uses the result are **notes**: printed with the report, never a FAIL.
   The theorems prove exactly the FAIL-free Props, so notes do not affect them.
-- **Four outcomes.** PASS: the theorem is proved. FAIL: it is refuted and the
-  report lists a certain counterexample (`SpecResult.certain`), or the input's
+- **Four outcomes.** PASS: the theorem is proved. FAIL: its negation is proved and
+  the report lists a certain counterexample (`SpecResult.certain`), or the input's
   evaluation stopped at a certain error of the kernel ("Evaluation errors",
   kind `kernel error`). Refuted without either, a spec is neither proved nor
-  violated, and Lean prints `UNDECIDED <input> <spec>`: every spec of an input
+  violated (its negation holds of the model, with nothing certain behind it), and Lean prints `UNDECIDED <input> <spec>`: every spec of an input
   whose evaluation stops with a `model limit` or an `unexpected` error, a spec
   that finds nothing certain on an input with an out-of-bounds metadata load or
   an `assume` that does not hold ("Undecided specs"), P0-2 and P0-4 with nothing
@@ -61,9 +61,15 @@ reference for what each verdict means. The Lean definitions are the authority; e
   algorithm against mbarrier semantics is argued in Ledger.lean, not proved in
   Lean: a P0-2/P0-4 theorem says "the ledger finds no violation", not "no
   interleaving violates the protocol" (references/design.md, trust base).
-- Proof: `theorem _ : KV.Holds .<spec> kernel input := by native_decide`.
-  `native_decide` trusts the Lean compiler and the native `libKV.so` built from
-  the same sources (T1). The evaluator is total (no `partial`), so the theorem
+- Proof: `#lkv_check kernel input <specs>` (lean/KV/Command.lean) evaluates the
+  kernel on the input once, compiled and run as `native_decide` runs its decision,
+  adds the axiom that the evaluation's decisions are what it computed (Lean 4.34's
+  `native_decide` adds `e = true` the same way) and proves, per spec, the theorem
+  `KV.Holds .<spec> kernel input` (PASS) or its negation (FAIL, UNDECIDED) from it:
+  one evaluation per input whatever the number of specs (the form with one
+  `native_decide` theorem per spec, which evaluates the input once per spec, is
+  `emit_lean.py --legacy-theorems`). This trusts the Lean compiler and the native
+  `libKV.so` built from the same sources (T1). The evaluator is total (no `partial`), so the theorem
   statement has its intended meaning inside Lean's logic.
 
 ## Shared notions
@@ -856,8 +862,9 @@ the real frontend.
 ## P0-7 global waits reached, co-residency (`KV.Global.Holds`, kir.md change 18)
 
 Decided on a P0 KIR with sync tensors only (the PTX core's policy `gsync`, frontend_ptx.md
-"Global synchronization"), one theorem per input after P0-1..P0-5. The run is one launch of
-every CTA of the grid; every sync word starts at 0.
+"Global synchronization"), one theorem per input after P0-1..P0-5, from the same evaluation
+of the input (`#lkv_check ... gwait`). The run is one launch of every CTA of the grid; every
+sync word starts at 0.
 
 Evaluation (lean/KV/Eval.lean). The roles of a CTA run in order, the roles that put relay
 slots first; a relay slot is written once per CTA (trusted, as the ring's handshake delivers
@@ -1010,16 +1017,19 @@ come `VERDICT <input> <P0-n> PASS|FAIL` lines, for specs with notes
 counterexample `UNDECIDED <input> <P0-n>` lines. The counterexample finders
 (`<Spec>.issues`) evaluate the same per-object conditions as the Props; if a
 finder and the decision procedure ever disagree the verdict is printed as
-`INCONSISTENT`. `frontend/emit_lean.py` puts every report before the theorems,
-so a failing theorem's counterexample is printed first. A P0-6 KIR's file runs
-`#eval KV.runNb kernel input` instead (summary: named barrier operations, `nb_open`
-events and repeated regions reached, the arrivals the warp-ahead reading holds or may
-hold),
-a P1 KIR's `#eval KV.runP1 kernel input` (a summary part per P1 spec it names); their
-lines have the same form, with the labels `P0-6`, `P1-1`, `P1-2`.
+`INCONSISTENT`. `#lkv_check` prints the report of an input, then, once the input's
+theorems are in the environment, one `THEOREM <input> <label> PASS|FAIL` line per
+spec (`KV.Holds` proved, or its negation). A P0-6 KIR's file runs
+`#lkv_check_nb` instead (summary: named barrier operations, `nb_open` events and
+repeated regions reached, the arrivals the warp-ahead reading holds or may hold), a
+P1 KIR's `#lkv_check_p1` (a summary part per P1 spec it names); their lines have the
+same form, with the labels `P0-6`, `P1-1`, `P1-2`.
 
-`scripts/lkv.py` turns these into one outcome per (variant, input, spec): PASS;
-FAIL (refuted, no `UNDECIDED` line: a certain counterexample or a kernel error);
+`scripts/lkv.py` turns these into one outcome per (variant, input, spec), taking the
+verdict from the THEOREM line (a variant gets verdicts only if Lean reports no error,
+exits 0 and every (input, spec) has its THEOREM line; the report's `VERDICT` line must
+agree, else INCONSISTENT): PASS;
+FAIL (negation proved, no `UNDECIDED` line: a certain counterexample or a kernel error);
 ERROR (an `INCONSISTENT` verdict, an `UNDECIDED` line after an `unexpected`
 evaluation error, or a variant that failed to translate or check: a frontend error
 such as invalid KIR, a DSL version mismatch or a case annotation error, a Lean
@@ -1036,7 +1046,7 @@ spec's in its own section).
 ```bash
 python3 -I frontend/kir.py K.kir.json                    # contract check
 python3 -I frontend/emit_lean.py K.kir.json -o K.lean     # KIR -> Lean
-scripts/run_lean_check.sh K.lean                          # builds lean/KV if needed; exit != 0 iff a theorem is refuted or Lean fails
+scripts/run_lean_check.sh K.lean                          # builds lean/KV if needed; THEOREM lines per spec, exit != 0 iff Lean fails
 tests/lean/run_all.sh                                     # positive/negative controls for every spec
 ```
 
@@ -1077,10 +1087,10 @@ the input's evaluation, `eval_kind` its kind (`kernel`, `limit` or `unexpected`;
 in `variants_p1` the labels of the KIR's `p1_specs`, `P1-1` and/or `P1-2`)
 to:
 
-- `verdict`: `PASS` or `FAIL` as the theorem is proved or refuted, or `INCONSISTENT` if
+- `verdict`: `PASS` or `FAIL` as the theorem or its negation is proved, or `INCONSISTENT` if
   Lean's printed report does not say the same (a Layer 2 bug);
 - `outcome`: `PASS`, `FAIL`, `ERROR` or `UNDECIDED` ("Reports" above). Read this, not
-  `verdict`: a refuted theorem can be any of the last three;
+  `verdict`: a proved negation can be any of the last three;
 - `counterexamples`, `notes`: the lines Lean printed (on a spec it does not decide, the
   `not decided on this input` line comes first), each `{loc, context, msg, source,
   line_text}`, where `source` and `line_text` are the exported source line of `loc`

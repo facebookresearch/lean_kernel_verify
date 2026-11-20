@@ -71,16 +71,22 @@ def SpecId.Holds : SpecId → Run → Prop
   | .storeReuse, r => r.complete ∧ StoreReuse.Holds r
   | .gwait, r => Global.Holds r = true
 
-instance : (s : SpecId) → (r : Run) → Decidable (s.Holds r)
-  | .bounds, r => inferInstanceAs (Decidable (r.complete ∧ Bounds.Holds r))
-  | .tripCount, r => inferInstanceAs (Decidable (r.complete ∧ TripCount.Holds r))
-  | .coverage, r => inferInstanceAs (Decidable (r.complete ∧ Coverage.Holds r))
-  | .barrier, r => inferInstanceAs (Decidable (r.complete ∧ Barrier.Holds r))
-  | .maskElision, r => inferInstanceAs (Decidable (r.complete ∧ MaskElision.Holds r))
-  | .namedBarriers, r => inferInstanceAs (Decidable (r.complete ∧ NamedBarriers.Holds r))
-  | .tmemReuse, r => inferInstanceAs (Decidable (r.complete ∧ TmemReuse.Holds r))
-  | .storeReuse, r => inferInstanceAs (Decidable (r.complete ∧ StoreReuse.Holds r))
-  | .gwait, r => inferInstanceAs (Decidable (Global.Holds r = true))
+/-- The decision of `s.Holds r`, by an `if` chain: only the asked spec runs (a `match` on the
+enum compiles to code that evaluates every arm before the switch, so each spec's theorem ran
+every spec). -/
+def SpecId.holdsB (s : SpecId) (r : Run) : Bool :=
+  if s matches .bounds then r.complete && decide (Bounds.Holds r)
+  else if s matches .tripCount then r.complete && decide (TripCount.Holds r)
+  else if s matches .coverage then r.complete && decide (Coverage.Holds r)
+  else if s matches .barrier then r.complete && decide (Barrier.Holds r)
+  else if s matches .maskElision then r.complete && decide (MaskElision.Holds r)
+  else if s matches .namedBarriers then r.complete && decide (NamedBarriers.Holds r)
+  else if s matches .tmemReuse then r.complete && decide (TmemReuse.Holds r)
+  else if s matches .storeReuse then r.complete && decide (StoreReuse.Holds r)
+  else Global.Holds r
+
+instance (s : SpecId) (r : Run) : Decidable (s.Holds r) :=
+  decidable_of_iff (s.holdsB r = true) (by cases s <;> simp [SpecId.holdsB, SpecId.Holds])
 
 def RunHolds (s : SpecId) : Except EvalError Run → Prop
   | .ok r => s.Holds r
@@ -187,8 +193,10 @@ structure Report where
 /-- " in clusters (2,1,1)" for a cluster launch, else "". -/
 def clusterStr (h : Host) : String := if h.csize ≤ 1 then "" else s!" in clusters {pidStr h.cluster}"
 
-def runCase (k : Kernel) (i : Input) : Report :=
-  match eval k i with
+/-- The report of kernel `k` on input `i` from its evaluation `x` (`eval k i`; `checkAll` shares
+one evaluation between the report and the theorems, Command.lean). -/
+def reportOf (k : Kernel) (i : Input) (x : Except EvalError Run) : Report :=
+  match x with
   | .error e =>
     { kernel := k.kernel, input := i, error := some e, summary := "",
       results := (specsOf k).map fun s =>
@@ -208,18 +216,21 @@ def runCase (k : Kernel) (i : Input) : Report :=
         (if r.host.hasSync then s!"; global sync: {Global.summary r}" else ""),
       results := (specsOf k).map (·.result r Ls) }
 
+def runCase (k : Kernel) (i : Input) : Report := reportOf k i (eval k i)
+
 /-- The P1 specs a P1 KIR is decided for: those its `p1` names, else P1-1 iff it has a TMEM
 allocation (KIR change 10). -/
 def Kernel.p1Specs (k : Kernel) : List SpecId :=
   if k.p1.isEmpty then (if k.tmem.isSome then [.tmemReuse] else [])
   else SpecId.p1.filter fun s => k.p1.contains s.label
 
-/-- P1 specs of a P1 KIR (references/specs.md, "P1-1", "P1-2") on input `i`: the P1 summary
-line (P1-1: accesses, conflicting pairs, named barriers, blocked waits; P1-2: bulk stores,
-writes, unordered pairs), then each P1 spec's verdict, counterexamples and notes. -/
-def runP1 (k : Kernel) (i : Input) : Report :=
+/-- P1 specs of a P1 KIR (references/specs.md, "P1-1", "P1-2") on input `i` from its
+evaluation `x`: the P1 summary line (P1-1: accesses, conflicting pairs, named barriers,
+blocked waits; P1-2: bulk stores, writes, unordered pairs), then each P1 spec's verdict,
+counterexamples and notes. -/
+def reportP1Of (k : Kernel) (i : Input) (x : Except EvalError Run) : Report :=
   let specs := k.p1Specs
-  match eval k i with
+  match x with
   | .error e =>
     { kernel := k.kernel, input := i, error := some e, summary := "",
       results := specs.map fun s =>
@@ -247,11 +258,11 @@ def runP1 (k : Kernel) (i : Input) : Report :=
       (if stops.isEmpty then "" else s!"; {stops.size} role trace(s) stop at {stopReasons stops (detail := false)}, so {", ".intercalate (specs.map (·.label))} {if specs.length = 1 then "is" else "are"} not decided")
     return { kernel := k.kernel, input := i, error := none, summary, results := res }
 
-/-- P0-6 on a P0-6 KIR (references/specs.md, "P0-6") on input `i`: the summary line (named
-barrier operations, `nb_open` events, `nb_rep` regions reached), then the P0-6 verdict and
-its counterexamples. -/
-def runNb (k : Kernel) (i : Input) : Report :=
-  match eval k i with
+/-- P0-6 on a P0-6 KIR (references/specs.md, "P0-6") on input `i` from its evaluation `x`:
+the summary line (named barrier operations, `nb_open` events, `nb_rep` regions reached), then
+the P0-6 verdict and its counterexamples. -/
+def reportNbOf (k : Kernel) (i : Input) (x : Except EvalError Run) : Report :=
+  match x with
   | .error e =>
     { kernel := k.kernel, input := i, error := some e, summary := "",
       results := SpecId.nb.map fun s =>
@@ -263,6 +274,10 @@ def runNb (k : Kernel) (i : Input) : Report :=
     { kernel := k.kernel, input := i, error := none,
       summary := s!"grid {pidStr r.host.grid}{clusterStr r.host}: {r.ctas.size} CTA(s) x {k.roles.length} role(s); P0-6: {ops} named barrier operation(s), {opens} not counted (nb_open), {reps} repeated region(s) reached{heldStr}",
       results := SpecId.nb.map (·.result r #[]) }
+
+def runNb (k : Kernel) (i : Input) : Report := reportNbOf k i (eval k i)
+
+def runP1 (k : Kernel) (i : Input) : Report := reportP1Of k i (eval k i)
 
 /-- Counterexample lines, and note lines, printed per spec beyond one per loc. -/
 def maxShown : Nat := 12

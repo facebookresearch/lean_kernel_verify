@@ -64,11 +64,11 @@ report.md lists the variants whose P0-6 verdicts rest on the warp-ahead reading 
 barrier sites the pass could not count.
 
 A verdict is per (KIR variant, input, spec), and it has one of four outcomes:
-  PASS       the theorem `KV.Holds` was proved by native_decide (a variant gets verdicts
-             only if Lean's sole errors are refuted theorems and its exit status says the
-             same);
-  FAIL       a violation certain in the extracted model: the theorem was refuted with a
-             certain counterexample (each IR loc resolved to the line of the exported
+  PASS       the theorem `KV.Holds` was proved (lean/KV/Command.lean: one evaluation of the
+             input decides every spec, with the trust of native_decide; a variant gets
+             verdicts only if Lean reports no error and every (input, spec) has its theorem);
+  FAIL       a violation certain in the extracted model: the negation of `KV.Holds` was
+             proved, with a certain counterexample (each IR loc resolved to the line of the exported
              source), or the input's evaluation stopped at a certain error of the kernel
              (Lean's `evaluation error (kernel error)`: a failed device assert, a barrier
              index out of range, a loop that never ends, a negative grid);
@@ -77,8 +77,8 @@ A verdict is per (KIR variant, input, spec), and it has one of four outcomes:
              `evaluation error (unexpected)` (e.g. a `while` over `max_iters`, an IR
              inconsistency), or a variant that failed to translate or check (a frontend
              error, invalid KIR, a Lean error or timeout: every spec of each of its inputs);
-  UNDECIDED  not decided where LKV has a known limit, and not an error: the theorem was
-             refuted without a certain counterexample (Lean prints
+  UNDECIDED  not decided where LKV has a known limit, and not an error: the negation was
+             proved without a certain counterexample (Lean prints
              `UNDECIDED <input> <spec>`: an `evaluation error (model limit)` such as a
              division by zero, a role trace stopped at an out-of-bounds metadata load
              or a model assumption (KIR `assume`) that does not hold, with nothing
@@ -660,6 +660,10 @@ EVAL_CONSEQUENCE = re.compile(
     r"[^()]*\)$"
 )
 MORE = re.compile(r"\.\.\. (\d+) more$")
+# The theorem `#lkv_check` proved for a spec (lean/KV/Command.lean): `KV.Holds` (PASS) or its
+# negation (FAIL), from the input's one evaluation.
+THEOREM_LINE = re.compile(r"^THEOREM (\S+) (P[01]-\d) (PASS|FAIL)$", re.M)
+# A refuted per-spec native_decide theorem (the --legacy-theorems form of emit_lean.py).
 REFUTED = re.compile(
     r"error: Tactic `native_decide` evaluated that the proposition\s+"
     r"KV\.Holds KV\.SpecId\.(\w+) kernel input(\d+)_\S*\s+is false"
@@ -719,19 +723,26 @@ def parse_report(text, names):
     return inputs
 
 
-def parse_lean(text, k, status):
-    """Per input of KIR `k`: every spec's verdict (its native_decide theorem, FAIL iff
-    refuted), its outcome (PASS; FAIL for a refuted theorem Lean does not mark `UNDECIDED`:
-    a certain counterexample or a kernel error; ERROR for an INCONSISTENT verdict and,
-    after an unexpected evaluation error, for an `UNDECIDED` one; else UNDECIDED: a known
-    limit), the report's counterexamples and notes. Raises RuntimeError on any other Lean
-    error, on an exit status that disagrees with the refuted theorems (e.g. Lean killed
-    before checking them all), on a note count the report does not list and on an
-    `UNDECIDED` proved theorem."""
-    names = [i["name"] for i in k["case"]["inputs"]]
-    inputs = parse_report(text, names)
-    refuted = {(names[int(i)], SPECS[spec]) for spec, i in REFUTED.findall(text)}
+def theorem_verdicts(text, names, labels, status):
+    """(input, label) -> PASS | FAIL: the theorem Lean proved for the spec. `#lkv_check` output
+    (THEOREM lines): `KV.Holds` or its negation for every spec of every input, no Lean error,
+    exit status 0. The --legacy-theorems form (no THEOREM line): FAIL iff the spec's
+    native_decide theorem is refuted, no other Lean error, exit status 1 iff one is."""
     errors = len(re.findall(r"^\S+:\d+:\d+: error", text, re.M))
+    proved = THEOREM_LINE.findall(text)
+    if proved:
+        if errors:
+            raise RuntimeError(f"Lean reported {errors} error(s)")
+        if status != 0:
+            raise RuntimeError(f"Lean exited with status {status}")
+        got = {(n, label): v for n, label, v in proved}
+        missing = [(n, lb) for n in names for lb in labels if (n, lb) not in got]
+        if missing:
+            raise RuntimeError(
+                f"no theorem for {len(missing)} (input, spec) pair(s), e.g. {missing[0]}"
+            )
+        return got
+    refuted = {(names[int(i)], SPECS[spec]) for spec, i in REFUTED.findall(text)}
     if errors != len(refuted):
         raise RuntimeError(
             f"Lean reported {errors - len(refuted)} error(s) besides refuted theorems"
@@ -740,10 +751,30 @@ def parse_lean(text, k, status):
         raise RuntimeError(
             f"Lean exited with status {status} and {len(refuted)} refuted theorem(s)"
         )
+    return {
+        (n, lb): "FAIL" if (n, lb) in refuted else "PASS"
+        for n in names
+        for lb in labels
+    }
+
+
+def parse_lean(text, k, status):
+    """Per input of KIR `k`: every spec's verdict (its theorem: `KV.Holds` proved, PASS, or its
+    negation, FAIL; `theorem_verdicts`), its outcome (PASS; FAIL for a FAIL theorem Lean does
+    not mark `UNDECIDED`: a certain counterexample or a kernel error; ERROR for an
+    INCONSISTENT verdict and, after an unexpected evaluation error, for an `UNDECIDED` one;
+    else UNDECIDED: a known limit), the report's counterexamples and notes. Raises
+    RuntimeError on any other Lean error, on an exit status that disagrees with the theorems
+    (e.g. Lean killed before checking them all), on a missing theorem, on a note count the
+    report does not list and on an `UNDECIDED` proved theorem."""
+    names = [i["name"] for i in k["case"]["inputs"]]
+    inputs = parse_report(text, names)
+    labels = kir_labels(k)
+    theorems = theorem_verdicts(text, names, labels, status)
     for n, inp in inputs.items():
-        for label in kir_labels(k):
+        for label in labels:
             s = inp["specs"].setdefault(label, new_spec())
-            theorem = "FAIL" if (n, label) in refuted else "PASS"
+            theorem = theorems[(n, label)]
             # The theorem is the verdict; the #eval report must agree with it.
             s["verdict"] = theorem if s.pop("report") == theorem else "INCONSISTENT"
             undecided = s.pop("lean_undecided")
@@ -1644,7 +1675,7 @@ def markdown(report):
     out += [""] + md_result(report) + [""]
     out += [
         "Each verdict is per compiled variant, concrete input and spec, for that input only",
-        "(not all shapes). PASS: its theorem `KV.Holds` is proved by `native_decide`. FAIL:",
+        "(not all shapes). PASS: its theorem `KV.Holds` is proved (one native evaluation per input). FAIL:",
         "a violation certain in the extracted model (a counterexample, or a certain error of",
         "the kernel that stops the evaluation). ERROR: LKV, the case or the environment",
         "failed (a frontend or Lean failure, an INCONSISTENT verdict, an unexpected",

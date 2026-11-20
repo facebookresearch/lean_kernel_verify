@@ -5,7 +5,7 @@ description:
   in Lean 4 with no hand-written kernel model: on a CPU-only machine the real
   host code and compiler produce the PTX and IR, a sliced op-table frontend
   turns one of them into KIR (TLX/Triton: the PTX by default), and Lean decides
-  per case input, by native_decide,
+  per case input, as native_decide does,
   P0-1 bounds and address wrap, P0-2 role trip counts (hangs), P0-3 output
   coverage exactly once, P0-4 mbarrier protocol (parity, expect_tx bytes),
   P0-5 mask elision on host-selected fast paths and P0-6 named barriers
@@ -26,7 +26,8 @@ six P0 safety specs (and, reported apart, two P1 specs), on the concrete inputs
 of a case file, with no model of the kernel: the real host code and compiler
 produce the PTX and IR on a CPU-only machine, a mechanical frontend turns one of
 them into KIR (TLX/Triton: the PTX by default; CuTe: the IR), and Lean proves or
-refutes each verdict as a `native_decide` theorem.
+refutes each verdict as a theorem (one native evaluation per input decides every
+spec, with the trust of `native_decide`).
 
 **Use it** to formally check a Blackwell kernel, or a fix against its base, for
 hangs, out-of-bounds or wrapped addresses, missing or duplicate output writes,
@@ -68,8 +69,10 @@ KIR JSON per compiled flag set: roles, structured control flow, exact-width inte
   |   group, shared-memory and tensormap write and named-barrier events; P1-2)
   v
 Layer 2: lean/KV evaluates every role of every CTA per input -> event traces
-  |   theorem : KV.Holds .<spec> kernel input := by native_decide   (P0 KIR: 5 specs
-  |             x inputs; P0-6 KIR: .namedBarriers; P1 KIR: .tmemReuse / .storeReuse)
+  |   #lkv_check kernel input <specs>: one evaluation per input, then per spec the theorem
+  |   KV.Holds .<spec> kernel input or its negation (P0 KIR: P0-1..P0-5, with sync tensors
+  |   also P0-7 .gwait; P0-6 KIR #lkv_check_nb: .namedBarriers; P1 KIR #lkv_check_p1:
+  |   .tmemReuse / .storeReuse)
   v
 report.md / report.json: verdict per (variant, input, spec), findings at source file:line;
   P0-6 with the P0 specs; P1-1 and P1-2 each in a section of its own
@@ -229,9 +232,10 @@ applicable", and the legacy TTGIR translation and the CuTe frontend do not check
 
 **How a verdict is decided.** Each host flag set compiles to its own KIR
 variant, paired with the inputs that select it. For each (variant, input, spec),
-lkv proves or refutes `KV.Holds .<spec> kernel input` by `native_decide`, over
+lkv proves `KV.Holds .<spec> kernel input` or its negation from one native evaluation
+of the input (lean/KV/Command.lean: the trust of `native_decide`), over
 an exact `BitVec` evaluation of the KIR: PASS iff the theorem is proved; a
-refuted theorem is a FAIL if Lean lists a certain counterexample for it (or the
+proved negation is a FAIL if Lean lists a certain counterexample for it (or the
 evaluation stopped at a certain kernel error), an ERROR if LKV failed to decide
 it, else UNDECIDED (a known limit). Roles are not interleaved: P0-2 and P0-4 are
 stated over the phase ledger of each cluster (of each CTA without clusters;
@@ -261,7 +265,9 @@ A verdict depends on exactly these items (`design.md`, "Trust base"):
    `tensormap.cp_fenceproxy` wrote: assumed, not checked, that no other role rewrites
    that slot and that its role does not while a load through it is in flight (P1-2
    checks that for stores).
-3. **`native_decide` (T1)**: the Lean compiler and the native `libKV.so`.
+3. **`native_decide` (T1)**: the Lean compiler and the native `libKV.so` (`#lkv_check`
+   adds, per input, the axiom that the compiled evaluation's decisions are what it
+   computed, as `native_decide` adds `e = true`).
 4. **The ledger algorithm** for P0-2 and P0-4, argued sound in Ledger.lean but
    not proved: a PASS there means "the ledger found no violation".
 5. **P1-1 only:** the P1 op-table rows (TMEM footprints, the scale-factor

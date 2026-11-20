@@ -12,8 +12,9 @@
 # 2. For every tests/lean/*.kir.json fixture: kir.py accepts it, emit_lean.py turns it into
 #    Lean, scripts/run_lean_check.sh checks that file, and
 #    * the VERDICT lines printed by KV.runCase equal expected.txt (every input, every spec);
-#    * the theorems native_decide refutes are exactly the expected FAILs, there are no
-#      other Lean errors, and lean exits non-zero iff some FAIL is expected;
+#    * the THEOREM lines of #lkv_check (lean/KV/Command.lean: `KV.Holds` proved for a PASS,
+#      its negation for a FAIL) equal the same verdicts, there are no Lean errors, and lean
+#      exits 0;
 #    * the report contains the counterexample and note text listed in
 #      expected_messages.txt (notes are printed as "note: ..." lines and never change a
 #      verdict, so a PASS row with an expected note checks that a finding stays a note);
@@ -46,6 +47,24 @@ mkdir -p "$OUT"
 failures=0
 bad() { echo "run_all: FAIL: $*"; failures=$((failures + 1)); }
 
+# check_theorems NAME OUT WANT STATUS [LABEL]: the THEOREM lines of OUT (with LABEL, those of
+# that spec) are the VERDICT lines WANT (one theorem per input and spec, the negation for a
+# FAIL), no Lean error, exit status 0.
+check_theorems() {
+  local want_thm got_thm nerr
+  # shellcheck disable=SC2001  # a per-line anchor
+  want_thm="$(sed 's/^VERDICT /THEOREM /' <<<"$3" | sort)"
+  got_thm="$(grep "^THEOREM [^ ]* ${5:-[^ ]*} " "$2" | sort)"
+  nerr="$(grep -c ': error' "$2")"
+  if [[ "$want_thm" != "$got_thm" ]] || (( nerr != 0 )); then
+    bad "$1: theorems differ from the expected verdicts, or Lean errors ($nerr errors; see $2)"
+    diff <(echo "$want_thm") <(echo "$got_thm") | grep '^[<>]' | sed 's/^/    /'
+  fi
+  if (( $4 != 0 )); then
+    bad "$1: lean exit status $4"
+  fi
+}
+
 python3 -I "$T/kir_negative.py" || bad "kir_negative.py"
 "$S/scripts/build_lean.sh" >/dev/null || { bad "scripts/build_lean.sh"; exit 1; }
 
@@ -72,16 +91,7 @@ for f in "$T"/*.kir.json; do
   fi
   nverdicts=$((nverdicts + $(grep -c . <<<"$want")))
 
-  want_thm="$(awk -v f="$n" 'BEGIN { split("bounds tripCount coverage barrier maskElision", s, " ") }
-    $1 == f { for (i = 3; i <= 7; i++) if ($i == "FAIL") printf "%s %s\n", s[i - 2], $2 }' "$T/expected.txt" | sort)"
-  got_thm="$(sed -n 's/^ *KV\.Holds KV\.SpecId\.\([A-Za-z]*\) kernel input[0-9]*_\(.*\)$/\1 \2/p' "$OUT/$n.out" | sort)"
-  nerr="$(grep -c ': error' "$OUT/$n.out")"
-  if [[ "$want_thm" != "$got_thm" ]] || (( nerr != $(grep -c . <<<"$got_thm") )); then
-    bad "$n: refuted theorems differ from the expected FAILs, or other Lean errors ($nerr errors; see $OUT/$n.out)"
-  fi
-  if (( (status != 0) != ($(grep -c . <<<"$want_thm") > 0) )); then
-    bad "$n: lean exit status $status does not match the expected verdicts"
-  fi
+  check_theorems "$n" "$OUT/$n.out" "$want" "$status"
 
   while IFS=' ' read -r fx msg; do
     [[ "$fx" == "$n" ]] || continue
@@ -118,15 +128,7 @@ for f in "$P1"/*.kir.json; do
     diff <(echo "$want") <(echo "$got") | grep '^[<>]' | sed 's/^/    /'
   fi
   nverdicts=$((nverdicts + $(grep -c . <<<"$want")))
-  want_thm="$(awk -v f="$n" '$1 == f && $3 == "FAIL" { printf "tmemReuse %s\n", $2 }' "$P1/expected.txt" | sort)"
-  got_thm="$(sed -n 's/^ *KV\.Holds KV\.SpecId\.\([A-Za-z]*\) kernel input[0-9]*_\(.*\)$/\1 \2/p' "$OUT/p1_$n.out" | sort)"
-  nerr="$(grep -c ': error' "$OUT/p1_$n.out")"
-  if [[ "$want_thm" != "$got_thm" ]] || (( nerr != $(grep -c . <<<"$got_thm") )); then
-    bad "p1/$n: refuted theorems differ from the expected FAILs, or other Lean errors ($nerr errors; see $OUT/p1_$n.out)"
-  fi
-  if (( (status != 0) != ($(grep -c . <<<"$want_thm") > 0) )); then
-    bad "p1/$n: lean exit status $status does not match the expected verdicts"
-  fi
+  check_theorems "p1/$n" "$OUT/p1_$n.out" "$want" "$status" P1-1
   while IFS=' ' read -r fx msg; do
     [[ "$fx" == "$n" ]] || continue
     grep -qF -- "$msg" "$OUT/p1_$n.out" || bad "p1/$n: report lacks: $msg"
@@ -141,7 +143,7 @@ for f in "$P1"/*.kir.json; do
   done < <(grep -v '^#' "$P1/report_checks.txt")
 done
 
-# P1-2 fixtures: one P1-2 verdict per input (KV.runP1, theorem KV.Holds .storeReuse).
+# P1-2 fixtures: one P1-2 verdict per input (#lkv_check_p1, theorem KV.Holds .storeReuse).
 P12="$T/p1_2"
 for f in "$P12"/*.kir.json; do
   n="$(basename "$f" .kir.json)"
@@ -161,15 +163,7 @@ for f in "$P12"/*.kir.json; do
     diff <(echo "$want") <(echo "$got") | grep '^[<>]' | sed 's/^/    /'
   fi
   nverdicts=$((nverdicts + $(grep -c . <<<"$want")))
-  want_thm="$(awk -v f="$n" '$1 == f && $3 == "FAIL" { printf "storeReuse %s\n", $2 }' "$P12/expected.txt" | sort)"
-  got_thm="$(sed -n 's/^ *KV\.Holds KV\.SpecId\.\([A-Za-z]*\) kernel input[0-9]*_\(.*\)$/\1 \2/p' "$OUT/p1_2_$n.out" | sort)"
-  nerr="$(grep -c ': error' "$OUT/p1_2_$n.out")"
-  if [[ "$want_thm" != "$got_thm" ]] || (( nerr != $(grep -c . <<<"$got_thm") )); then
-    bad "p1_2/$n: refuted theorems differ from the expected FAILs, or other Lean errors ($nerr errors; see $OUT/p1_2_$n.out)"
-  fi
-  if (( (status != 0) != ($(grep -c . <<<"$want_thm") > 0) )); then
-    bad "p1_2/$n: lean exit status $status does not match the expected verdicts"
-  fi
+  check_theorems "p1_2/$n" "$OUT/p1_2_$n.out" "$want" "$status" P1-2
   while IFS=' ' read -r fx msg; do
     [[ "$fx" == "$n" ]] || continue
     grep -qF -- "$msg" "$OUT/p1_2_$n.out" || bad "p1_2/$n: report lacks: $msg"
@@ -186,7 +180,7 @@ done
 python3 -I "$P12/pairs_eq.py" "$OUT/p1_2_pairs" "$P12"/*.kir.json ||
   bad "p1_2: StoreReuse.pairs differs from its definition (pairs_eq.py)"
 
-# P0-6 fixtures: one P0-6 verdict per input (KV.runNb, theorem KV.Holds .namedBarriers).
+# P0-6 fixtures: one P0-6 verdict per input (#lkv_check_nb, theorem KV.Holds .namedBarriers).
 NB="$T/nb"
 for f in "$NB"/*.kir.json; do
   n="$(basename "$f" .kir.json)"
@@ -206,15 +200,7 @@ for f in "$NB"/*.kir.json; do
     diff <(echo "$want") <(echo "$got") | grep '^[<>]' | sed 's/^/    /'
   fi
   nverdicts=$((nverdicts + $(grep -c . <<<"$want")))
-  want_thm="$(awk -v f="$n" '$1 == f && $3 == "FAIL" { printf "namedBarriers %s\n", $2 }' "$NB/expected.txt" | sort)"
-  got_thm="$(sed -n 's/^ *KV\.Holds KV\.SpecId\.\([A-Za-z]*\) kernel input[0-9]*_\(.*\)$/\1 \2/p' "$OUT/nb_$n.out" | sort)"
-  nerr="$(grep -c ': error' "$OUT/nb_$n.out")"
-  if [[ "$want_thm" != "$got_thm" ]] || (( nerr != $(grep -c . <<<"$got_thm") )); then
-    bad "nb/$n: refuted theorems differ from the expected FAILs, or other Lean errors ($nerr errors; see $OUT/nb_$n.out)"
-  fi
-  if (( (status != 0) != ($(grep -c . <<<"$want_thm") > 0) )); then
-    bad "nb/$n: lean exit status $status does not match the expected verdicts"
-  fi
+  check_theorems "nb/$n" "$OUT/nb_$n.out" "$want" "$status" P0-6
   while IFS=' ' read -r fx msg; do
     [[ "$fx" == "$n" ]] || continue
     grep -qF -- "$msg" "$OUT/nb_$n.out" || bad "nb/$n: report lacks: $msg"
@@ -251,16 +237,7 @@ for f in "$GS"/*.kir.json; do
     diff <(echo "$want") <(echo "$got") | grep '^[<>]' | sed 's/^/    /'
   fi
   nverdicts=$((nverdicts + $(grep -c . <<<"$want")))
-  want_thm="$(awk -v f="$n" 'BEGIN { split("bounds tripCount coverage barrier maskElision gwait", s, " ") }
-    $1 == f { for (i = 3; i <= 8; i++) if ($i == "FAIL") printf "%s %s\n", s[i - 2], $2 }' "$GS/expected.txt" | sort)"
-  got_thm="$(sed -n 's/^ *KV\.Holds KV\.SpecId\.\([A-Za-z]*\) kernel input[0-9]*_\(.*\)$/\1 \2/p' "$OUT/gsync_$n.out" | sort)"
-  nerr="$(grep -c ': error' "$OUT/gsync_$n.out")"
-  if [[ "$want_thm" != "$got_thm" ]] || (( nerr != $(grep -c . <<<"$got_thm") )); then
-    bad "gsync/$n: refuted theorems differ from the expected FAILs, or other Lean errors ($nerr errors; see $OUT/gsync_$n.out)"
-  fi
-  if (( (status != 0) != ($(grep -c . <<<"$want_thm") > 0) )); then
-    bad "gsync/$n: lean exit status $status does not match the expected verdicts"
-  fi
+  check_theorems "gsync/$n" "$OUT/gsync_$n.out" "$want" "$status"
   while IFS=' ' read -r fx msg; do
     [[ "$fx" == "$n" ]] || continue
     grep -qF -- "$msg" "$OUT/gsync_$n.out" || bad "gsync/$n: report lacks: $msg"
@@ -271,4 +248,4 @@ if (( failures )); then
   echo "run_all: $failures check(s) failed ($nfix fixtures, outputs in $OUT)"
   exit 1
 fi
-echo "run_all: OK: $nfix fixtures, $nverdicts (input, spec) verdicts as expected, refuted theorems match, counterexample, note and report-check texts as expected"
+echo "run_all: OK: $nfix fixtures, $nverdicts (input, spec) verdicts as expected, theorems match, counterexample, note and report-check texts as expected"

@@ -105,8 +105,10 @@ def binBV {w : Nat} (o : BinOp) (a b : BitVec w) : Option (BitVec w) :=
 (a shift by `w` or more bits wraps unless `a = 0`). -/
 def wraps {w : Nat} (o : BinOp) (a b r : BitVec w) : Bool :=
   match o with
-  | .add => r.toInt != a.toInt + b.toInt
-  | .sub => r.toInt != a.toInt - b.toInt
+  -- add / sub by the sign rule (the same test as `r.toInt != a.toInt ± b.toInt`, without the
+  -- big integers 2^w that dominated the evaluation of address vectors)
+  | .add => a.msb == b.msb && r.msb != a.msb
+  | .sub => a.msb != b.msb && r.msb != a.msb
   | .mul => r.toInt != a.toInt * b.toInt
   | .shl => r.toInt != a.toInt * 2 ^ min b.toNat w
   | _ => false

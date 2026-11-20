@@ -296,6 +296,12 @@ EVAL_ERRORS = {
         "the case or LKV needs a fix: no spec is decided on this input",
     ),
 }
+# LEAN_OUT as `#lkv_check` prints it (lean/KV/Command.lean): no refuted theorem, one THEOREM
+# line per spec (the negation of P0-3's `KV.Holds` is proved), exit status 0.
+THEOREMS = "".join(
+    f"THEOREM a {label} {'FAIL' if label == 'P0-3' else 'PASS'}\n" for label in SPECS
+)
+LKV_CHECK_OUT = LEAN_OUT.replace(REFUTATION, "") + THEOREMS
 # LEAN_OUT with every spec proved.
 PASSING = (
     LEAN_OUT.replace(REFUTATION, "")
@@ -373,6 +379,47 @@ class Unit(unittest.TestCase):
         self.assertIn(
             "witnessed by a feasible schedule", inp["specs"]["P0-3"]["notes"][-1]["msg"]
         )
+
+    def test_lkv_check_theorems_are_the_verdicts(self):
+        (inp,) = lkv_py.parse_lean(LKV_CHECK_OUT, ONE_INPUT, 0)
+        (legacy,) = lkv_py.parse_lean(LEAN_OUT, ONE_INPUT, 1)
+        self.assertEqual(inp, legacy)
+        self.assertEqual(inp["specs"]["P0-3"]["verdict"], "FAIL")
+        self.assertEqual(inp["specs"]["P0-1"]["verdict"], "PASS")
+        # Any Lean error or a non-zero exit status: no verdicts.
+        with self.assertRaisesRegex(RuntimeError, "exited with status 1"):
+            lkv_py.parse_lean(LKV_CHECK_OUT, ONE_INPUT, 1)
+        other_error = LKV_CHECK_OUT + "/tmp/k.lean:9:0: error: unknown identifier\n"
+        with self.assertRaisesRegex(RuntimeError, "1 error"):
+            lkv_py.parse_lean(other_error, ONE_INPUT, 1)
+        # Every (input, spec) needs its theorem.
+        missing = LKV_CHECK_OUT.replace("THEOREM a P0-5 PASS\n", "")
+        with self.assertRaisesRegex(RuntimeError, "no theorem for 1"):
+            lkv_py.parse_lean(missing, ONE_INPUT, 0)
+        # The report says FAIL but `KV.Holds` was proved: INCONSISTENT, an ERROR.
+        proved = LKV_CHECK_OUT.replace("THEOREM a P0-3 FAIL", "THEOREM a P0-3 PASS")
+        (inp,) = lkv_py.parse_lean(proved, ONE_INPUT, 0)
+        self.assertEqual(inp["specs"]["P0-3"]["verdict"], "INCONSISTENT")
+        self.assertEqual(inp["specs"]["P0-3"]["outcome"], "ERROR")
+        with self.assertRaisesRegex(RuntimeError, "UNDECIDED, but proved"):
+            lkv_py.parse_lean(LKV_CHECK_OUT + "UNDECIDED a P0-1\n", ONE_INPUT, 0)
+
+    def test_lkv_check_p0_7_theorem(self):
+        # kir.md change 18: a KIR with sync tensors also decides P0-7 (`gwait`) in the input's
+        # one evaluation; its THEOREM line is required like every other spec's.
+        k = {**ONE_INPUT, "tensors": [{"name": "w", "sync": {"width": 64}}]}
+        text = (
+            LKV_CHECK_OUT.replace(
+                "VERDICT a P0-1 PASS",
+                "P0-7 global waits reached, co-residency: PASS\nVERDICT a P0-1 PASS",
+            ).replace("VERDICT a P0-5 PASS", "VERDICT a P0-5 PASS\nVERDICT a P0-7 PASS")
+            + "THEOREM a P0-7 PASS\n"
+        )
+        (inp,) = lkv_py.parse_lean(text, k, 0)
+        self.assertEqual(inp["specs"]["P0-7"]["verdict"], "PASS")
+        self.assertEqual(inp["specs"]["P0-7"]["outcome"], "PASS")
+        with self.assertRaisesRegex(RuntimeError, r"no theorem for 1 .*'P0-7'"):
+            lkv_py.parse_lean(text.replace("THEOREM a P0-7 PASS\n", ""), k, 0)
 
     def report(self, text, status, **extra):
         """A report of two variants that both printed `text`."""

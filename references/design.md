@@ -152,8 +152,12 @@ constructs (e.g. lane-divergent barrier ops, indirect calls) are hard errors.
 - `Spec/*.lean`: the six P0 specs and the two P1 specs (`TmemReuse.lean`,
   `StoreReuse.lean`) as `Prop`s over traces, each with a `Decidable` instance, plus a
   counterexample extractor and a note extractor for reporting.
-- Verdicts are theorems closed by `native_decide` (T1: trusts the Lean compiler)
-  for each concrete input in the case file. There are no symbolic obligations:
+- Verdicts are theorems for each concrete input in the case file (T1: trusts the Lean
+  compiler). `#lkv_check` (lean/KV/Command.lean) evaluates the kernel on the input once,
+  compiled as `native_decide` compiles its decision, adds the axiom that the evaluation's
+  decisions of the specs are the values it computed (Lean 4.34's `native_decide` adds
+  `e = true` the same way), and derives per spec `KV.Holds` or its negation from it in the
+  kernel; before, each spec's `native_decide` theorem evaluated the input again. There are no symbolic obligations:
   integer semantics, wraparound included, are evaluated exactly on the concrete
   inputs.
 - A spec FAILs only on a violation that is certain in the extracted model,
@@ -256,7 +260,8 @@ it names in `elision_flags` the flags that select a mask-elided fast path.
    `tensormap.cp_fenceproxy` wrote: assumed, not checked, that no other role rewrites
    that slot and that its role does not while a load through it is in flight
    (`frontend_ptx.md`, "TMA descriptors").
-3. `native_decide` (Lean compiler) for whole-trace verdicts.
+3. `native_decide`'s trust (Lean compiler; one compiled evaluation per input) for
+   whole-trace verdicts.
 4. The phase ledger (`lean/KV/Spec/Ledger.lean`) for P0-2 and P0-4: its
    classification of waits (happens-before over the role traces, each role taken
    as one thread in lockstep), its lockstep phase contents (fixed per-role

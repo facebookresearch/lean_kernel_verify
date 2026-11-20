@@ -13,3 +13,4 @@ See references/design.md, references/kir.md and references/specs.md.
 import KV.IR
 import KV.Eval
 import KV.Check
+import KV.Command
