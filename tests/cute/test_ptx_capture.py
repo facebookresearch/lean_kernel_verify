@@ -15,9 +15,11 @@ addresses cannot tell (a zero-length tensor; one tensor passed under two jit nam
 Needs the CuTe DSL (no GPU): buck target :test_ptx_capture.
 """
 
+import ctypes
 import hashlib
 import importlib.metadata
 import json
+import platform
 import re
 import sys
 import tempfile
@@ -111,6 +113,17 @@ def entries(ptx: str) -> list:
     return re.findall(r"\.entry\s+(\w+)", ptx)
 
 
+def skip_unless_cute_dsl_loads(test: unittest.TestCase) -> None:
+    """Skip a case that loads the CuTe DSL where its native MLIR library cannot load:
+    the aarch64 build links libcuda.so.1, which CPU-only hosts lack."""
+    if platform.machine() == "x86_64":
+        return
+    try:
+        ctypes.CDLL("libcuda.so.1")
+    except OSError as error:
+        test.skipTest(str(error))
+
+
 class PtxCaptureTest(unittest.TestCase):
     def assert_compiles(self, recorded: dict, tvm_ffi: list):
         self.assertEqual([c["ptx"]["tvm_ffi"] for c in recorded["compiles"]], tvm_ffi)
@@ -139,6 +152,7 @@ class PtxCaptureTest(unittest.TestCase):
         self.assertEqual(record["kernel_attrs"], {"8": 232448 - static, "14": 1})
 
     def test_probe_kernel(self):
+        skip_unless_cute_dsl_loads(self)
         case = json.loads((SKILL / "tests/e2e/cases/probe_cute.json").read_text())
         case |= {
             "dsl": DSL,
@@ -185,6 +199,7 @@ class PtxCaptureTest(unittest.TestCase):
             self.assertNotIn("jit_params_error", r)
 
     def test_tma_descriptor_with_and_without_tvm_ffi(self):
+        skip_unless_cute_dsl_loads(self)
         src = Path(tempfile.mkdtemp(prefix="lkv_ptx_capture_src_"))
         (src / "lkv_tma_kernels.py").write_text(TMA_KERNELS)
         case = {
@@ -251,6 +266,7 @@ class PtxCaptureTest(unittest.TestCase):
 
     def test_unexact_parameter_names_are_refused(self):
         # (Runs after the dumps above: test methods run in name order.)
+        skip_unless_cute_dsl_loads(self)
         from ...frontend.cute import host_patches  # noqa: PLC0415
 
         m = {"arg": "m", "leaf": "m"}
@@ -274,6 +290,7 @@ class PtxCaptureTest(unittest.TestCase):
 
     def test_unmodeled_runtime_functions_stop_the_engine(self):
         # (Runs after the dumps above: test methods run in name order.)
+        skip_unless_cute_dsl_loads(self)
         from ...frontend.cute import host_patches  # noqa: PLC0415
 
         class Engine:

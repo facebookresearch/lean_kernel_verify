@@ -13,9 +13,11 @@ inline-PTX and strided-metadata tests also check the Lean verdicts of their KIR
 (frontend/emit_lean.py, scripts/run_lean_check.sh) when the Lean toolchain is installed.
 """
 
+import ctypes
 import importlib.metadata
 import json
 import os
+import platform
 import re
 import subprocess
 import tempfile
@@ -166,6 +168,17 @@ def elected(ptx: str, instr: str) -> list:
     return out
 
 
+def skip_unless_cute_dsl_loads(test: unittest.TestCase) -> None:
+    """Skip a case that loads the CuTe DSL where its native MLIR library cannot load:
+    the aarch64 build links libcuda.so.1, which CPU-only hosts lack."""
+    if platform.machine() == "x86_64":
+        return
+    try:
+        ctypes.CDLL("libcuda.so.1")
+    except OSError as error:
+        test.skipTest(str(error))
+
+
 class ElectedTest(unittest.TestCase):
     def test_only_a_guard_on_the_elect_predicate_counts(self):
         elect = "elect.sync %r1|%p1, -1;\n"
@@ -198,6 +211,7 @@ class CuteFrontendTest(unittest.TestCase):
                      dsl="0.0")  # fmt: skip
 
     def test_tma_producer_consumer(self):
+        skip_unless_cute_dsl_loads(self)
         report, kirs, recorded = run_case("tma", "run_tma_pipeline", "args_tma_pipeline", [{"name": "rows100", "rows": 100}],
                                           {"host": {"intended_writes": {"mOut": "all"}}})  # fmt: skip
         self.assert_valid(report)
@@ -249,6 +263,7 @@ class CuteFrontendTest(unittest.TestCase):
         )
 
     def test_unelected_producer_arrives_on_every_lane(self):
+        skip_unless_cute_dsl_loads(self)
         report, kirs, _ = run_case("tma_no_elect", "run_tma_pipeline", "args_tma_pipeline",
                                    [{"name": "rows64", "rows": 64, "elect_producer": False}],
                                    {"host": {"intended_writes": {"mOut": "all"}}})  # fmt: skip
@@ -281,6 +296,7 @@ class CuteFrontendTest(unittest.TestCase):
     def test_tma_load_through_an_oversized_view_fails_bounds(self):
         # The descriptor claims 64 rows past the 100-row tensor; the second tile's load reads
         # rows 100..127 of it.
+        skip_unless_cute_dsl_loads(self)
         report, kirs, _ = run_case("tma_oversized", "run_tma_pipeline", "args_tma_pipeline",
                                    [{"name": "rows100", "rows": 100, "extra_rows": 64}],
                                    {"host": {"intended_writes": {"mOut": "all"}}})  # fmt: skip
@@ -294,6 +310,7 @@ class CuteFrontendTest(unittest.TestCase):
 
     def test_tma_load_from_part_of_a_warp_is_refused(self):
         # The lowering's full-mask elect.sync with 16 active lanes.
+        skip_unless_cute_dsl_loads(self)
         report, kirs, _ = run_case("tma_half_warp", "run_tma_pipeline", "args_tma_pipeline",
                                    [{"name": "rows64", "rows": 64, "copy_lanes": 16}],
                                    {"host": {"intended_writes": {"mOut": "all"}}})  # fmt: skip
@@ -307,6 +324,7 @@ class CuteFrontendTest(unittest.TestCase):
         # cute.copy with a CopyBulkG2SOp atom: every executing lane issues cp.async.bulk
         # with DSL 4.4.2; 4.6.1 lowers it behind a full-mask elect.sync (PTX checked,
         # ops.BULK_G2S_ELECTS), so a warp issues it once and needs every lane active.
+        skip_unless_cute_dsl_loads(self)
         notes = {"host": {"intended_writes": {"mOut": "all"}}}
         elects = DSL in ops.BULK_G2S_ELECTS
         partial = (
@@ -340,6 +358,7 @@ class CuteFrontendTest(unittest.TestCase):
 
     def test_strided_metadata_is_recorded_by_offset(self):
         # `load` indices are element offsets from the data pointer.
+        skip_unless_cute_dsl_loads(self)
         for strided, contents in (
             (True, [0, 99, 10, 99, 30, 99, 60]),
             (False, [0, 10, 30, 60]),
@@ -361,6 +380,7 @@ class CuteFrontendTest(unittest.TestCase):
         # writes; src is only read by it. Also through the shape of repeat_interleave(), and
         # when the count launch passes CuTe runtime tensors (they are the torch tensors they
         # wrap).
+        skip_unless_cute_dsl_loads(self)
         notes = {
             "_count_host": {"intended_writes": {"mCnt": "all"}},
             "_fill_host": {"intended_writes": {"mOut": "all"}},
@@ -392,6 +412,7 @@ class CuteFrontendTest(unittest.TestCase):
         # The inputs share the process; the second input (its own fill variant: f16) sizes its
         # grid with a count a skipped launch of the first input wrote (refused), or one the
         # host computed (accepted).
+        skip_unless_cute_dsl_loads(self)
         notes = {
             "_count_host": {"intended_writes": {"mCnt": "all"}},
             "_fill_host": {"intended_writes": {"mOut": "all"}},
@@ -417,6 +438,7 @@ class CuteFrontendTest(unittest.TestCase):
     def test_writes_through_an_address_argument_are_tracked(self):
         # An untranslated kernel (unknown write set) gets the address of the offsets in an
         # int64 pointer table, then they steer the first-segment kernel.
+        skip_unless_cute_dsl_loads(self)
         notes = {"_first_segment_host": {"intended_writes": {"mY": [[0, 10]]}}}
         report, _, recorded = run_case(
             "ptr_table_cu",
@@ -447,6 +469,7 @@ class CuteFrontendTest(unittest.TestCase):
         # Only an exception the exported sources raise (or a failed torch check) is the host
         # refusing the input; a direct @cute.jit call (no cute.compile) or a CUDA call on the
         # CPU-only host is a failure of the dump, not a rejected input.
+        skip_unless_cute_dsl_loads(self)
         notes = {"_fill_host": {"intended_writes": {"mOut": "all"}}}
         with self.assertRaises(Exception) as direct:  # noqa: B017
             run_case("direct", "run_direct", "args_out", [{"name": "n128"}], notes)
@@ -464,6 +487,7 @@ class CuteFrontendTest(unittest.TestCase):
     def test_launch_argument_over_untracked_memory_fails_the_dump(self):
         # A runtime tensor is tracked as the torch tensor it wraps; one over other memory
         # (numpy) cannot be.
+        skip_unless_cute_dsl_loads(self)
         with self.assertRaisesRegex(
             RuntimeError,
             "a launch argument is a CuTe runtime tensor that wraps no torch tensor",
@@ -479,6 +503,7 @@ class CuteFrontendTest(unittest.TestCase):
     def test_elision_flags_reach_the_kir(self):
         # Cases name the variant switches that elide masks; the KIR case carries them, and
         # P0-5 takes the P0-1 and P0-3 checks of the inputs that set one.
+        skip_unless_cute_dsl_loads(self)
         for flags, p01, p05 in (([], "FAIL", "PASS"), (["full_tiles"], "PASS", "FAIL")):
             with self.subTest(flags=flags):
                 notes = {
@@ -520,6 +545,7 @@ class CuteFrontendTest(unittest.TestCase):
 
     def test_environment_is_pinned_to_the_case(self):
         # Shell values are ignored and recorded; the case's env applies.
+        skip_unless_cute_dsl_loads(self)
         saved = dict(os.environ)
         try:
             for env, tiles in (({}, 2), ({"LKV_CUTE_TEST_TILES": "4"}, 4)):
@@ -545,6 +571,7 @@ class CuteFrontendTest(unittest.TestCase):
 
     def test_environment_reads_the_scan_cannot_see_are_refused(self):
         # The case builder reads a variable through an alias of os.environ.
+        skip_unless_cute_dsl_loads(self)
         with self.assertRaisesRegex(
             host_env.EnvError,
             r"kernels.py:\d+ reads environment variable LKV_CUTE_TEST_ALIAS",
@@ -552,6 +579,7 @@ class CuteFrontendTest(unittest.TestCase):
             run_case("env_alias", "run_env_fill", "args_env_alias", [{"name": "i"}])
 
     def test_metadata_bounded_copies(self):
+        skip_unless_cute_dsl_loads(self)
         report, kirs, _ = run_case(
             "segment_copy",
             "run_segment_copy",
@@ -575,6 +603,7 @@ class CuteFrontendTest(unittest.TestCase):
         )
 
     def test_input_the_host_rejects_is_reported(self):
+        skip_unless_cute_dsl_loads(self)
         report, kirs, recorded = run_case("host_rejects", "run_segment_copy_no_empty", "args_segment_copy",
                                           [{"name": "has_empty", "lens": [10, 0]}, {"name": "ok", "lens": [10, 5]}])  # fmt: skip
         self.assertEqual(
@@ -603,6 +632,7 @@ class CuteFrontendTest(unittest.TestCase):
         self.assertEqual([i["name"] for i in k["case"]["inputs"]], ["ok"])
 
     def test_warp_cooperative_search(self):
+        skip_unless_cute_dsl_loads(self)
         report, kirs, _ = run_case(
             "warp_search",
             "run_warp_search",
@@ -634,6 +664,7 @@ class CuteFrontendTest(unittest.TestCase):
         self.assertEqual(k["case"]["inputs"][0]["params"]["num_tiles"], 6)
 
     def test_seeded_data_dependency_is_rejected(self):
+        skip_unless_cute_dsl_loads(self)
         report, kirs, _ = run_case(
             "data_branch", "run_data_branch", "args_data_branch", [{"name": "one"}]
         )
@@ -650,6 +681,7 @@ class CuteFrontendTest(unittest.TestCase):
         # elect_one. Lanes 16-31 storing the CTA's next tile: two stores, every element
         # written once. Lanes 16-31 storing a second buffer to the same tile: two stores
         # of the same elements, each written twice.
+        skip_unless_cute_dsl_loads(self)
         notes = {"host": {"intended_writes": {"mC": "all"}}}
         for mode, rows, p03 in (("warp", 128, "PASS"), ("elect", 128, "PASS"), ("lane_coords", 256, "PASS"),
                                 ("lane_smem", 128, "FAIL")):  # fmt: skip
@@ -687,6 +719,7 @@ class CuteFrontendTest(unittest.TestCase):
         # (PTX and SASS checked, see ir_ops_cute.md "Issuing threads"; on hardware, a
         # reduce once per executing lane: tests/ptx/test_gpu_tma_issue.py). From both warps
         # of the CTA: twice.
+        skip_unless_cute_dsl_loads(self)
         notes = {
             "host": {
                 "intended_writes": {"mC": "unchecked"},
@@ -724,6 +757,7 @@ class CuteFrontendTest(unittest.TestCase):
         # tcgen05.ld/st, .sync.aligned) reaches PTX on every lane. The count of elect.sync
         # in any spelling (also in inline asm, or guarding a block placed elsewhere) catches
         # an election the per-instruction check would miss.
+        skip_unless_cute_dsl_loads(self)
         bulk = DSL in ops.BULK_G2S_ELECTS
         for name, entry, builder, inp, want, elects in (
             ("tma_load", "run_tma_pipeline", "args_tma_pipeline", {"rows": 64, "elect_producer": False},
@@ -754,6 +788,7 @@ class CuteFrontendTest(unittest.TestCase):
     def test_tma_reduce_needs_a_full_warp_and_lane_uniform_operands(self):
         # The lowering's full-mask elect.sync reached by 16 lanes, or by the one lane of an
         # enclosing elect_one; and coordinates that depend on which lane it elects.
+        skip_unless_cute_dsl_loads(self)
         notes = {
             "host": {
                 "intended_writes": {"mC": "unchecked"},
@@ -775,6 +810,7 @@ class CuteFrontendTest(unittest.TestCase):
                 self.assertIn(error, report[0]["error"])
 
     def test_inline_ptx_global_store_is_a_gstore(self):
+        skip_unless_cute_dsl_loads(self)
         report, kirs, _ = run_case("sf_store", "run_sf_store", "args_sf_store", [{"name": "rows200", "rows": 200}],
                                    {"host": {"intended_writes": {"mSF": "all"}}})  # fmt: skip
         self.assert_valid(report)
@@ -791,6 +827,7 @@ class CuteFrontendTest(unittest.TestCase):
         )
 
     def test_inline_ptx_global_reduction_is_refused(self):
+        skip_unless_cute_dsl_loads(self)
         report, kirs, _ = run_case(
             "sf_red",
             "run_sf_store",
@@ -802,6 +839,7 @@ class CuteFrontendTest(unittest.TestCase):
         self.assertIn("red.global.add.u32", report[0]["error"])
 
     def test_metadata_written_by_the_kernel_is_refused(self):
+        skip_unless_cute_dsl_loads(self)
         report, kirs, _ = run_case(
             "cu_self_write",
             "run_cu_self_write",
@@ -815,6 +853,7 @@ class CuteFrontendTest(unittest.TestCase):
         # Cluster dims from the launch, the cluster rank register, the cluster barrier and a
         # remote mbarrier arrive (mapa) reach the KIR; rank 1 arriving on its own barrier
         # instead leaves rank 0's wait hanging (P0-2).
+        skip_unless_cute_dsl_loads(self)
         inputs = [
             {"name": "ok", "rows": 64},
             {"name": "local", "rows": 64, "remote": False},
