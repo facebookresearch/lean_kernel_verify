@@ -7,7 +7,7 @@ reuse of tensor memory (TMEM, CuTe) or of the shared memory and tensormaps a TMA
 may still read (TLX/Triton). Every check is
 decided in Lean 4, with no GPU and no hand-written model of the kernel: the kernel's
 real host code and compiler produce its PTX and IR on a CPU-only machine, a mechanical
-frontend turns one of them (TLX/Triton: the PTX by default; CuTe: the IR) into a small
+frontend turns one of them (the PTX by default, or the IR) into a small
 kernel IR (KIR), and Lean evaluates every role of
 every CTA on the concrete inputs of a case file and proves each spec or its negation
 from one native evaluation per input (the trust of `native_decide`).
@@ -66,13 +66,12 @@ lean/KV: every role of every CTA evaluated per input into event traces, then per
 report.md / report.json: a verdict per (variant, input, spec), findings at source file:line
 ```
 
-For TLX/Triton kernels `lkv.py run` translates the kernel's PTX instead of the TTGIR by
-default, with one core and one PTX op table shared by both frontends
-([references/frontend_ptx.md](references/frontend_ptx.md)); it decides 2-CTA and other
-cluster kernels and the P1-2 spec, and still refuses some constructs the TTGIR
-translation handles (`--frontend legacy` selects that one). CuTe kernels keep the IR
-translation above unless `--frontend ptx`. The KIR then has `ir` `"ptx"`, and the report
-names the translation.
+By default `lkv.py run` translates the kernel's PTX instead of its IR, with one core and
+one PTX op table shared by both frontends
+([references/frontend_ptx.md](references/frontend_ptx.md)); for TLX/Triton it decides
+2-CTA and other cluster kernels and the P1-2 spec. It still refuses some constructs the
+IR translations handle: `--frontend legacy` selects the IR translation above. The KIR then
+has `ir` `"ptx"`, and the report names the translation.
 
 The frontends keep only the ops that define control flow, addresses, masks, barrier
 operands or events, and stop with an error if a dropped op feeds one of them. A verdict
@@ -164,7 +163,7 @@ Blackwell GPU).
 ```
 SKILL.md       the same workflow as an Agent Skill, for coding agents
 frontend/      Layer 1: ttgir/ (TLX/Triton) and cute/ (CuTe DSL) frontends, ptx/ (their
-               PTX translation: the TLX/Triton default), kir.py (the KIR contract),
+               PTX translation: the default), kir.py (the KIR contract),
                emit_lean.py (KIR to Lean)
 lean/KV/       Layer 2: the KIR AST, the evaluator and the specs (Spec/)
 scripts/       lkv.py (run, check, export) and the Lean build and check scripts
@@ -182,7 +181,7 @@ tests/         lean/ (Lean layer), cute/, ttgir/ and ptx/ (frontends), e2e/ (lkv
 | [references/kir.md](references/kir.md)                                                                         | KIR, the JSON contract between the layers                            |
 | [references/frontend_ttgir.md](references/frontend_ttgir.md), [frontend_cute.md](references/frontend_cute.md) | the frontends: case formats, host patches, translation, refusals     |
 | [references/ir_ops.md](references/ir_ops.md), [ir_ops_cute.md](references/ir_ops_cute.md)                     | the op tables: which IR op becomes which KIR event or value          |
-| [references/frontend_ptx.md](references/frontend_ptx.md), [ir_ops_ptx.md](references/ir_ops_ptx.md)           | the PTX translation (the TLX/Triton default) and its op table        |
+| [references/frontend_ptx.md](references/frontend_ptx.md), [ir_ops_ptx.md](references/ir_ops_ptx.md)           | the PTX translation (the default) and its op table                   |
 | [references/cases.md](references/cases.md)                                                                     | writing a case file                                                  |
 | [references/bug_taxonomy.md](references/bug_taxonomy.md)                                                       | which bug classes are checked, and why                               |
 

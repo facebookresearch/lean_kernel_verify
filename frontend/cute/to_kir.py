@@ -43,14 +43,13 @@ some launch of which asks for a preferred cluster other than its cluster dims is
 its P0-6 KIR too (a gap, preferred_cluster_gap): only the regular geometry would be
 checked.
 
-Translation switch (the PTX translation is opt-in for CuTe):
-LKV_FRONTEND=ptx translates each variant's PTX instead of steps 1-4 (translate_ptx: the
-PTX core's Facts, frontend/ptx/translate.py, assembled by PtxVariant with Variant's
-tensors, inputs, checks and report: parameters named by the LaunchRecords' jit_params,
-TMA descriptors as KIR desc tensors, LLVM's unrolled blocks rerolled into `for`s; KIR
-`ir` "ptx"; step 6 translates the PTX again with the P1 pass, frontend/ptx/tmem.py,
-translate_p1_ptx); unset or "legacy" is the translation above, unchanged. Under DSL
-4.4.2 only the PTX's line numbers are trusted
+Translation switch: LKV_FRONTEND=ptx, the default (unset or empty), translates each
+variant's PTX instead of steps 1-4 (translate_ptx: the PTX core's Facts,
+frontend/ptx/translate.py, assembled by PtxVariant with Variant's tensors, inputs, checks
+and report: parameters named by the LaunchRecords' jit_params, TMA descriptors as KIR
+desc tensors, LLVM's unrolled blocks rerolled into `for`s; KIR `ir` "ptx"; step 6
+translates the PTX again with the P1 pass, frontend/ptx/tmem.py, translate_p1_ptx);
+"legacy" is the translation above. Under DSL 4.4.2 only the PTX's line numbers are trusted
 (PTX_LOCS), so a translated variant's report.json entry has "loc_quality": "line_only"
 (lkv.py marks the report's lines best effort).
 
@@ -1745,8 +1744,9 @@ def _load_dump(out: Path) -> dict:
 
 
 def frontend() -> str:
-    """The Layer-1 translation LKV_FRONTEND selects: "legacy" (unset) or "ptx"."""
-    name = os.environ.get("LKV_FRONTEND") or "legacy"
+    """The Layer-1 translation LKV_FRONTEND selects: "ptx" (unset, the default) or
+    "legacy"."""
+    name = os.environ.get("LKV_FRONTEND") or "ptx"
     if name not in ("legacy", "ptx"):
         raise SystemExit(f"LKV_FRONTEND={name!r}: expected legacy or ptx")
     return name

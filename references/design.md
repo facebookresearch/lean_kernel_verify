@@ -8,8 +8,8 @@ each piece to its document.
 kernel source (TLX/Triton or CuTe DSL) + case file (config, small concrete inputs)
    |  frontend/*/dump.py     host code + compile on CPU with the real compiler (no GPU)
    v
-compiler output: the PTX (TLX/Triton by default; frontend/ptx/, frontend_ptx.md) or
-the IR (TTGIR for TLX/Triton with --frontend legacy, CuTe DSL MLIR by default)
+compiler output: the PTX (by default; frontend/ptx/, frontend_ptx.md) or the IR
+(--frontend legacy: TTGIR for TLX/Triton, CuTe DSL MLIR for CuTe)
    |  frontend/*/to_kir.py   Layer 1: op table + program slicing -> KIR (JSON)
    v
 KIR program (roles, structured control flow, integer expressions, events)
@@ -276,8 +276,8 @@ it names in `elision_flags` the flags that select a mask-elided fast path.
 ## Trust base
 
 1. The compiler output for the analyzed config (lowering below it is not checked):
-   the kernel's PTX in the PTX translation (the TLX/Triton default, CuTe with
-   `--frontend ptx`), else its IR, produced by the real host code under the
+   the kernel's PTX in the PTX translation (the default), else its IR
+   (`--frontend legacy`), produced by the real host code under the
    frontend's host patches (`frontend_ttgir.md`, `frontend_cute.md`).
 2. The op table: one Lean-facing meaning per op, written from the PTX ISA and
    the TLX/CuTe docs (`references/ir_ops_ptx.md` for the PTX translation, else

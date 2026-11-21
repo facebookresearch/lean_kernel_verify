@@ -6,8 +6,10 @@
 """End-to-end tests of the CuTe frontend on the tiny kernels of kernels.py.
 
 Each test writes a case file, runs the real host path (dump.run: compile on the CPU,
-record the launches, lower to the analyzed stage) and translates it (to_kir.run, which
-validates every KIR with frontend/kir.py). Needs the CuTe DSL (no GPU): buck targets
+record the launches, lower to the analyzed stage) and translates it with the legacy
+translation (to_kir.run under LKV_FRONTEND=legacy, which validates every KIR with
+frontend/kir.py; the CuTe default is the PTX translation, tested in tests/ptx and
+tests/e2e). Needs the CuTe DSL (no GPU): buck targets
 :test_frontend and :test_frontend_461, one per DSL of the op table (ops.DSL_NATIVE). The TMA,
 inline-PTX and strided-metadata tests also check the Lean verdicts of their KIR
 (frontend/emit_lean.py, scripts/run_lean_check.sh) when the Lean toolchain is installed.
@@ -23,6 +25,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ...frontend.cute import dump, ops, to_kir
 from ...frontend.ttgir import host_env
@@ -67,7 +70,8 @@ def run_case(
     path = tmp / f"{name}.json"
     path.write_text(json.dumps(case))
     recorded = dump.run(path, tmp / "out")
-    to_kir.run(path, tmp / "out")
+    with mock.patch.dict(os.environ, {"LKV_FRONTEND": "legacy"}):
+        to_kir.run(path, tmp / "out")
     report = json.loads((tmp / "out" / "kir" / "report.json").read_text())
     kirs = {
         e["kernel"]: json.loads(Path(e["kir"]).read_text())

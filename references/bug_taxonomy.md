@@ -153,8 +153,7 @@ extraction IR, multi-GPU signalling.
 A P0 result depends on exactly these things:
 
 1. the compiler output for the analyzed config (nothing below it is checked): the kernel's
-   PTX in the PTX translation (the TLX/Triton default; CuTe with `--frontend ptx`), else
-   its IR;
+   PTX in the PTX translation (the default), else its IR (`--frontend legacy`);
 2. the Lean semantics of each op the frontend extracts (one table per dialect, PTX
    included, written from the PTX ISA and TLX/CuTe docs, the same for every kernel);
 3. the Lean compiler (`native_decide`, T1), which decides every verdict;

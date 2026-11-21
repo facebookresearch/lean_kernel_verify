@@ -24,9 +24,9 @@ run    dump with the case's frontend (a buck2 binary: CuTe DSL if the case has a
        importing the compiler and the kernel (frontend/ttgir/host_env.py) and the report
        repeats its record (dump.json "env": the case's env, the shell values it ignored,
        the effective values, Triton's cache-invalidating variables).
-       --frontend selects to_kir's Layer-1 translation (default $LKV_FRONTEND, else the
-       family's: ptx for TLX/Triton cases, legacy for CuTe DSL ones): legacy translates
-       the TTGIR / CuTe DSL MLIR, ptx the kernel's PTX (references/frontend_ptx.md); run
+       --frontend selects to_kir's Layer-1 translation (default $LKV_FRONTEND, else ptx):
+       legacy translates the TTGIR / CuTe DSL MLIR, ptx the kernel's PTX
+       (references/frontend_ptx.md); run
        sets LKV_FRONTEND for the frontend, and the report names the translation
        (report.json "translation"). The PTX translation also checks a TTGIR variant whose
        launches prefer other cluster dims in its all-preferred geometry, as a variant of
@@ -299,8 +299,8 @@ def frontend_of(case):
 
 
 # The Layer-1 translation of each family when neither --frontend nor $LKV_FRONTEND names
-# one (references/frontend_ptx.md): the PTX translation for TLX/Triton, legacy for CuTe.
-DEFAULT_TRANSLATION = {"ttgir": "ptx", "cute": "legacy"}
+# one (references/frontend_ptx.md): the PTX translation for both.
+DEFAULT_TRANSLATION = {"ttgir": "ptx", "cute": "ptx"}
 
 
 def translation_of(case, chosen=None):
@@ -1715,8 +1715,7 @@ def main():
                 "--frontend",
                 choices=("legacy", "ptx"),
                 help="Layer-1 translation: legacy (TTGIR / CuTe DSL MLIR) or ptx (the "
-                "kernel's PTX); default $LKV_FRONTEND, else ptx for TLX/Triton cases and "
-                "legacy for CuTe DSL ones",
+                "kernel's PTX); default $LKV_FRONTEND, else ptx",
             )
         else:
             p.add_argument(

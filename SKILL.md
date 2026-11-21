@@ -4,7 +4,7 @@ description:
   'Mechanical safety checks of Blackwell GPU kernels (TLX/Triton, CuTe DSL)
   in Lean 4 with no hand-written kernel model: on a CPU-only machine the real
   host code and compiler produce the PTX and IR, a sliced op-table frontend
-  turns one of them into KIR (TLX/Triton: the PTX by default), and Lean decides
+  turns one of them into KIR (the PTX by default), and Lean decides
   per case input, as native_decide does,
   P0-1 bounds and address wrap, P0-2 role trip counts (hangs), P0-3 output
   coverage exactly once, P0-4 mbarrier protocol (parity, expect_tx bytes),
@@ -25,7 +25,7 @@ The skill checks a TLX/Triton or CuTe DSL kernel at a given revision against
 six P0 safety specs (and, reported apart, two P1 specs), on the concrete inputs
 of a case file, with no model of the kernel: the real host code and compiler
 produce the PTX and IR on a CPU-only machine, a mechanical frontend turns one of
-them into KIR (TLX/Triton: the PTX by default; CuTe: the IR), and Lean proves or
+them into KIR (the PTX by default, else the IR), and Lean proves or
 refutes each verdict as a theorem (one native evaluation per input decides every
 spec, with the trust of `native_decide`).
 
@@ -54,8 +54,8 @@ kernel sources exported at REV + case file (host entry point, config, small conc
   |   TLX/Triton: triton.compile -> TTGIR (sm_100 or sm_103)        frontend/ttgir/dump.py
   |   CuTe DSL:   cute.compile -> initial MLIR -> analyzed stage     frontend/cute/main.py
   |   op table + program slicing (refuses on anything unknown)      to_kir
-  |   the PTX translation (frontend/ptx/) instead of the IR: the TLX/Triton default,
-  |   CuTe with --frontend ptx; --frontend legacy translates the TLX/Triton TTGIR
+  |   the PTX translation (frontend/ptx/) instead of the IR, the default;
+  |   --frontend legacy translates the TTGIR / CuTe DSL MLIR
   v
 KIR JSON per compiled flag set: roles, structured control flow, exact-width integer exprs,
   |   events, inputs; frontend/kir.py (contract check) -> frontend/emit_lean.py
@@ -115,8 +115,8 @@ python3 -I $S/scripts/lkv.py check K.kir.json... --out DIR   # Layer 2 alone on 
   `--timeout S` (per Lean file, default 3600), `--src DIR` (default: the case's
   `src_root` / `source.src`), `--frontend ptx|legacy` (the Layer-1 translation: `ptx`
   translates the kernel's PTX with one core shared by both frontends, `frontend_ptx.md`;
-  `legacy` its TTGIR / CuTe DSL MLIR; default `$LKV_FRONTEND` when set, else `ptx` for
-  TLX/Triton cases and `legacy` for CuTe ones; report.json `translation` says which ran).
+  `legacy` its TTGIR / CuTe DSL MLIR; default `$LKV_FRONTEND` when set, else `ptx`;
+  report.json `translation` says which ran).
 - **Check a fix:** put base and fix in two source directories, run the same cases
   with each `--src`, and compare FAIL locations. Done when every confirmed
   root's FAIL is gone and no new FAIL appears; inputs the fixed host now rejects
@@ -224,7 +224,7 @@ such event of a role is issued by all its warps.
 | 2   | Async store sources reuse ordered: every write of shared memory overlapping the source of a bulk async store (`cp.async.bulk.tensor` / `cp.reduce.async.bulk.tensor` / `cp{.reduce}.async.bulk` global <- shared::cta, bulk_group), and every write of the tensormap of an in-kernel descriptor it reads (`tensormap.cp_fenceproxy`), is ordered: issued after a `cp.async.bulk.wait_group{.read}` of the store's issuing thread completed its group (`.read` covers the tensormap read: PTX ISA, `wait_group`) and that wait happens before it (mbarrier and exact named-barrier happens-before, the issuer's program order), or happens before the store is issued | F1 a shared-memory write, F2 a tensormap write (also one by another cluster), unordered even in the lockstep reading; undecided: U1 ordered only in the lockstep reading, U2 by an issuer program order the KIR does not pin down (for another lane of a fixed-lane issuer's warp: with a `bar.warp.sync`, which the KIR drops), U3 a load's landing issued before the store that its mbarrier's bytes do not show landed before the store is issued (trust item 8), U4 a store or write after a wait the ledger finds blocked | N1 a store its issuer never waits for; N2 a blocked wait |
 
 Decided on the P1 KIR `<spec>.p1.json` the TTGIR frontend writes in the PTX
-translation (the TLX/Triton default) for a specialization with a bulk store, and
+translation (the default) for a specialization with a bulk store, and
 for a launch with a preferred cluster also `<spec>@cluster<dims>.p1.json` (all
 clusters preferred) (`frontend_ptx.md`, "P1-2 pass"; top-level `p1: ["P1-2"]`),
 reported in a section of its own after P1-1's (FAIL and UNDECIDED count only with
@@ -251,10 +251,10 @@ A verdict depends on exactly these items (`design.md`, "Trust base"):
 1. **The compiler output** for the analyzed config, produced by the real host code at
    REV under the frontend's host patches (device queries, device placement,
    compile/launch interception, the case's `env`, tabled in the frontend docs): the
-   kernel's PTX in the PTX translation (the TLX/Triton default; CuTe with
-   `--frontend ptx`), else its IR: TTGIR for `GPUTarget("cuda", 100|103)` (TLX/Triton
-   with `--frontend legacy`) or the CuTe `cute-to-nvvm` prefix stage at `sm_100a` with
-   the case's nvidia-cutlass-dsl (4.4.2 or 4.6.1). Nothing below it is checked.
+   kernel's PTX in the PTX translation (the default), else (`--frontend legacy`) its IR:
+   TTGIR for `GPUTarget("cuda", 100|103)` or the CuTe `cute-to-nvvm` prefix stage at
+   `sm_100a`; CuTe with the case's nvidia-cutlass-dsl (4.4.2 or 4.6.1). Nothing below it
+   is checked.
 2. **The op tables**: `ir_ops_ptx.md` in the PTX translation (its TMA and bulk-copy
    issuing rules are measured on hardware per compiler version), else `ir_ops.md` /
    `ir_ops_cute.md`: one meaning per op, the same for every kernel. Unknown ops are
@@ -393,7 +393,7 @@ undecided where it does not hold). A TMA load through an in-kernel descriptor as
 that no other role rewrites the descriptor's slot and that its role does not while the
 load is in flight (trust item 2). The PTX translation refuses some kernels and
 constructs the legacy translations handle (`frontend_ptx.md`, "Refusals", "Limitations");
-`--frontend legacy` runs the TTGIR translation of a TLX/Triton kernel.
+`--frontend legacy` runs the TTGIR or CuTe DSL MLIR translation instead.
 Refused in every translation: im2col TMA, CuTe CLC and CLC with a multi-dimensional grid;
 in the legacy TTGIR translation: 2-CTA kernels (remote barriers, DSMEM, multi-CTA
 layouts), launches with a preferred cluster, loop-carried pointers, side-effecting
@@ -424,8 +424,8 @@ table says when to read each):
   [frontend_cute.md](references/frontend_cute.md) (the dump, host patches, translation,
   refusals), with the op tables [ir_ops.md](references/ir_ops.md) (TTGIR) and
   [ir_ops_cute.md](references/ir_ops_cute.md) (CuTe): which IR op becomes which KIR event
-  or value; the shared PTX translation (the TLX/Triton default, CuTe with
-  `--frontend ptx`) [frontend_ptx.md](references/frontend_ptx.md) and its op table
+  or value; the shared PTX translation (the default of both frontends)
+  [frontend_ptx.md](references/frontend_ptx.md) and its op table
   [ir_ops_ptx.md](references/ir_ops_ptx.md);
 - KIR: [kir.md](references/kir.md), the JSON contract between the layers;
 - Layer 2 and the report: [specs.md](references/specs.md) (each spec's Prop, notes,
@@ -441,7 +441,7 @@ table says when to read each):
 | [references/frontend_ttgir.md](references/frontend_ttgir.md)                              | writing a TLX/Triton case, or the TTGIR frontend refuses (case format, environment pinning, host patches, CLC)                |
 | [references/frontend_cute.md](references/frontend_cute.md)                                | writing a CuTe case or builder, or the CuTe frontend refuses (work anchors, analyzed stage, DSL pin)                          |
 | [references/ir_ops.md](references/ir_ops.md), [ir_ops_cute.md](references/ir_ops_cute.md) | an op is unknown or refused, or you need the events an op produces and which threads issue them                               |
-| [references/frontend_ptx.md](references/frontend_ptx.md)                                  | a TLX/Triton run (PTX translation by default) or CuTe with `--frontend ptx`: how the PTX becomes roles and events, work anchors, how to read a refusal |
+| [references/frontend_ptx.md](references/frontend_ptx.md)                                  | a run in the PTX translation (the default): how the PTX becomes roles and events, work anchors, how to read a refusal                     |
 | [references/ir_ops_ptx.md](references/ir_ops_ptx.md)                                      | in the PTX translation: an instruction is unknown or refused, its events and issuing threads (TMA, sub-byte)                  |
 | [references/cases.md](references/cases.md)                                                | choosing a case for a kernel, or writing a new case (fields, annotations, which inputs to choose)                             |
 | [references/bug_taxonomy.md](references/bug_taxonomy.md)                                  | someone asks what is covered and why, or which spec to add next (evidence, P1/P2, test-side complements)                      |

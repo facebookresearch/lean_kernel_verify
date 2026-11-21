@@ -491,14 +491,13 @@ instead.
 
 ## PTX translation
 
-`lkv.py run --frontend ptx` (or `LKV_FRONTEND=ptx`; CuTe kernels keep the translation
-above by default, while TLX/Triton kernels default to the PTX translation) makes `to_kir`
-translate the PTX the dump records for each variant (`ptx/NN_<digest>.ptx`) instead of
+By default (`LKV_FRONTEND` unset, empty or `ptx`; `lkv.py run --frontend ptx`) `to_kir`
+translates the PTX the dump records for each variant (`ptx/NN_<digest>.ptx`) instead of
 the analyzed stage, with the shared PTX translation of both frontends and its op table:
 `frontend_ptx.md` and `ir_ops_ptx.md` (TMA and bulk copies, clusters and 2-CTA kernels,
 packed sub-byte TMA, the P1 pass, refusals; with DSL 4.4.2, source lines are best
-effort). The case files, the dump, the variant names and `kir/report.json` stay; the
-default, `legacy`, is the translation above.
+effort). The case files, the dump, the variant names and `kir/report.json` stay;
+`legacy` (`lkv.py run --frontend legacy`) is the translation above.
 
 ## Limitations
 

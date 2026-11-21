@@ -1457,8 +1457,8 @@ class TtgirAssembly(unittest.TestCase):
 
 class Switch(unittest.TestCase):
     def test_values(self):
-        # unset or empty: the family's default, ptx for TLX/Triton, legacy for CuTe
-        for to_kir, default in ((ttgir_to_kir, "ptx"), (cute_to_kir, "legacy")):
+        # unset or empty: ptx, the default of both families
+        for to_kir, default in ((ttgir_to_kir, "ptx"), (cute_to_kir, "ptx")):
             for value, want in (("", default), ("legacy", "legacy"), ("ptx", "ptx")):
                 with mock.patch.dict(os.environ, {"LKV_FRONTEND": value}):
                     self.assertEqual(to_kir.frontend(), want)

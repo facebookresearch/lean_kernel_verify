@@ -1,8 +1,8 @@
 # PTX op table (the PTX translation)
 
 One meaning per PTX instruction, identical for every kernel and for both families
-(TLX/Triton and CuTe DSL). It is the op table of the PTX translation (the TLX/Triton
-default, `--frontend ptx` for CuTe; `frontend_ptx.md`), where it takes the place of the
+(TLX/Triton and CuTe DSL). It is the op table of the PTX translation (the default of
+both families; `frontend_ptx.md`), where it takes the place of the
 IR op tables `ir_ops.md` and `ir_ops_cute.md` (trust base item 2, `design.md`). The rows
 follow the PTX ISA (sections named, not table numbers); the only compiler behavior they
 encode is how ptxas issues a TMA or bulk copy that several lanes of a warp execute

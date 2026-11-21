@@ -1,7 +1,7 @@
 # IR op tables (trust base item 2)
 
 One meaning per IR op, identical for every kernel. This TTGIR table is the TTGIR
-translation's (`--frontend legacy`); TLX/Triton kernels default to the PTX translation,
+translation's (`--frontend legacy`); both families default to the PTX translation,
 whose table is `ir_ops_ptx.md`. The CuTe DSL table is in `ir_ops_cute.md`. Executable
 form of this TTGIR table: `frontend/ttgir/op_table.py` (classification and operand
 layouts) and `frontend/ttgir/to_kir.py` (translation); keep them in sync with this file.

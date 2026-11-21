@@ -29,10 +29,9 @@ First public release.
   `nb_not_checked`; report.md "P0-6 under the warp-ahead reading" and "P0-6 barrier
   sites not counted") and each P1 spec in a section of its own; `--p1-strict` and
   `--no-p1` apply to both P1 specs.
-- The PTX translation (the default for TLX/Triton kernels; `--frontend ptx` for CuTe
-  kernels, which keep their IR translation by default; `--frontend legacy` translates
-  the TTGIR; `$LKV_FRONTEND` sets the translation of every run without `--frontend`)
-  makes both frontends
+- The PTX translation (the default of both families; `--frontend legacy` translates the
+  TTGIR or the CuTe DSL MLIR; `$LKV_FRONTEND` sets the translation of every run without
+  `--frontend`) makes both frontends
   translate the kernel's PTX instead of their IR, with one shared core (`frontend/ptx/`)
   and one PTX op table (references/frontend_ptx.md, ir_ops_ptx.md), into KIR with `ir`
   `"ptx"`: global and metadata accesses, mbarriers, TMA and bulk copies (packed sub-byte

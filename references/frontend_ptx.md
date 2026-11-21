@@ -1,16 +1,15 @@
-# PTX translation (Layer 1, both families; the TLX/Triton default)
+# PTX translation (Layer 1, both families; the default)
 
 The PTX translation turns the kernel's PTX, the code its compiler hands to ptxas, into KIR
 (`kir.md`) instead of the compiler IR, with one core shared by both frontends and no
-hand-written model of the kernel. It is the default for TLX/Triton kernels; `--frontend
-legacy` translates their TTGIR instead (`frontend_ttgir.md`). CuTe DSL kernels keep the
-CuTe DSL MLIR translation (`frontend_cute.md`) by default, and `--frontend ptx` selects
-this one for them. It still refuses some kernels and constructs the legacy translations
-handle and has known gaps ("Refusals", "Limitations"). `run` passes the choice to `to_kir`
-as `LKV_FRONTEND` (`legacy` or `ptx`; unset or empty is the family's default, `ptx` for
-TLX/Triton and `legacy` for CuTe; any other value an error), which also selects it when
-set in the environment of `run` (the default of `--frontend`) or of a frontend's `to_kir`
-run by hand.
+hand-written model of the kernel. It is the default of both families; `--frontend legacy`
+translates the compiler IR instead: the TTGIR of a TLX/Triton kernel
+(`frontend_ttgir.md`), the CuTe DSL MLIR of a CuTe one (`frontend_cute.md`). It still
+refuses some kernels and constructs the legacy translations handle and has known gaps
+("Refusals", "Limitations"). `run` passes the choice to `to_kir` as `LKV_FRONTEND`
+(`legacy` or `ptx`; unset or empty is the family's default, `ptx` for both; any other
+value an error), which also selects it when set in the environment of `run` (the default
+of `--frontend`) or of a frontend's `to_kir` run by hand.
 
 Everything around the translation stays: the case files, the dump (it records the PTX and
 the launch records below whichever translation runs), the variant names (plus
@@ -586,7 +585,7 @@ TLX/Triton kernels have no P1-1 pass: report.json lists their variants' P1-1 as
 
 ## P1-2 pass (TLX/Triton)
 
-In the PTX translation (LKV_FRONTEND=ptx, the TLX/Triton default) the TTGIR frontend
+In the PTX translation (LKV_FRONTEND=ptx, the default) the TTGIR frontend
 translates every specialization's PTX a second time with policy `p1` `["P1-2"]`
 (`frontend/ptx/bulk.py`, `ir_ops_ptx.md`, "P1-2") into the P1 KIR `<spec>.p1.json`: the P0
 events plus the P1-2 events and `named_bar` (`kir.md` change 15: top-level
@@ -912,7 +911,7 @@ the all-preferred geometry.
 
 * Known gaps: the translation refuses some kernels and constructs that the legacy
   translations handle ("Refusals"); `--frontend legacy` runs the TTGIR translation of a
-  TLX/Triton kernel, and a CuTe kernel stays on the CuTe DSL MLIR unless `--frontend ptx`.
+  TLX/Triton kernel and the CuTe DSL MLIR one of a CuTe kernel.
 * A verdict covers the case inputs, the compiled variants they select and `max_iters`.
 * Below PTX nothing is checked (ptxas, SASS), except the TMA issuing rules measured on
   hardware (`ir_ops_ptx.md`).
