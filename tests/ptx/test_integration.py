@@ -979,6 +979,32 @@ class CuteP1(unittest.TestCase):
             [e["ev"] for e in events(k["roles"][0]["body"])], ["gload", "gstore"]
         )
 
+    def test_jobs(self):
+        # The passes in forked processes (_Passes.start) write the same files as one after
+        # another; a pass that raises there stops run as it would here.
+        self.with_tmem("32x32b")  # a P1 KIR too
+        got = {}
+        for jobs in (1, 3):
+            with mock.patch.dict(os.environ, PTX_MODE):
+                cute_to_kir.run(SKILL / "tests/e2e/cases/probe_cute.json", self.tmp,
+                                jobs=jobs)  # fmt: skip
+            got[jobs] = {
+                p.name: p.read_bytes() for p in (self.tmp / "kir").glob("*.json")
+            }
+        self.assertEqual(got[1], got[3])
+        self.assertEqual(
+            len([n for n in got[3] if n.endswith((".nb.json", ".p1.json"))]), 2
+        )
+        with mock.patch.dict(os.environ, PTX_MODE), \
+                mock.patch.object(cute_to_kir, "_p0", side_effect=ValueError("boom")):  # fmt: skip
+            with self.assertRaisesRegex(ValueError, "boom"):
+                cute_to_kir.run(SKILL / "tests/e2e/cases/probe_cute.json", self.tmp)
+            with self.assertRaisesRegex(
+                RuntimeError, "(?s)the p0 pass of .*ValueError: boom"
+            ):
+                cute_to_kir.run(SKILL / "tests/e2e/cases/probe_cute.json", self.tmp,
+                                jobs=3)  # fmt: skip
+
     def test_refused(self):
         self.with_tmem("16x64b")  # not translated by the P1 pass (R5)
         variant = self.run_kir()[0]

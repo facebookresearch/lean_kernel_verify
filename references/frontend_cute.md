@@ -41,8 +41,9 @@ python3 -I frontend/cute/to_kir.py CASE.json [--out DIR]
 # tests/cute/test_ptx_capture.py (the dump's PTX and LaunchRecords; needs the DSL)
 ```
 
-`scripts/lkv.py run` runs the frontend (`frontend/cute/main.py run`: dump + translate),
-the contract check and the Lean checks and writes the report.
+`scripts/lkv.py run` runs the frontend (`frontend/cute/main.py dump`, then `main.py
+to_kir --jobs N`: `logs/dump.log`, `logs/to_kir.log`), the contract check and the Lean
+checks and writes the report; `main.py run` does both frontend steps in one process.
 
 `--src` analyzes another exported revision with the same case file (the case's
 `source.src` is the default). Outputs: `dump.json` (with `"dsl"`: the DSL version, the
@@ -63,8 +64,10 @@ analyzed stage); and `"p1"`: `checked` with the P1 KIR, `refused` with the refus
 or `not_applicable` for a kernel without TMEM; and, for every launched variant, `"nb"`:
 `checked` with the P0-6 KIR, or `refused` (P0-6 UNDECIDED) or `error` (a failure of the
 barrier pass, invalid P0-6 KIR: ERROR) with the message).
-`to_kir --no-p1` (and `lkv_cute run/to_kir --no-p1`) skips the P1 pass. One case per process: the DSL and the kernel package read their environment at
-import.
+`to_kir --no-p1` (and `lkv_cute run/to_kir --no-p1`) skips the P1 pass. `lkv_cute to_kir
+--jobs N` translates the passes of the variants (P0, P0-6, P1) in up to N forked
+processes, into the same files (`run` translates them one after another). One case per
+process: the DSL and the kernel package read their environment at import.
 
 Lean: `python3 -I frontend/emit_lean.py KIR.json -o K.lean && scripts/run_lean_check.sh K.lean`.
 

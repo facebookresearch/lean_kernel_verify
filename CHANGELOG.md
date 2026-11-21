@@ -232,6 +232,12 @@ First public release.
   required cluster differs from its cluster dims refuses each geometry's P0 KIR, as it
   did the P0-6 and P1-2 ones. Each translation parses its PTX once. KIRs and verdicts
   are unchanged; the log lines come in task order.
+- CuTe to_kir: the P0, P0-6 and P1 translations of the variants run in up to `--jobs`
+  forked processes (`lkv_cute to_kir --jobs`, `lkv.py run --jobs`), and `lkv.py run` runs
+  the CuTe dump and to_kir as two steps, as for TLX/Triton (`logs/dump.log`,
+  `logs/to_kir.log`; `lkv_cute run` still does both in one process, its passes one after
+  another). The PTX assembly rerolls LLVM's unrolled blocks from per-statement keys
+  computed once. KIRs and verdicts are unchanged.
 - TTGIR to_kir: the P1-2 pass of a kernel without a bulk store is `not_applicable` as
   soon as its PTX is parsed, also where its translation would fail (that was a P1-2
   `refused` or `error`). `lkv.py run --no-p1` makes the frontends skip their P1 pass

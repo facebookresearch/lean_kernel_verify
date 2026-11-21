@@ -31,7 +31,9 @@ run    dump with the case's frontend (a buck2 binary: CuTe DSL if the case has a
        (report.json "translation"). The PTX translation also checks a TTGIR variant whose
        launches prefer other cluster dims in its all-preferred geometry, as a variant of
        its own (`<spec>@cluster<dims>`, on the inputs of its specialization; a failed one
-       counts for them).
+       counts for them). Both frontends dump and translate in two processes
+       (logs/dump.log, logs/to_kir.log); to_kir runs the passes of the variants (P0, P0-6,
+       P1) in up to --jobs processes.
 check  the Layer-2 half of `run` on existing KIR files (e.g. tests/lean fixtures).
        Both run --jobs Lean files at a time (default min(8, CPUs)); each Lean process
        evaluates independent parts of an input (CTAs, cluster ledgers) in parallel tasks on
@@ -51,7 +53,7 @@ LKV_FRONTEND=ptx one per specialization with a bulk store (`<spec>.p1.json`, P1-
 for a preferred cluster geometry `<spec>@cluster<dims>.p1.json`, as P0; its top-level "p1"
 names the specs it decides); run checks it like a P0 KIR (unless --no-p1, with which the
 frontends skip their P1 pass: run sets LKV_P1=0 for the TTGIR to_kir and passes --no-p1
-to the CuTe binary, and sets LKV_P1=1 otherwise, whatever the shell's value)
+to the CuTe to_kir, and sets LKV_P1=1 otherwise, whatever the shell's value)
 and reports its verdicts in a section of their own and in report.json "variants_p1" /
 "totals_p1" / "p1_not_checked" (refused, failed or not applicable P1 translations, each
 with the P1 specs it concerns; P1-1 of TTGIR variants is "not checked", and so is P1-2
@@ -332,7 +334,7 @@ def run_frontend(case_path, case, root, out, inputs, target, jobs=1, p1=True):
     "error"}] for the variants without a KIR, [{"input", "error"}] for the inputs the host
     code rejected: the dump's `host_error`, an exception the exported sources raised or no
     launch, in either frontend). Raises RuntimeError if the frontend itself failed.
-    Without `p1` the CuTe binary skips its P1 pass (--no-p1; the TTGIR to_kir reads
+    Without `p1` the CuTe to_kir skips its P1 pass (--no-p1; the TTGIR to_kir reads
     LKV_P1, which cmd_run sets)."""
     fe = out / "frontend"
     logs = out / "logs"
@@ -340,9 +342,7 @@ def run_frontend(case_path, case, root, out, inputs, target, jobs=1, p1=True):
     logs.mkdir(parents=True, exist_ok=True)
     sel = ["--inputs", inputs] if inputs else []
     if frontend_of(case) == "cute":
-        kirs, failures = run_cute(
-            case_path, case, root, fe, logs, sel + ([] if p1 else ["--no-p1"])
-        )
+        kirs, failures = run_cute(case_path, case, root, fe, logs, sel, jobs, p1)
     else:
         kirs, failures = run_ttgir(case_path, root, fe, logs, sel, target, jobs)
     rejected = [
@@ -360,9 +360,10 @@ CUTE_BINARIES = {
 }
 
 
-def run_cute(case_path, case, root, fe, logs, sel):
-    """The CuTe frontend (dump and to_kir in one binary; `sel`: its options --inputs,
-    --no-p1): frontend_report of its kir/report.json."""
+def run_cute(case_path, case, root, fe, logs, sel, jobs=1, p1=True):
+    """The CuTe frontend binary's dump (`sel`: its --inputs), then its to_kir in a process
+    of its own (--jobs processes for the passes of the variants; --no-p1 without `p1`):
+    frontend_report of its kir/report.json."""
     dsl = case.get("dsl", "4.4.2")
     if dsl not in CUTE_BINARIES:
         raise RuntimeError(
@@ -370,11 +371,19 @@ def run_cute(case_path, case, root, fe, logs, sel):
         )
     status = buck_run(
         CUTE_BINARIES[dsl],
-        ["run", case_path, "--src", root, "--out", fe, *sel],
-        logs / "frontend.log",
+        ["dump", case_path, "--src", root, "--out", fe, *sel],
+        logs / "dump.log",
+    )
+    if status != 0:
+        raise RuntimeError(f"CuTe dump failed:\n{tail(logs / 'dump.log')}")
+    status = buck_run(
+        CUTE_BINARIES[dsl],
+        ["to_kir", case_path, "--out", fe, "--jobs", jobs]
+        + ([] if p1 else ["--no-p1"]),
+        logs / "to_kir.log",
     )
     return frontend_report(
-        fe / "kir" / "report.json", logs / "frontend.log", "CuTe frontend", status != 0
+        fe / "kir" / "report.json", logs / "to_kir.log", "CuTe to_kir", status != 0
     )
 
 
@@ -1724,8 +1733,8 @@ def main():
             "--jobs",
             type=int,
             default=min(8, os.cpu_count() or 1),
-            help="Lean files at a time; also the TTGIR frontend's processes (its P0, "
-            "P0-6 and P1-2 translations); each Lean file gets LKV_LEAN_THREADS threads, "
+            help="Lean files at a time; also each frontend's to_kir processes (its P0, "
+            "P0-6 and P1 translations); each Lean file gets LKV_LEAN_THREADS threads, "
             "default max(2, CPUs // jobs)",
         )
         p.add_argument(

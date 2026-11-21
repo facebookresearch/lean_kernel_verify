@@ -58,17 +58,22 @@ Standalone (no CuTe DSL needed): python3 -I to_kir.py CASE.json [--out DIR]
 """
 
 import argparse
+import bisect
+import functools
 import importlib.util
 import itertools
 import json
 import math
+import multiprocessing
+import multiprocessing.connection
 import os
 import re
 import struct
 import sys
+import traceback
 import types
 from pathlib import Path
-from typing import cast
+from typing import cast, NamedTuple
 
 if __package__ in (None, ""):  # python3 -I path/to/to_kir.py
     sys.dont_write_bytecode = True  # keep the source tree free of __pycache__
@@ -1284,15 +1289,13 @@ class _Reroll:
                                  for k in ("then", "else", "body") if k in s}})  # fmt: skip
             if s["op"] == "let":
                 vis.add(s["var"])
-        texts = [json.dumps(s, separators=(",", ":")) for s in done]
-        keys = [_NAME.sub(r'"\1":""', _CONST.sub("C", t)) for t in texts]
+        b = _Blocks(done)
         last = {}  # name -> index of the last statement reading it
         for j, s in enumerate(done):
             last.update(dict.fromkeys(_read(s, set()), j))
         out, i, vis = [], 0, set(visible)
-        memo: dict = {}  # _canon of each block tried, (start, length) -> _canon_at's entry
         while i < len(done):
-            run = self.best(texts, keys, i, vis, last, memo)
+            run = self.best(b, i, vis, last)
             if run is None:
                 if done[i]["op"] == "let":
                     vis.add(done[i]["var"])
@@ -1304,43 +1307,37 @@ class _Reroll:
                 i += run[0]
         return out
 
-    def best(self, texts: list, keys: list, i: int, vis: set, last: dict, memo: dict):
+    def best(self, b: "_Blocks", i: int, vis: set, last: dict):
         """(statements covered, `for`) of the run at i saving the most, or None."""
-        best, tries = None, 0
-        for p in range(1, min(_REROLL_MAX, (len(texts) - i) // 2) + 1):
-            if keys[i + p] != keys[i]:
-                continue
-            tries += 1
-            if tries > _REROLL_TRIES:
-                break
-            got = self.run(texts, keys, i, p, vis, last, memo)
+        best = None
+        for p in b.periods(i):
+            got = self.run(b, i, p, vis, last)
             if got is not None and (best is None or got[0] > best[0]):
                 best = got
         return None if best is None else best[1:]
 
-    def run(self, texts: list, keys: list, i: int, p: int, vis: set, last: dict,
-            memo: dict):  # fmt: skip
+    def run(self, b: "_Blocks", i: int, p: int, vis: set, last: dict):
         """(bytes saved, statements covered, `for`) of the longest run of blocks of p
-        statements at i, or None. The blocks' canonical forms come from `memo`
-        (_canon_at): the runs tried at the next positions meet the same blocks again."""
-        if keys[i + p : i + 2 * p] != keys[i : i + p]:
+        statements at i, or None."""
+        key = b.keys[i : i + p]
+        if b.keys[i + p : i + 2 * p] != key:
             return None
-        text = "".join(texts[i : i + p])
-        form, defs, base = _canon_at(texts, i, p, vis, memo)
+        form, defs, base = b.canon(i, p, vis)
         steps, blocks = None, [defs]
-        while i + (len(blocks) + 1) * p <= len(texts):
+        while i + (len(blocks) + 1) * p <= len(b.keys):
             k, j = len(blocks), i + len(blocks) * p
-            if keys[j : j + p] != keys[i : i + p]:
+            if b.keys[j : j + p] != key:
                 break
-            f, d, vals = _canon_at(texts, j, p, vis, memo)
-            if f != form:
+            got = b.like(j, p, vis, form)
+            if got is None:
                 break
+            d, vals = got
             if steps is None:
-                steps = [v - b for (_w, v), (_w2, b) in zip(vals, base)]
-                if any(st and w == 1 for st, (w, _b) in zip(steps, base)):
+                steps = [v - c for (_w, v), (_w2, c) in zip(vals, base)]
+                if any(st and w == 1 for st, (w, _c) in zip(steps, base)):
                     break  # an i1 constant has no progression longer than 2
             elif any(
-                v != b + k * st for (_w, v), (_w2, b), st in zip(vals, base, steps)
+                v != c + k * st for (_w, v), (_w2, c), st in zip(vals, base, steps)
             ):
                 break
             blocks.append(d)
@@ -1354,10 +1351,12 @@ class _Reroll:
             ):
                 return None
         u = f"u{self.count}"  # stmts() takes the name if it uses this run (fresh)
-        body = _stepped_body(texts[i : i + p], u, steps)
+        body = _stepped_body(b.texts[i : i + p], u, steps)
         loop = {"op": "for", "var": u, "lb": _c32(0), "ub": _c32(len(blocks)), "step": _c32(1),
                 "body": body, "loc": body[0].get("loc", "unknown")}  # fmt: skip
-        saved = len(blocks) * len(text) - len(json.dumps(loop, separators=(",", ":")))
+        saved = len(blocks) * b.length(i, p) - len(
+            json.dumps(loop, separators=(",", ":"))
+        )
         return (saved, len(blocks) * p, loop) if saved > 0 else None
 
     def fresh(self) -> None:
@@ -1367,37 +1366,79 @@ class _Reroll:
             self.count += 1
 
 
-def _canon_at(texts: list, j: int, p: int, visible: set, memo: dict):
-    """_canon of the block texts[j : j + p], memoized in `memo` per block and the
-    visibility of the names it defines (all the result depends on): (start, length) ->
-    (those names, {their visibility: _canon})."""
-    got = memo.get((j, p))
-    if got is None:
-        text = "".join(texts[j : j + p])
-        names = tuple(m.group(2) for m in _NAME.finditer(text) if m.group(1) == "var")
-        got = memo[(j, p)] = (names, {})
-    names, by = got
-    key = tuple(n in visible for n in names)
-    r = by.get(key)
-    if r is None:
-        r = by[key] = _canon("".join(texts[j : j + p]), visible)
-    return r
+class _Blocks:
+    """A statement list as reroll compares it, per statement: its compact JSON, its key
+    (the JSON with every constant and name blanked; equal keys share a number), the
+    names it reads or defines and those it defines, in text order, and its constants,
+    [(width, value)] in text order. A block (p consecutive statements) has the form of
+    its JSON with its constants abstracted to their widths and the names it defines
+    numbered by first definition; a name visible before the block keeps its name (a
+    variable the block reassigns: it may read the value from before the block, so blocks
+    match only if they reassign the same one). Among blocks of equal keys (the same JSON
+    but for constants and names, at the same places) two forms are equal iff the widths
+    and the names so renamed are, which is what canon and like compare."""
+
+    def __init__(self, stmts: list):
+        self.texts = [json.dumps(s, separators=(",", ":")) for s in stmts]
+        ids: dict = {}
+        self.keys = [ids.setdefault(_NAME.sub(r'"\1":""', _CONST.sub("C", t)), len(ids))
+                     for t in self.texts]  # fmt: skip
+        self.at: dict = {}  # key -> the indices of its statements, in order
+        for j, k in enumerate(self.keys):
+            self.at.setdefault(k, []).append(j)
+        self.names, self.defs, self.consts, self.widths = [], [], [], []
+        for t in self.texts:
+            found = _NAME.findall(t)
+            consts = tuple((int(w), int(v)) for w, v in _CONST.findall(t))
+            self.names.append(tuple(n for _kind, n in found))
+            self.defs.append(tuple(n for kind, n in found if kind == "var"))
+            self.consts.append(consts)
+            self.widths.append(tuple(w for w, _v in consts))
+        self.ends = list(itertools.accumulate(map(len, self.texts), initial=0))
+
+    def periods(self, i: int) -> list:
+        """The block lengths tried at i: the first _REROLL_TRIES lengths p (at most
+        _REROLL_MAX, two blocks fitting) whose statement i + p has statement i's key."""
+        limit = min(_REROLL_MAX, (len(self.keys) - i) // 2)
+        at = self.at[self.keys[i]]
+        k = bisect.bisect_right(at, i)
+        return [q - i for q in at[k : k + _REROLL_TRIES] if q - i <= limit]
+
+    def length(self, i: int, p: int) -> int:
+        """The JSON length of the block at i of p statements."""
+        return self.ends[i + p] - self.ends[i]
+
+    def canon(self, i: int, p: int, visible: set):
+        """(form, defined names, constants) of the block at i of p statements; the form
+        is (constant widths, names renamed)."""
+        defs = [n for j in range(i, i + p) for n in self.defs[j]]
+        own = _numbered(defs, visible)
+        names = tuple(own.get(n, n) for j in range(i, i + p) for n in self.names[j])
+        consts = [c for j in range(i, i + p) for c in self.consts[j]]
+        return (self.widths[i : i + p], names), defs, consts
+
+    def like(self, j: int, p: int, visible: set, form: tuple):
+        """(defined names, constants) of the block at j of p statements if its form is
+        `form`, that of a block with the same keys (canon), else None."""
+        widths, names = form
+        if self.widths[j : j + p] != widths:
+            return None
+        defs = [n for q in range(j, j + p) for n in self.defs[q]]
+        own = _numbered(defs, visible)
+        mine = (own.get(n, n) for q in range(j, j + p) for n in self.names[q])
+        if any(a != b for a, b in zip(mine, names, strict=True)):
+            return None
+        return defs, [c for q in range(j, j + p) for c in self.consts[q]]
 
 
-def _canon(text: str, visible: set):
-    """(form, defined names, [(width, value)] of the constants) of a block's JSON: the
-    names it defines numbered by first definition, constants abstracted. A name visible
-    before the block keeps its name (a variable the block reassigns: it may read the
-    value from before the block, so blocks match only if they reassign the same one)."""
-    defs = [m.group(2) for m in _NAME.finditer(text) if m.group(1) == "var"]
-    index: dict = {}
+def _numbered(defs: list, visible: set) -> dict:
+    """The names of `defs` not visible, each to `#<k>`: k numbers them by first
+    definition."""
+    own: dict = {}
     for n in defs:
-        if n not in visible:
-            index.setdefault(n, len(index))
-    text = _NAME.sub(lambda m: f'"{m.group(1)}":"#{index[m.group(2)]}"'
-                     if m.group(2) in index else m.group(0), text)  # fmt: skip
-    consts = [(int(w), int(v)) for w, v in _CONST.findall(text)]
-    return _CONST.sub(lambda m: "C" + m.group(1), text), defs, consts
+        if n not in visible and n not in own:
+            own[n] = f"#{len(own)}"
+    return own
 
 
 def _stepped_body(texts: list, u: str, steps: list) -> list:
@@ -1542,27 +1583,48 @@ def _mark_role(stmts: list) -> None:
 # ------------------------------------------------------------------ driver
 
 
-def validate(obj) -> list:
+@functools.cache
+def _validator():
+    """frontend/kir.py, loaded once."""
     spec = importlib.util.spec_from_file_location("lkv_kir_validator", KIR_PY)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load the KIR validator {KIR_PY}")
     mod = importlib.util.module_from_spec(spec)
     sys.dont_write_bytecode = True  # KIR_PY is in the source tree
     spec.loader.exec_module(mod)
-    return mod.validate(obj)
+    return mod
+
+
+def validate(obj) -> list:
+    return _validator().validate(obj)
 
 
 def write_kir(path: Path, obj: dict, entry: dict) -> bool:
     """Write obj to path only if frontend/kir.py accepts it; the outcome goes to the
     variant's report entry."""
+    return _write(path, _prepared(obj), entry)
+
+
+def _prepared(obj: dict) -> tuple:
+    """What writing a KIR takes (_write): frontend/kir.py's errors, and if there are
+    none its compact JSON and the summary of its roles."""
     errors = validate(obj)
+    if errors:
+        return errors, None, None
+    roles = [[r["name"], r["warps"], r["threads_per_issue"]] for r in obj["roles"]]
+    return errors, json.dumps(obj, separators=(",", ":")), roles
+
+
+def _write(path: Path, kir: tuple, entry: dict) -> bool:
+    """Write a _prepared KIR to path if it has no errors; the outcome goes to the
+    variant's report entry."""
+    errors, text, roles = kir
     if errors:
         entry["error"] = "invalid KIR (frontend/kir.py): " + "; ".join(errors[:20])
         entry["kind"] = "error"
         return False
-    path.write_text(json.dumps(obj, separators=(",", ":")))
-    entry.update({"kir": str(path), "bytes": path.stat().st_size,
-                  "roles": [[r["name"], r["warps"], r["threads_per_issue"]] for r in obj["roles"]]})  # fmt: skip
+    path.write_text(text)
+    entry.update({"kir": str(path), "bytes": path.stat().st_size, "roles": roles})
     return True
 
 
@@ -1659,7 +1721,10 @@ def frontend() -> str:
     return name
 
 
-def run(case_path: Path, out: Path, p1: bool = True) -> list:
+def run(case_path: Path, out: Path, p1: bool = True, jobs: int = 1) -> list:
+    """The KIRs of a dump (module doc) in <out>/kir and its report.json: their paths.
+    With `jobs` > 1 the passes of the variants run first, in up to `jobs` processes
+    (_Passes); the files are the same."""
     case = json.loads(Path(case_path).read_text())
     dump = _load_dump(out)
     kir_dir = out / "kir"
@@ -1670,35 +1735,25 @@ def run(case_path: Path, out: Path, p1: bool = True) -> list:
     for c in dump["compiles"]:
         by_digest.setdefault(c["digest"], []).append(c)
     ptx = frontend() == "ptx"
-    if ptx:  # shows in lkv.py's logs/frontend.log that the switch arrived
+    if ptx:  # shows in lkv.py's logs/to_kir.log that the switch arrived
         print("[to_kir] LKV_FRONTEND=ptx: translating the PTX", file=sys.stderr)
+    variants = [(d, recs, *_launches(dump, recs)) for d, recs in by_digest.items()]
+    passes = _Passes(case, dump, ptx)
+    for digest, recs, launches, las in variants:
+        passes.plan(digest, recs, launches, las, p1, kir_dir)
+    passes.start(jobs)
     report, results, writers, nb_todo = [], {}, {}, []
-    for digest, recs in by_digest.items():
+    for digest, recs, launches, las in variants:
         rec = recs[0]
-        cls = rec["callable"].rsplit(".", 1)[-1]
-        indices = {c["index"] for c in recs}
-        launches, las = [], []
-        for inp in dump["inputs"]:
-            mine = [la for la in inp["launches"] if la["compile"] in indices]
-            las += mine
-            for j, la in enumerate(mine):
-                launches.append(
-                    (
-                        inp["name"] if len(mine) == 1 else f"{inp['name']}#{j}",
-                        la["args"],
-                    )
-                )
         entry = {
-            "kernel": cls,
+            "kernel": rec["callable"].rsplit(".", 1)[-1],
             "digest": digest,
             "inputs": [n for n, _a in launches],
             "dsl": dump["dsl"]["version"],
         }
         report.append(entry)
         if launches:  # P0-6 from the PTX, after the loop, whatever the translation does
-            nb_todo.append(
-                (entry, recs, launches, las, kir_dir / f"{cls}__{digest}.nb.json")
-            )
+            nb_todo.append((entry, digest))
         # "kind" of a variant that gets no KIR: "gap", a construct the frontend refuses by
         # design (not an error), or "error", a failure the case, the DSL or LKV must fix.
         if "stage" not in rec and not ptx:
@@ -1713,67 +1768,38 @@ def run(case_path: Path, out: Path, p1: bool = True) -> list:
         if gap is not None:  # the regular geometry alone would be checked
             entry["error"], entry["kind"] = gap, "gap"
             if ptx:
-                writers[digest] = ptx_writer(case, dump, recs, launches, las)
+                writers[digest] = passes.get("writer", digest)
             continue
-        try:
+        got = passes.get("p0", digest)
+        if got[0] == "refused":
+            entry["error"], entry["kind"] = got[1], got[2]
             if ptx:
-                variant, obj = translate_ptx(case, dump, recs, launches, las)
-            else:
-                variant, obj = translate(case, dump, rec, launches)
-        except Unsupported as e:
-            entry["error"] = str(e)
-            entry["kind"] = e.kind
-            if ptx:
-                writers[digest] = ptx_writer(case, dump, recs, launches, las)
+                writers[digest] = got[3]
             continue
-        results[digest] = (variant, obj, entry)
+        results[digest] = (got[1], got[2], entry)
         if ptx and PTX_LOCS[entry["dsl"]]["loc_mode"] == "line_only":
             # lkv.py marks the report's source lines best effort
             entry["loc_quality"] = "line_only"
         if p1:
-            try:
-                obj1 = (
-                    translate_p1_ptx(case, dump, recs, launches, las)
-                    if ptx
-                    else translate_p1(case, dump, rec, launches)
-                )
-                entry["p1"] = (
-                    {
-                        "status": "not_applicable",
-                        "error": "the kernel allocates and accesses no tensor memory",
-                    }
-                    if obj1 is None
-                    else {"status": "translated", "obj": obj1}
-                )
-            except Unsupported as e:
-                entry["p1"] = {
-                    "status": "error" if e.kind == "error" else "refused",
-                    "error": str(e),
-                }
-            except Exception as e:  # noqa: BLE001 - the P1 pass must never stop the P0 KIR
-                entry["p1"] = {
-                    "status": "error",
-                    "error": f"P1 pass internal error: {type(e).__name__}: {e}",
-                }
-    for entry, recs, launches, las, nb_path in nb_todo:
-        entry["nb"] = translate_nb(case, dump, recs, launches, las, nb_path)
+            entry["p1"] = passes.get("p1", digest)
+    for entry, digest in nb_todo:
+        entry["nb"] = passes.get("nb", digest)
     for inp in dump["inputs"]:
         if "host_error" in inp:
             report.append({"kernel": "(host)", "digest": "-", "inputs": [inp["name"]], "dsl": dump["dsl"]["version"],
                            "error": f"the host rejected input {inp['name']}: {inp['host_error']}"})  # fmt: skip
     _check_provenance(dump, by_digest, results, writers)
     written = []
-    for digest, (_variant, obj, entry) in results.items():
+    for digest, (_variant, kir, entry) in results.items():
         path = kir_dir / f"{entry['kernel']}__{digest}.json"
         p1e = entry.pop("p1", None)
-        if "error" not in entry and write_kir(path, obj, entry):
+        if "error" not in entry and _write(path, kir, entry):
             written.append(str(path))
         if p1e is not None and "error" not in entry:
             entry["p1"] = p1e
             if p1e["status"] == "translated":
                 p1path = kir_dir / f"{entry['kernel']}__{digest}.p1.json"
-                obj1 = p1e.pop("obj")
-                errors = validate(obj1)
+                errors, text, roles = p1e.pop("obj")
                 if errors:
                     entry["p1"] = {
                         "status": "error",
@@ -1781,19 +1807,183 @@ def run(case_path: Path, out: Path, p1: bool = True) -> list:
                         + "; ".join(errors[:20]),
                     }
                 else:
-                    p1path.write_text(json.dumps(obj1, separators=(",", ":")))
+                    p1path.write_text(text)
                     entry["p1"] = {
                         "status": "checked",
                         "kir": str(p1path),
                         "bytes": p1path.stat().st_size,
-                        "roles": [
-                            [r["name"], r["warps"], r["threads_per_issue"]]
-                            for r in obj1["roles"]
-                        ],
+                        "roles": roles,
                     }
                     written.append(str(p1path))
     (kir_dir / "report.json").write_text(json.dumps(report, indent=1))
     return written + [str(kir_dir / "report.json")]
+
+
+def _launches(dump: dict, recs: list) -> tuple:
+    """([(input name, launch arguments)], [launch]) of the variant compiled by `recs`:
+    its launches in input order, named by their input (`<input>#<k>` if the input
+    launches it more than once)."""
+    indices = {c["index"] for c in recs}
+    launches, las = [], []
+    for inp in dump["inputs"]:
+        mine = [la for la in inp["launches"] if la["compile"] in indices]
+        las += mine
+        for j, la in enumerate(mine):
+            name = inp["name"] if len(mine) == 1 else f"{inp['name']}#{j}"
+            launches.append((name, la["args"]))
+    return launches, las
+
+
+class _Failed(NamedTuple):
+    """A pass that raised in its process (_Passes.start): the traceback."""
+
+    text: str
+
+
+class _Passes:
+    """The passes of run's variants by (pass, digest): "p0" its translation (_p0), "p1"
+    its P1 pass (_p1), "nb" its P0-6 pass (translate_nb, which writes the P0-6 KIR) and
+    "writer" the write set of a variant refused before its translation (ptx_writer); each
+    a function of the case and the dump alone. A pass runs when run first asks for it
+    (get), unless start(jobs) ran every one run may ask for (plan) up front, in up to
+    `jobs` processes forked for it (the parent starts no thread, so it forks
+    single-threaded), the P1 pass also of a variant whose translation is then refused
+    (unused). A pass that raises stops run when it is asked for."""
+
+    def __init__(self, case: dict, dump: dict, ptx: bool):
+        self.case, self.dump, self.ptx = case, dump, ptx
+        self.todo: dict = {}  # (pass, digest) -> its arguments
+        self.done: dict = {}  # (pass, digest) -> its result or _Failed
+
+    def plan(self, digest: str, recs: list, launches: list, las: list, p1: bool,
+             kir_dir: Path) -> None:  # fmt: skip
+        """The passes run may ask for of a variant (its loop's conditions)."""
+        args = (recs, launches, las)
+        if launches:
+            cls = recs[0]["callable"].rsplit(".", 1)[-1]
+            self.todo[("nb", digest)] = (*args, kir_dir / f"{cls}__{digest}.nb.json")
+        if not launches or ("stage" not in recs[0] and not self.ptx):
+            return
+        if preferred_cluster_gap(las) is not None:
+            if self.ptx:
+                self.todo[("writer", digest)] = args
+            return
+        self.todo[("p0", digest)] = args
+        if p1:
+            self.todo[("p1", digest)] = args
+
+    def start(self, jobs: int) -> None:
+        jobs = min(jobs, len(self.todo), os.cpu_count() or 1)
+        if jobs <= 1:
+            return
+        for module in ("translate", "anchors", "nbar", "launch", "parse", "tma"):
+            _ptx(module)  # imported once, before the children fork
+        _validator()
+        ctx = multiprocessing.get_context("fork")
+        todo, running = list(self.todo), {}
+        while todo or running:
+            while todo and len(running) < jobs:
+                key = todo.pop(0)
+                recv, send = ctx.Pipe(duplex=False)
+                sys.stdout.flush()  # nothing buffered to be written again by a child
+                sys.stderr.flush()
+                child = ctx.Process(target=self._child, args=(key, send))
+                child.start()
+                send.close()
+                running[recv] = (key, child)
+            for conn in multiprocessing.connection.wait(list(running)):
+                assert isinstance(conn, multiprocessing.connection.Connection)
+                key, child = running.pop(conn)
+                try:
+                    r = conn.recv()
+                except EOFError:
+                    r = None
+                conn.close()
+                child.join()
+                if r is None:
+                    r = _Failed(f"its process died (exit status {child.exitcode})")
+                self.done[key] = r
+
+    def _child(self, key: tuple, conn) -> None:
+        try:
+            r = self._run(key)
+        except Exception:  # noqa: BLE001 - get raises it where run asks for the pass
+            r = _Failed(traceback.format_exc())
+        conn.send(r)
+        conn.close()
+
+    def _run(self, key: tuple):
+        pas, args = key[0], self.todo[key]
+        if pas == "nb":
+            return translate_nb(self.case, self.dump, *args)
+        if pas == "writer":
+            return _view(ptx_writer(self.case, self.dump, *args))
+        return (_p0 if pas == "p0" else _p1)(self.case, self.dump, self.ptx, *args)
+
+    def get(self, pas: str, digest: str):
+        key = (pas, digest)
+        if key not in self.done:
+            self.done[key] = self._run(key)
+        r = self.done[key]
+        if isinstance(r, _Failed):
+            raise RuntimeError(f"to_kir: the {pas} pass of {digest} failed:\n{r.text}")
+        return r
+
+
+def _p0(case: dict, dump: dict, ptx: bool, recs: list, launches: list, las: list):
+    """The translation of a variant: ("ok", its _view, its KIR _prepared), or
+    ("refused", message, kind, the _view of its PTX write set: ptx_writer)."""
+    try:
+        if ptx:
+            variant, obj = translate_ptx(case, dump, recs, launches, las)
+        else:
+            variant, obj = translate(case, dump, recs[0], launches)
+    except Unsupported as e:
+        refused = ("refused", str(e), e.kind)
+    else:
+        return ("ok", _view(variant), _prepared(obj))
+    return (
+        *refused,
+        _view(ptx_writer(case, dump, recs, launches, las)) if ptx else None,
+    )
+
+
+def _p1(
+    case: dict, dump: dict, ptx: bool, recs: list, launches: list, las: list
+) -> dict:
+    """The P1 entry of a variant (to_kir step 6): its P1 KIR _prepared ("obj", status
+    "translated"), or why it has none."""
+    try:
+        obj1 = (
+            translate_p1_ptx(case, dump, recs, launches, las)
+            if ptx
+            else translate_p1(case, dump, recs[0], launches)
+        )
+    except Unsupported as e:
+        return {"status": "error" if e.kind == "error" else "refused", "error": str(e)}
+    except Exception as e:  # noqa: BLE001 - the P1 pass must never stop the P0 KIR
+        return {
+            "status": "error",
+            "error": f"P1 pass internal error: {type(e).__name__}: {e}",
+        }
+    if obj1 is None:
+        return {"status": "not_applicable",
+                "error": "the kernel allocates and accesses no tensor memory"}  # fmt: skip
+    return {"status": "translated", "obj": _prepared(obj1)}
+
+
+def _view(variant):
+    """What _check_provenance reads of a variant (translated, or a refused one's PTX write
+    set): the names and kinds of its host arguments, the metadata flag and uses of its
+    tensors; None for None (no write set)."""
+    if variant is None:
+        return None
+    tensors = {n: {"metadata": t.get("metadata"), "uses": set(t["uses"])}
+               for n, t in variant.k.tensors.items()}  # fmt: skip
+    return types.SimpleNamespace(
+        host_args=[(n, kind, None) for n, kind, _i in variant.host_args],
+        k=types.SimpleNamespace(tensors=tensors),
+    )
 
 
 def _check_provenance(
@@ -1873,10 +2063,13 @@ def main() -> None:
     ap.add_argument(
         "--no-p1", action="store_true", help="skip the P1 pass (no .p1.json KIR)"
     )
+    ap.add_argument(
+        "--jobs", type=int, default=1, help="processes for the passes of the variants"
+    )
     a = ap.parse_args()
     case = json.loads(a.case.read_text())
     out = a.out or Path("/tmp/lkv_out") / a.case.resolve().parent.name / case["name"]
-    for p in run(a.case, out, p1=not a.no_p1):
+    for p in run(a.case, out, p1=not a.no_p1, jobs=a.jobs):
         print(p)
 
 

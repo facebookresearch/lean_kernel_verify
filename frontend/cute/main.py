@@ -10,7 +10,7 @@
   dump CASE.json [--src DIR] [--out DIR] [--inputs a,b] [--lineinfo-check]
                                                        host run: MLIR, PTX, launch arguments
                                                        and launch records
-  to_kir CASE.json [--out DIR]                         dump.json + stages -> KIR JSON
+  to_kir CASE.json [--out DIR] [--jobs N]              dump.json + stages -> KIR JSON
   run CASE.json [--src DIR] [--out DIR] [--inputs a,b] [--lineinfo-check]
                                                        dump, then to_kir
 
@@ -76,6 +76,13 @@ def main() -> None:
                 action="store_true",
                 help="skip the P1 (.p1.json) translation pass",
             )
+        if name == "to_kir":
+            p.add_argument(
+                "--jobs",
+                type=int,
+                default=1,
+                help="processes for the passes of the variants (to_kir.run)",
+            )
         if name != "to_kir":
             p.add_argument(
                 "--src", help="exported source root (overrides the case's source.src)"
@@ -108,7 +115,8 @@ def main() -> None:
     if args.cmd in ("to_kir", "run"):
         from . import to_kir
 
-        for path in to_kir.run(case_path, out, p1=not args.no_p1):
+        jobs = args.jobs if args.cmd == "to_kir" else 1  # run: the dump left threads
+        for path in to_kir.run(case_path, out, p1=not args.no_p1, jobs=jobs):
             print(path)
 
 

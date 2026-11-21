@@ -16,8 +16,8 @@ Everything around the translation stays: the case files, the dump (it records th
 the launch records below whichever translation runs), the variant names (plus
 `<spec>@cluster<dims>` for a TLX launch's all-preferred cluster geometry),
 `kir/report.json`, the family's checks and the report. The KIR has `ir` `"ptx"`, the
-frontend's log shows `[to_kir] LKV_FRONTEND=ptx: translating the PTX` (TLX:
-`logs/to_kir.log`, CuTe: `logs/frontend.log`), and report.json `translation` (report.md:
+frontend's log shows `[to_kir] LKV_FRONTEND=ptx: translating the PTX`
+(`logs/to_kir.log`), and report.json `translation` (report.md:
 the `translation` line at the top) names the translation of the run. The PTX translated
 is the one the dump writes: TLX `<spec>.ptx` next to each `<spec>.ttgir`, CuTe
 `ptx/NN_<digest>.ptx` per variant.

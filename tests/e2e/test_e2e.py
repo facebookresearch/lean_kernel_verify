@@ -595,6 +595,8 @@ class Unit(unittest.TestCase):
             )
 
         def buck_run(target, args, log_path):
+            if args[0] == "dump":  # the recorded dump stands in
+                return 0
             to_kir = SKILL / "frontend/cute/to_kir.py"
             out = args[args.index("--out") + 1]
             cmd = [sys.executable, "-I", str(to_kir), str(args[1]), "--out", str(out)]
@@ -1060,8 +1062,9 @@ class Unit(unittest.TestCase):
 
     def test_no_p1_reaches_the_frontends(self):
         # run --no-p1: the frontends skip their P1 pass (LKV_P1=0 for the TTGIR to_kir,
-        # --no-p1 for the CuTe binary); without it LKV_P1=1 even if the shell has
-        # LKV_P1=0 (which made every TLX P1-2 an ERROR: to_kir wrote no P1 line)
+        # --no-p1 for the CuTe to_kir, which also gets --jobs and runs after the dump);
+        # without it LKV_P1=1 even if the shell has LKV_P1=0 (which made every TLX P1-2 an
+        # ERROR: to_kir wrote no P1 line)
         seen, calls = [], []
 
         def run_frontend(case_path, case, root, out, inputs, target, jobs=1, p1=True):
@@ -1071,7 +1074,7 @@ class Unit(unittest.TestCase):
         def buck_run(target, args, log_path):
             calls.append(list(map(str, args)))
             Path(log_path).write_text("stub")
-            return 1
+            return 0 if args[0] == "dump" else 1
 
         with tempfile.TemporaryDirectory() as d:
             case = Path(d) / "c.json"
@@ -1088,12 +1091,13 @@ class Unit(unittest.TestCase):
                     lkv_py.cmd_run(args)
             with mock.patch.object(lkv_py, "buck_run", buck_run):
                 for p1 in (False, True):
-                    with self.assertRaisesRegex(RuntimeError, "CuTe frontend failed"):
+                    with self.assertRaisesRegex(RuntimeError, "CuTe to_kir failed"):
                         lkv_py.run_frontend(case, {"builder": "b"}, Path(d), Path(d), None,
-                                            "sm_100", 1, p1)  # fmt: skip
+                                            "sm_100", 3, p1)  # fmt: skip
         self.assertEqual(seen, [("0", False), ("1", True)])
-        self.assertEqual([a[0] for a in calls], ["run", "run"])
-        self.assertEqual([("--no-p1" in a) for a in calls], [True, False])
+        self.assertEqual([a[0] for a in calls], ["dump", "to_kir"] * 2)
+        self.assertEqual([("--no-p1" in a) for a in calls], [False, True, False, False])
+        self.assertEqual(calls[1][-3:], ["--jobs", "3", "--no-p1"])
 
     def test_run_outside_a_checkout_is_an_error(self):
         # A copy of the skill outside an fbsource checkout cannot build the frontend.
