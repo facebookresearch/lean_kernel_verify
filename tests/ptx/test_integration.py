@@ -1153,6 +1153,32 @@ class JitNames(unittest.TestCase):
                 cute_to_kir._jit_named(self.table(), recs, tensors), self.table()
             )
 
+    def test_view_inside_a_tensor(self):
+        # A computed pointer field left unnamed (no tensor starts at its address) that
+        # points inside the one tensor it is computed from, in every record: named after
+        # it with an element offset param, each record's own (_record_values). Inside
+        # two of its tensors, or null in a record (no candidate), it stays unnamed.
+        def records(*offs):
+            return [{"params": [{"fields": [{"off": 0, "value": 0 if o is None else 4096 + o, "tensor": [
+                {"tensor": "mB", "match": "inside" if o else "exact", "storage": [4096, 8192], "elem_off": o},
+                {"tensor": "mB32", "match": "inside" if o else "exact", "storage": [4096, 8192], "elem_off": o // 4},
+            ] if o is not None else None}]}], "jit_params": [{"from": ["mB"]}]} for o in offs]  # fmt: skip
+
+        table = lambda: [{"ptx": "p0", "kind": "aggregate", "name": "param0", "size": 8,  # noqa: E731
+                          "fields": {0: {"size": 8, "kind": "ptr", "name": "param0_0"}}}]  # fmt: skip
+        tensors = dict.fromkeys(["mB", "mB32"])
+        recs = records(384, 0, 1024)
+        got = cute_to_kir._jit_named(table(), recs, tensors)
+        self.assertEqual(got[0]["fields"][0], {"size": 8, "kind": "ptr", "name": "mB",
+                                               "off_param": "param0_0.off"})  # fmt: skip
+        self.assertEqual(
+            [cute_to_kir._record_values(got, r, {"param0_0.off": 64}) for r in recs],
+            [{"param0_0.off": 384}, {"param0_0.off": 0}, {"param0_0.off": 1024}],
+        )
+        for recs in (records(384, None), [{**r, "jit_params": [{"from": ["mB", "mB32"]}]}
+                                          for r in records(384)]):  # fmt: skip
+            self.assertEqual(cute_to_kir._jit_named(table(), recs, tensors), table())
+
     def test_stream_not_last(self):
         """A TVM-FFI launch passes nothing for its environment stream, wherever the jit
         function has it (a 2-CTA backward kernel: `..., stream, mCuSeqlensDKV,
@@ -1198,6 +1224,34 @@ class JitNames(unittest.TestCase):
         record["params"][0]["value"] = 8
         with self.assertRaisesRegex(cute_to_kir.Unsupported, "no choice"):
             cute_to_kir._launch_params(rec, [("a", args)], [record])
+
+    def test_environment_stream_in_the_middle(self):
+        # A launch passes no value for the TVM-FFI environment stream (host_patches marks
+        # it env_stream). Unmarked, skipping it or the descriptor after it fits the
+        # records alike (several choices); skipping mA shifts mA's value onto `opt`
+        # (compiled as None, no leaves), which is no choice (it used to stop the search).
+        params = [{"name": n, "constexpr": False, "leaves": [] if n == "opt" else [n]}
+                  for n in ("mA", "opt", "stream", "mDesc", "mS")]  # fmt: skip
+        t = {"kind": "tensor", "dtype": "int32", "shape": [3], "stride": [1],
+             "storage": [4096, 12], "byte_offset": 0}  # fmt: skip
+        args = [
+            {**t, "storage": [1024, 12]},
+            {"kind": "none"},
+            t,
+            {**t, "storage": [8192, 12]},
+        ]
+        record = {"params": [{"kind": "ptr", "value": 1024, "fields": []},
+                             {"kind": "tensormap", "fields": []},
+                             {"kind": "ptr", "value": 8192, "fields": []}],
+                  "jit_params": [{"arg": "mA", "leaf": "mA"}, {"from": ["mDesc"]},
+                                 {"arg": "mS", "leaf": "mS"}]}  # fmt: skip
+        with self.assertRaisesRegex(cute_to_kir.Unsupported, "several choices"):
+            cute_to_kir._launch_params({"params": params}, [("a", args)], [record])
+        params[2]["env_stream"] = True
+        launched = cute_to_kir._launch_params(
+            {"params": params}, [("a", args)], [record]
+        )
+        self.assertEqual([p["name"] for p in launched], ["mA", "opt", "mDesc", "mS"])
 
 
 class Descriptors(unittest.TestCase):

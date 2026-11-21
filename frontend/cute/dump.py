@@ -52,7 +52,9 @@ initial MLIR: two variants can compile to the same PTX). A launch record is {"ke
                              superset), so only those of the tensors its address resolves
                              to ("tensor" of a field, "base" of a "tensormap") can be it.
 "jit_params" is null, with "jit_params_error" saying why, if the parameters cannot be
-named exactly (host_patches P11).
+named exactly (host_patches P11). A compile's "params" are {"name", "constexpr",
+"leaves"} per compile argument, plus "env_stream": true for the TVM-FFI environment
+stream, for which a launch passes no value.
 
 With `lineinfo_check` (DSL 4.4.2) every compile is also compiled without line info
 (ptx/<NN>_<digest>.noline.ptx) and "lineinfo_check" says whether the instructions are the

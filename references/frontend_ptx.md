@@ -76,7 +76,13 @@ tensormap and its shape and stride arguments; two scratch pointers come last); C
 trace (`jit_params`): a parameter that passes a jit argument through names that tensor,
 also when it is empty (data pointer 0) or passed under two names, and a computed one (a
 descriptor, a view, a struct of pointers) names the tensor its address resolves to among
-the arguments it is computed from. A pointer no tensor can be named for exactly is
+the arguments it is computed from; a computed pointer inside that one tensor (a view at
+an element offset, which may differ per launch) names it with the KIR param
+`param<i>_<off>.off`, its element offset in each launch. A TVM-FFI launch passes no value
+for the environment stream: the dump marks that compile parameter (`env_stream`) and the
+launch's values bind to the other parameters in order, wherever the stream sits (a dump
+without the mark: the trailing parameters if they agree with the `jit_params`, else the
+one choice that does). A pointer no tensor can be named for exactly is
 unnamed: its value is Data, so an access through it is refused (slice soundness).
 
 CuTe host code encodes its TMA descriptors in software; the decoder reads the tiled

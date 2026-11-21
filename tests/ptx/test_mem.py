@@ -80,6 +80,20 @@ class Global(unittest.TestCase):
         self.assertEqual((a["e"], a["o"], a["b"]["v"]), ("bin", "add", 2))
         self.assertEqual(kir_errors(f), [])
 
+    def test_pointer_inside_its_tensor(self):
+        # A pointer the adapter names with an element offset param (CuTe's host-computed
+        # view inside a tensor, cute/to_kir._jit_named): an access through it is its
+        # tensor's at that offset plus its own; the offset is a 64-bit KIR param.
+        f = run(
+            PRE + "    @%p9 ld.global.f32 %f1, [%rd1+8];\n    ret;\n",
+            offsets={"x": "x.off"},
+        )
+        (ev,) = events(f, "gload")
+        self.assertEqual(ev["tensor"], "x")
+        self.assertEqual(f.params["x.off"], 64)
+        self.assertEqual(kir_errors(f), [])
+        self.assertEqual(evaluate(f, {"n": 1, "x.off": 96}), [("gload", "x", [98])])
+
     def test_misaligned_and_sub_element(self):
         f = run(
             PRE

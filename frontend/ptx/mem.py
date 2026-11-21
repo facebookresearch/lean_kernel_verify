@@ -16,7 +16,9 @@ parameters and mbarriers.
 Addresses are integer expressions over reserved base variables: `%g:<tensor>` is the
 address of a kernel tensor (its data pointer plus the record's element offset), and
 `%s:<symbol>` the shared-window address of a `.shared` variable. A pointer parameter (or
-a pointer field of a struct parameter, named by the adapter) loads as its tensor's base;
+a pointer field of a struct parameter, named by the adapter) loads as its tensor's base,
+plus its element offset param times the element bytes if the adapter gives one
+(`off_param`: CuTe's host-computed view inside a tensor, cute/to_kir._jit_named);
 `peel` splits an address into (base, byte offset) exactly, through adds, subtracts, a
 select between two offsets of one base, a per-thread table of offsets of one base and,
 for shared addresses, a truncation to 32 bits. A global access through a select between
@@ -375,7 +377,8 @@ class Memory:
     def _param_value(self, tr: Translator, i, p, off: int, size: int):
         kind = p["kind"]
         if kind in ("scalar", "ptr"):
-            entry = {"kind": kind, "name": p["name"], "size": p.get("size", size)}
+            entry = {"kind": kind, "name": p["name"], "size": p.get("size", size),
+                     "off_param": p.get("off_param")}  # fmt: skip
             if off != 0:
                 tr.fail(
                     i,
@@ -406,7 +409,12 @@ class Memory:
                 return Data(
                     f"pointer parameter {entry['name']} (no tensor of the launch)"
                 )
-            return E.var(f"%g:{entry['name']}", 64)
+            base = E.var(f"%g:{entry['name']}", 64)
+            if entry.get("off_param") is None:
+                return base
+            self.used_params[entry["off_param"]] = 64
+            eb = E.const(self.tensors[entry["name"]]["elem_bytes"], 64)
+            return E.bin("add", base, E.bin("mul", E.var(entry["off_param"], 64), eb))
         if entry["kind"] != "scalar":
             tr.fail(i, f"ld.param of a {entry['kind']} field", "error")
         w = 8 * size

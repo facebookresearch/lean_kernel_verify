@@ -232,6 +232,13 @@ First public release.
   required cluster differs from its cluster dims refuses each geometry's P0 KIR, as it
   did the P0-6 and P1-2 ones. Each translation parses its PTX once. KIRs and verdicts
   are unchanged; the log lines come in task order.
+- CuTe PTX translation: a TVM-FFI launch's values bind past its environment stream
+  wherever the jit function has it (the dump marks the stream's compile parameter,
+  `env_stream`; the binding refused the FA4 backward and forward kernels whose stream
+  sits mid-parameters), and a host-computed pointer inside the one tensor it is computed
+  from (a view at a per-launch element offset, e.g. the scale columns of a combined
+  quantized buffer) names that tensor with its offset as a KIR param (an access through
+  it was refused). Variants translated before translate as before.
 - CuTe to_kir: the P0, P0-6 and P1 translations of the variants run in up to `--jobs`
   forked processes (`lkv_cute to_kir --jobs`, `lkv.py run --jobs`), and `lkv.py run` runs
   the CuTe dump and to_kir as two steps, as for TLX/Triton (`logs/dump.log`,

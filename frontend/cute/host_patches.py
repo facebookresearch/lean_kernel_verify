@@ -150,7 +150,9 @@ class _Captured(Exception):
 class Compile:
     index: int
     callable: str  # module.qualname of the jit function or class
-    params: list  # [{"name", "constexpr", "leaves"}] per compile argument
+    params: (
+        list  # [{"name", "constexpr", "leaves"[, "env_stream"]}] per compile argument
+    )
     flags: (
         dict  # boolean attributes of the jit object and its config (variant switches)
     )
@@ -354,13 +356,14 @@ def _params(fn, args) -> list:
     for i, a in enumerate(args):
         name = names[i] if i < len(names) else f"arg{i}"
         ann = sig.parameters[name].annotation if name in sig.parameters else None
-        out.append(
-            {
-                "name": name,
-                "constexpr": "Constexpr" in str(ann),
-                "leaves": _leaf_names(name, a),
-            }
-        )
+        p = {
+            "name": name,
+            "constexpr": "Constexpr" in str(ann),
+            "leaves": _leaf_names(name, a),
+        }
+        if getattr(a, "use_tvm_ffi_env_stream", False):
+            p["env_stream"] = True  # a TVM-FFI launch passes no value for it
+        out.append(p)
     return out
 
 
@@ -1255,8 +1258,7 @@ def installed(num_sms: int, lineinfo_check: bool = False):
         captured.kernel_params = _kernel_params(
             c.mlir, trace.get("host", "not traced"), c.params
         )
-        launched = [p for p, a in zip(c.params, positional)
-                    if not getattr(a, "use_tvm_ffi_env_stream", False)]  # fmt: skip
+        launched = [p for p in c.params if not p.get("env_stream")]
 
         def launch(*call_args, **call_kwargs):
             positional = tuple(_positional(fn, call_args, call_kwargs))

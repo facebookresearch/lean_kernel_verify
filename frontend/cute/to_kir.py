@@ -719,8 +719,11 @@ def _jit_named(table: list, records: list, tensors: dict) -> list:
     through names its pointer (a .ptr parameter, or a struct's field at offset 0) by that
     leaf whatever its address (one tensor under two jit names, a zero-length tensor); a
     computed one (a descriptor, a view) keeps only the address candidates it is computed
-    from, named if exactly one remains in every record. Without jit_params (an older dump,
-    or naming failed) the address naming stays."""
+    from, named if exactly one remains in every record. A computed pointer field left
+    unnamed that points inside that one tensor (a view at an element offset that may
+    differ per launch: _inside) is named too, with the KIR param `off_param` holding its
+    element offset (_record_values; mem.py adds it to the tensor's base). Without
+    jit_params (an older dump, or naming failed) the address naming stays."""
     jits = [r.get("jit_params") for r in records]
     if jits[0] is None or any(j != jits[0] for j in jits):
         return table
@@ -736,15 +739,18 @@ def _jit_named(table: list, records: list, tensors: dict) -> list:
             continue
         src = set(j.get("from", ()))
         for off, f in p["fields"].items():
-            got = {frozenset(c["tensor"] for c in rf.get("tensor") or ()
-                             if c["match"] == "exact" and c["tensor"] in src)
-                   for r in records for rf in r["params"][k]["fields"] if rf["off"] == off}  # fmt: skip
-            if (
-                f["kind"] == "ptr"
-                and len(got) == 1
-                and len(names := next(iter(got))) == 1
-            ):
+            cands = [[c for c in rf.get("tensor") or () if c["tensor"] in src]
+                     for r in records for rf in r["params"][k]["fields"] if rf["off"] == off]  # fmt: skip
+            got = {
+                frozenset(c["tensor"] for c in cs if c["match"] == "exact")
+                for cs in cands
+            }
+            if f["kind"] != "ptr":
+                continue
+            if len(got) == 1 and len(names := next(iter(got))) == 1:
                 f["name"] = next(iter(names))
+            elif f["name"] not in tensors and (inside := _inside(cands)) is not None:
+                f["name"], f["off_param"] = inside, f"{p['name']}_{off}.off"
         if p["kind"] == "tensormap":
             got = set()
             for r in records:
@@ -754,6 +760,18 @@ def _jit_named(table: list, records: list, tensors: dict) -> list:
             if len(got) == 1 and len(names := next(iter(got))) == 1:
                 p["base"], p["aliases"] = next(iter(names)), []
     return table
+
+
+def _inside(cands: list) -> str | None:
+    """The tensor a computed pointer field points into (_jit_named): `cands`, per record
+    its address candidates among the tensors it is computed from, hold one candidate in
+    every record, of the same tensor, at its start or inside it, and inside it in at
+    least one; else None (a null pointer, two tensors, an address outside them)."""
+    names = {c["tensor"] for cs in cands for c in cs}
+    if len(names) != 1 or any(len(cs) != 1 or cs[0]["match"] not in ("exact", "inside")
+                              for cs in cands):  # fmt: skip
+        return None
+    return names.pop() if any(cs[0]["match"] == "inside" for cs in cands) else None
 
 
 def _named_args(params: list, args: list) -> list:
@@ -785,9 +803,11 @@ def _launch_params(rec: dict, launches: list, records: list) -> list:
     value for the environment stream, wherever it sits among the parameters. The skipped
     ones must agree with the LaunchRecords' jit_params: each kernel parameter that passes
     a jit leaf through holds that leaf's launch value in every launch (a tensor's data
-    pointer, a scalar's bits; _passes_through). The last parameters if they agree (a CuTe
-    DSL kernel usually takes its stream last; without jit_params nothing can be
-    checked), else the one choice of single-leaf parameters that does; none, or several,
+    pointer, a scalar's bits; _passes_through). The parameters host_patches marks as the
+    environment streams ("env_stream") if it marks any, else the last parameters if they
+    agree (a CuTe DSL kernel usually takes its stream last; without jit_params nothing
+    can be checked), else the one choice of single-leaf parameters that does (a choice
+    whose launch values are no leaves of their parameters does not); none, or several,
     is an error: shifted names bind annotations and metadata to the wrong tensors."""
     params = rec["params"]
     nargs = len(launches[0][1])
@@ -797,14 +817,21 @@ def _launch_params(rec: dict, launches: list, records: list) -> list:
 
     def fits(skip: tuple) -> bool:
         kept = [p for k, p in enumerate(params) if k not in skip]
-        return set(skip) <= set(skippable) and all(
-            len(args) == len(kept) and _passes_through(_named_args(kept, args), r)
-            for (_n, args), r in zip(launches, records)
-        )
+        try:
+            return set(skip) <= set(skippable) and all(
+                len(args) == len(kept) and _passes_through(_named_args(kept, args), r)
+                for (_n, args), r in zip(launches, records)
+            )
+        except Unsupported:  # a launch value that is no leaf of its parameter
+            return False
 
+    streams = tuple(k for k, p in enumerate(params) if p.get("env_stream"))
     trailing = tuple(range(nargs, len(params)))
-    good = [trailing] if fits(trailing) else [
-        c for c in itertools.combinations(skippable, max(0, len(params) - nargs)) if fits(c)]  # fmt: skip
+    if streams:
+        good = [streams] if fits(streams) else []
+    else:
+        good = [trailing] if fits(trailing) else [
+            c for c in itertools.combinations(skippable, max(0, len(params) - nargs)) if fits(c)]  # fmt: skip
     if len(good) != 1:
         why = "several choices" if good else "no choice"
         raise Unsupported("cuda.launch_ex", "host", f"{nargs} launch arguments for {len(params)} parameters: {why} "
@@ -877,13 +904,17 @@ def _check_candidates(named: list, record: dict) -> None:
 
 def _record_values(table: list, record: dict, widths: dict) -> dict:
     """The KIR scalar params (param<i>, param<i>_<off>) of one launch: its LaunchRecord's
-    parameter bytes, as signed integers of the param's width."""
+    parameter bytes, as signed integers of the param's width; a pointer field's
+    `off_param` (_jit_named) is its element offset in its tensor."""
     out = {}
     for k, p in enumerate(table):
         rp = record["params"][k]
         fields = {f["off"]: f["value"] for f in rp.get("fields") or ()}
         found = [(p["name"], rp.get("value"))] if p["kind"] == "scalar" else []
         found += [(f["name"], fields[off]) for off, f in p["fields"].items()]
+        found += [(f["off_param"], next(c["elem_off"] for rf in rp["fields"] if rf["off"] == off
+                                        for c in rf["tensor"] if c["tensor"] == f["name"]))
+                  for off, f in p["fields"].items() if f.get("off_param")]  # fmt: skip
         for name, v in found:
             if name in widths:
                 w = widths[name]

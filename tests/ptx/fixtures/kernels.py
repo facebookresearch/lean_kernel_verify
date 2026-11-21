@@ -47,12 +47,14 @@ def kernel(body, ptrs=("x",), scalars=("n",), threads=128, extra="", src=SRC):
 
 
 def run(body, family="ttgir", ptrs=("x",), scalars=("n",), threads=128, elem=None,
-        cluster=(1, 1, 1), extra="", src=SRC, floats=(), **pol):  # fmt: skip
+        cluster=(1, 1, 1), extra="", src=SRC, floats=(), offsets=None, **pol):  # fmt: skip
     """Facts of kernel(body, ...) under the family's policy (overrides in pol); the
-    source root is `src`; the tensors in `floats` hold floating-point data."""
-    elem = elem or {}
-    params = [{"ptx": f"k_param_{i}", "kind": "ptr", "name": p, "size": 8, "fields": {}}
-              for i, p in enumerate(ptrs)]  # fmt: skip
+    source root is `src`; the tensors in `floats` hold floating-point data; a pointer in
+    `offsets` points inside its tensor at the element offset of the KIR param it maps to
+    (mem.py `off_param`)."""
+    elem, offsets = elem or {}, offsets or {}
+    params = [{"ptx": f"k_param_{i}", "kind": "ptr", "name": p, "size": 8, "fields": {},
+               "off_param": offsets.get(p)} for i, p in enumerate(ptrs)]  # fmt: skip
     params += [{"ptx": f"k_param_{len(ptrs) + i}", "kind": "scalar", "name": s, "size": 4,
                 "fields": {}} for i, s in enumerate(scalars)]  # fmt: skip
     policy = T.policy(family, src_root=src, params=params,
