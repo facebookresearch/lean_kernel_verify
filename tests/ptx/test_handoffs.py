@@ -200,16 +200,16 @@ class Handoffs(unittest.TestCase):
         (store,) = events(f, "gstore")["partition0"]
         self.assertIn(gets["partition0"][0]["var"], str(store["offsets"]))
 
-    def test_word(self):
+    def test_word(self) -> None:
         self.check_channel(run())
 
-    def test_matrix_rows(self):
+    def test_matrix_rows(self) -> None:
         self.check_channel(run(**MATRIX))
 
-    def test_kir_valid(self):
+    def test_kir_valid(self) -> None:
         self.assertEqual([e for e in kir.validate(kir_of(run())) if "handoff" in e], [])
 
-    def test_putter_gets_no_channel(self):
+    def test_putter_gets_no_channel(self) -> None:
         # partition0 also puts a word partition1 reads after its first wait: partition1,
         # a putter, gets nothing, so the KIR stays valid
         f = run(get=WORD["get"] + "    st.shared.b32 [global_smem+132], %r60;\n",
@@ -221,7 +221,7 @@ class Handoffs(unittest.TestCase):
         else:
             self.assertEqual([e for e in kir.validate(kir_of(f)) if "handoff" in e], [])
 
-    def test_signed_load(self):
+    def test_signed_load(self) -> None:
         # the 64-bit test of -1 stays (zero-extended, it would fold to false)
         f = run(get="    ld.shared.s32 %rd40, [global_smem+128];\n"
                     "    setp.eq.s64 %p25, %rd40, -1;\n    @%p25 bra $RET;\n"
@@ -236,12 +236,12 @@ class Handoffs(unittest.TestCase):
             [d["b"] for d in _exprs(role["body"]) if d.get("e") == "cmp"],
         )
 
-    def test_unread_word_is_no_channel(self):
+    def test_unread_word_is_no_channel(self) -> None:
         # partition0 also stores a word no role loads: it puts no channel, so it gets
         f = run(get="    st.shared.b32 [global_smem+136], %r20;\n" + WORD["get"])
         self.check_channel(f)
 
-    def test_unbounded_write_assumes_it_misses_the_channel(self):
+    def test_unbounded_write_assumes_it_misses_the_channel(self) -> None:
         f = run(default="    shl.b32 %r91, %r20, 2;\n    add.s32 %r92, %r30, %r91;\n"
                         "    st.shared.b32 [%r92], %r1;\n")  # fmt: skip
         self.assertEqual(f.refusals, [])
@@ -249,7 +249,7 @@ class Handoffs(unittest.TestCase):
         self.assertIn("a shared write misses the handoff channel %extern+128",
                       [s.get("msg") for s in _exprs(role["body"]) if s.get("op") == "assume"])  # fmt: skip
 
-    def test_write_through_a_zero_extension_may_overwrite(self):
+    def test_write_through_a_zero_extension_may_overwrite(self) -> None:
         # the default stores at the zero extension of x = (n & 7) - 1 in [-1, 6] at 16
         # bits: 0..6 or 65535, so its 4 bytes may cover the channel at 65536 (bounds of
         # the extension, not of x: interp.bounds)
@@ -260,12 +260,12 @@ class Handoffs(unittest.TestCase):
                 get="    ld.shared.b32 %r62, [global_smem+65536];\n")  # fmt: skip
         self.assertIn("may overwrite the handoff channel %extern+65536", refusal(f))
 
-    def test_channel_over_an_mbarrier_array_is_refused(self):
+    def test_channel_over_an_mbarrier_array_is_refused(self) -> None:
         f = run(put="    st.shared.b32 [global_smem+84], %r51;\n",
                 get="    ld.shared.b32 %r62, [global_smem+84];\n")  # fmt: skip
         self.assertIn("overlaps an mbarrier array", refusal(f))
 
-    def test_error_in_the_second_translation_is_an_error(self):
+    def test_error_in_the_second_translation_is_an_error(self) -> None:
         load = interp.Translator._handoff_load
 
         def boom(tr, i, mn):  # a bug in the translation with channels
@@ -277,23 +277,23 @@ class Handoffs(unittest.TestCase):
             f = run()
         self.assertEqual(f.refusals[0]["kind"], "error")
 
-    def test_matrix_operand_count_no_channel(self):
+    def test_matrix_operand_count_no_channel(self) -> None:
         f = run(put="    stmatrix.sync.aligned.m8n8.x1.shared.b16 [%r72+128], {%r51, %r51};\n",
                 get=MATRIX["get"])  # fmt: skip
         self.assertIn("reaches", refusal(f))
         self.assertNotIn("handoff", refusal(f))
 
-    def test_two_writers_no_channel(self):
+    def test_two_writers_no_channel(self) -> None:
         f = run(default="    st.shared.b32 [global_smem+128], %r20;\n")
         self.assertIn("reaches", refusal(f))
         self.assertNotIn("handoff", refusal(f))
 
-    def test_varying_value_no_channel(self):
+    def test_varying_value_no_channel(self) -> None:
         f = run(put="    st.shared.b32 [global_smem+128], %r1;\n")
         self.assertIn("reaches", refusal(f))
         self.assertNotIn("handoff", refusal(f))
 
-    def test_other_write_refused(self):
+    def test_other_write_refused(self) -> None:
         f = run(default="    st.shared.b32 [global_smem+128], %r1;\n")
         self.assertIn("reaches", refusal(f))
         self.assertIn("may overwrite the handoff channel %extern+128", refusal(f))

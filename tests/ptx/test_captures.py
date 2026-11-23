@@ -247,19 +247,19 @@ class Captures(unittest.TestCase):
             else:
                 self.assertEqual(f.refusals, [], (hook, write))
 
-    def test_forwarded(self):
+    def test_forwarded(self) -> None:
         f = run()
         self.assertEqual(f.refusals, [])
         self.assertEqual(
             [r["name"] for r in f.roles], ["default", "partition0", "partition1"]
         )
 
-    def test_tma_landing(self):
+    def test_tma_landing(self) -> None:
         # box 64 x 32 bf16 = 4096 bytes from the destination: [0, 4096) holds the capture
         self.check(tma(0), asynchronous=True)
         self.check(tma(1024), overlaps=False)
 
-    def test_packed_tma_landing(self):
+    def test_packed_tma_landing(self) -> None:
         # a packed sub-byte format's shared-memory copy may be wider than its packed bytes
         # (16U4_ALIGN16B, 16U6_ALIGN16B): such a landing reports no byte count, so it may
         # touch every capture; a plain one reports its box (16 x 64 bytes)
@@ -289,7 +289,7 @@ class Captures(unittest.TestCase):
                 )
             self.assertEqual(got, [want], packed)
 
-    def test_cp_async_and_bulk(self):
+    def test_cp_async_and_bulk(self) -> None:
         cp = "    @{one} cp.async.ca.shared.global [global_smem+AT], [%rd1], 4;\n"
         self.check(cp.replace("AT", "32"), asynchronous=True)
         self.check(cp.replace("AT", "36"), overlaps=False)
@@ -299,18 +299,18 @@ class Captures(unittest.TestCase):
         self.check(bulk.replace("AT", "16"), overlaps=False)  # [16, 32)
         self.check(bulk.replace("AT", "128"), overlaps=False)
 
-    def test_generic_store_in_a_direct_dispatch(self):
+    def test_generic_store_in_a_direct_dispatch(self) -> None:
         self.check("    @{one} st.u32 [%rd9+32], %r1;\n")
         self.check("    @{one} st.u32 [%rd9+256], %r1;\n", overlaps=False)
         self.check("    @{one} atom.add.u32 %r60, [%rd9+34], 1;\n")
 
-    def test_generic_store_through_data(self):
+    def test_generic_store_through_data(self) -> None:
         # a generic store whose address is data may write any shared byte: refused once a
         # worker read a capture, whatever the memory model does with the access itself
         w = "    ld.shared.u64 %rd30, [global_smem+512];\n    @{one} st.u32 [%rd30], %r1;\n"
         self.assertIn(OVERWRITE, refusal(run(late=w)))
 
-    def test_elected_lane_footprint(self):
+    def test_elected_lane_footprint(self) -> None:
         # a write under elect.sync covers every lane that may be elected (unspecified),
         # not lane 0's bytes: at 60 - 4 lane (generic and st.shared), the elected lane 7
         # writes the capture; one at an offset that depends on the elected lane (28 + 4
@@ -325,7 +325,7 @@ class Captures(unittest.TestCase):
                    "    add.s32 %r55, %r30, %r54;\n    @%p8 st.shared.b32 [%r55], %r20;\n",
                    hooks=("default",))  # fmt: skip
 
-    def test_shared_atomics_and_stmatrix(self):
+    def test_shared_atomics_and_stmatrix(self) -> None:
         self.check("    @{one} red.shared.add.u32 [global_smem+32], 1;\n")
         self.check(
             "    @{one} red.shared.add.u32 [global_smem+40], 1;\n", overlaps=False
@@ -336,7 +336,7 @@ class Captures(unittest.TestCase):
         self.check(rows.replace("AT", "24"), hooks=("default", "late"))
         self.check(rows.replace("AT", "16"), overlaps=False, hooks=("default", "late"))
 
-    def test_tcgen05_alloc_slot(self):
+    def test_tcgen05_alloc_slot(self) -> None:
         alloc = "    tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 [global_smem+AT], 32;\n"
         self.check(alloc.replace("AT", "32"), hooks=("default", "late"))
         self.check(alloc.replace("AT", "96"), overlaps=False, hooks=("default", "late"))
@@ -357,7 +357,7 @@ class Captures(unittest.TestCase):
             )
         self.check(init.replace("AT", "40"), overlaps=False)
 
-    def test_ring_buffer_index_bounds(self):
+    def test_ring_buffer_index_bounds(self) -> None:
         # `x % k` as LLVM writes it for any x: x - ((x + b) & -k) and x - q k with q the
         # magic-number quotient (signed mul.hi, its sign bit added): within (-k, k)
         x = E.var("c", 32)
@@ -387,7 +387,7 @@ class Captures(unittest.TestCase):
         bit = E.bin("lshr", E.bin("urem", E.pid(0), E.const(4, 32)), E.const(1, 32))
         self.assertEqual(interp.bounds(E.bin("and", bit, E.const(126, 32))), (0, 0))
 
-    def test_zero_extension_of_a_negative_value(self):
+    def test_zero_extension_of_a_negative_value(self) -> None:
         # x in [-1, 6] at 16 bits: its zero extension is 0..6 or 65535, its sign extension
         # -1..6, so a footprint 4 * zext(x) reaches 262140
         x = E.bin("sub", E.bin("and", E.var("n", 16), E.const(7, 16)), E.const(1, 16))
@@ -401,7 +401,7 @@ class Captures(unittest.TestCase):
             (0, 7),
         )
 
-    def test_sign_extension_of_a_bit(self):
+    def test_sign_extension_of_a_bit(self) -> None:
         # a 1-bit value is 0 or 1 and its sign extension 0 or -1, so a footprint
         # 4 * sext(p) reaches -4
         p = E.cmp("slt", E.var("n", 32), E.const(4, 32))
@@ -410,7 +410,7 @@ class Captures(unittest.TestCase):
         self.assertEqual(interp.bounds(E.ext(p, 32, False)), (0, 1))
         self.assertEqual(interp.bounds(E.bin("mul", s, E.const(4, 32))), (-4, 0))
 
-    def test_strength_reduced_offset_is_assumed(self):
+    def test_strength_reduced_offset_is_assumed(self) -> None:
         # an offset carried through a loop (no static bounds): the capture stays known
         # under a KIR assume (change 16) that the landing misses it, evaluated per input
         loop = ("    mov.b32 %r70, 0;\n    mov.b32 %r71, 0;\n$RING:\n"
@@ -430,7 +430,7 @@ class Captures(unittest.TestCase):
             any(s["op"] == "assert" for s in stmts)
         )  # never a certain error
 
-    def test_st_async_from_another_cta(self):
+    def test_st_async_from_another_cta(self) -> None:
         # the other CTA of the pair writes this CTA's capture: even after the writer's
         # second fork barrier (no barrier of this CTA orders it)
         st = ("    mov.u32 %r50, %cluster_ctarank;\n    xor.b32 %r51, %r50, 1;\n"
@@ -445,7 +445,7 @@ class Captures(unittest.TestCase):
                 run(2, **{hook: st.replace("AT", "128")}).refusals, [], hook
             )
 
-    def test_bulk_reduce_from_another_cta(self):
+    def test_bulk_reduce_from_another_cta(self) -> None:
         # cp.reduce.async.bulk .shared::cluster combines bytes into the other CTA's shared
         # memory, as st.async: even after the writer's second fork barrier
         red = ("    mov.u32 %r50, %cluster_ctarank;\n    xor.b32 %r51, %r50, 1;\n"
@@ -461,7 +461,7 @@ class Captures(unittest.TestCase):
                 run(2, **{hook: red.replace("AT", "128")}).refusals, [], hook
             )
 
-    def test_fork_barriers_in_both_arms(self):
+    def test_fork_barriers_in_both_arms(self) -> None:
         # the default runs its two fork barriers in both arms of an if, on n (a KIR `if`)
         # or on its warp (masked), and writes the capture in one arm before them: each
         # arm counts its fork barriers from the If, whichever arm is translated first
@@ -475,12 +475,12 @@ class Captures(unittest.TestCase):
                         f"    bra.uni $JOIN;\n$THEN:\n{b}{forks}$JOIN:\n"))  # fmt: skip
                     self.assertIn(UNKNOWN, refusal(run(text=text)), (cond, write, arms))
 
-    def test_writes_after_the_second_fork_barrier(self):
+    def test_writes_after_the_second_fork_barrier(self) -> None:
         # this CTA's own writes after partition1's second fork barrier follow every read
         self.assertEqual(run(after="    @{one} st.u32 [%rd9+32], %r1;\n").refusals, [])
         self.assertEqual(run(after=tma(0)).refusals, [])
 
-    def test_op_table_writers_covered(self):
+    def test_op_table_writers_covered(self) -> None:
         # every op-table row (or prefix family) that may write shared memory has a kind of
         # interp.SHARED_WRITERS, and reaches a capture hook through the dispatch execute()
         # takes for its class, but TMA tensor loads (tma.py reports their landings) and the

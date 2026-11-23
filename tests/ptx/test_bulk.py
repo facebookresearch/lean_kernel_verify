@@ -75,7 +75,7 @@ def refusal(f) -> str:
 
 
 class Events(unittest.TestCase):
-    def test_staging_step(self):
+    def test_staging_step(self) -> None:
         f = p12(STEP)
         self.assertEqual((f.refusals, f.p1), ([], ["P1-2"]))
         names = [e["ev"] for e in events(f) if e["ev"] != "gstore"]
@@ -92,12 +92,12 @@ class Events(unittest.TestCase):
                          ("smem", 16, True, False))  # fmt: skip
         self.assertEqual(kir_errors(f), [])
 
-    def test_p0_unchanged(self):
+    def test_p0_unchanged(self) -> None:
         p0 = run(PRE + STEP + "\n    ret;\n", threads=128)
         self.assertEqual((p0.refusals, p0.p1), ([], []))
         self.assertEqual([e["ev"] for e in events(p0)], ["gstore"])
 
-    def test_pruned_write_and_no_store(self):
+    def test_pruned_write_and_no_store(self) -> None:
         far = STEP.replace("st.shared.v4.b32 [%r6]", "st.shared.v4.b32 [%r6+4096]")
         f = p12(far)
         self.assertEqual((f.refusals, events(f, "smem_write")), ([], []))
@@ -106,7 +106,7 @@ class Events(unittest.TestCase):
             (f.refusals, f.p1), ([], [])
         )  # no bulk store: nothing to check
 
-    def test_split_by_thread0_arrive(self):
+    def test_split_by_thread0_arrive(self) -> None:
         body = ("    setp.eq.s32 %p12, %r1, 0;\n"
                 "    @%p12 mbarrier.init.shared::cta.b64 [%r10+4096], 1;\n"
                 "    @%p12 mbarrier.arrive.shared::cta.b64 _, [%r10+4096];\n" + STEP)  # fmt: skip
@@ -120,7 +120,7 @@ class Events(unittest.TestCase):
             [r["name"] for r in p0.roles], ["default"]
         )  # P0 keeps its role
 
-    def test_loop_of_lets_kept(self):
+    def test_loop_of_lets_kept(self) -> None:
         # the loop's write (smem+8192) is pruned, but its lets carry %r25 (8 n after the
         # loop) out of it to the later write's offset (smem [0, 2048) for every n, the
         # store's source): the loop stays, or the offset would read n
@@ -152,7 +152,7 @@ LOOP:
         )
         self.assertEqual(kir_errors(f), [])
 
-    def test_truncated_offset(self):
+    def test_truncated_offset(self) -> None:
         # (n & 1) 2048 + 2^32 in 64 bits, truncated to 32: smem [0, 16) or [2048, 2064), the
         # first inside the store's source (not pruned as the untruncated [2^32, 2^32 + 2064))
         body = """
@@ -174,7 +174,7 @@ LOOP:
 
 
 class Stmatrix(unittest.TestCase):
-    def test_rows(self):
+    def test_rows(self) -> None:
         body = STEP.replace("    st.shared.v4.b32 [%r6], {%r1, %r1, %r1, %r1};",
                             "    stmatrix.sync.aligned.m8n8.x1.shared.b16 [%r6], {%r1};")  # fmt: skip
         f = p12(body)
@@ -204,14 +204,14 @@ class RemoteWrite(unittest.TestCase):
     ret;
 """
 
-    def test_into_the_peer(self):
+    def test_into_the_peer(self) -> None:
         f = run(self.BODY, family="cute", threads=32, cluster=(2, 1, 1), **P12)
         self.assertEqual((f.refusals, f.p1), ([], ["P1-2"]))
         (x,) = events(f, "smem_write")
         self.assertEqual((x["bytes"], x.get("async"), "cta" in x), (512, True, True))
         self.assertEqual(kir_errors(f), [])
 
-    def test_reduce_into_the_peer(self):
+    def test_reduce_into_the_peer(self) -> None:
         # a bulk reduce into the peer (ISA cp.reduce.async.bulk .shared::cluster) writes
         # its destination bytes as the copy does
         body = self.BODY.replace(
@@ -229,7 +229,7 @@ class RemoteWrite(unittest.TestCase):
 
 
 class Refusals(unittest.TestCase):
-    def test_group_not_executed_by_the_issuer(self):
+    def test_group_not_executed_by_the_issuer(self) -> None:
         body = STEP.replace("    cp.async.bulk.wait_group.read 0;",
                             "    setp.eq.s32 %p13, %r3, 1;\n    @%p13 cp.async.bulk.wait_group.read 0;")  # fmt: skip
         self.assertIn("does not execute", refusal(p12(body)))
@@ -238,11 +238,11 @@ class Refusals(unittest.TestCase):
                             "    @%p11 cp.async.bulk.wait_group.read 0;")  # fmt: skip
         self.assertEqual(p12(body).refusals, [])
 
-    def test_store_by_several_lanes(self):
+    def test_store_by_several_lanes(self) -> None:
         body = STEP.replace("@%p3 cp.async.bulk.global", "@%p11 cp.async.bulk.global")
         self.assertIn("several lanes of a warp", refusal(p12(body)))
 
-    def test_elected_lane_unknown(self):
+    def test_elected_lane_unknown(self) -> None:
         # which lane elect.sync elects is unspecified (H1): the lanes of warp 0 but the
         # elected one (%p4) wait or write, or the elected lane waits if it is below 16
         # (%p9: lane 0 would be credited, lane 16 not); the elected lane itself (%p3) is not
@@ -273,14 +273,14 @@ class Refusals(unittest.TestCase):
         f = p12(pre + wait.format(p="%p3") + tail)
         self.assertEqual((f.refusals, f.p1), ([], ["P1-2"]))
 
-    def test_data_predicated_write(self):
+    def test_data_predicated_write(self) -> None:
         pred = "    ld.shared.u32 %r20, [%r10+8192];\n    setp.eq.s32 %p14, %r20, 0;\n"  # data
         near = pred + STEP.replace("    st.shared.v4", "    @%p14 st.shared.v4")
         self.assertIn("predicate that depends on data", refusal(p12(near)))
         far = near.replace("st.shared.v4.b32 [%r6]", "st.shared.v4.b32 [%r6+4096]")
         self.assertEqual(p12(far).refusals, [])
 
-    def test_unmodeled_writes_inside_a_source(self):
+    def test_unmodeled_writes_inside_a_source(self) -> None:
         bar = ("    setp.eq.s32 %p12, %r1, 0;\n"
                "    @%p12 mbarrier.init.shared::cta.b64 [%r10+64], 1;\n" + STEP)  # fmt: skip
         self.assertIn("mbarrier object", refusal(p12(bar)))
@@ -289,7 +289,7 @@ class Refusals(unittest.TestCase):
                  + STEP)  # fmt: skip
         self.assertIn("tcgen05.alloc's address slot", refusal(p12(alloc)))
 
-    def test_wait_by_part_of_a_warp(self):
+    def test_wait_by_part_of_a_warp(self) -> None:
         body = """
     setp.eq.s32 %p12, %r1, 0;
     @%p12 mbarrier.init.shared::cta.b64 [%r10+4096], 1;
@@ -393,7 +393,7 @@ def in_kernel(drain: str, kp=KP):
 
 
 class InKernelDescriptor(unittest.TestCase):
-    def test_tmap_events(self):
+    def test_tmap_events(self) -> None:
         f = in_kernel("    cp.async.bulk.wait_group 0;\n    bar.sync 1, 32;\n")
         self.assertEqual((f.refusals, f.p1), ([], ["P1-2"]))
         tw = events(f, "tmap_write")
@@ -406,7 +406,7 @@ class InKernelDescriptor(unittest.TestCase):
         # the staging buffer's zeroing (smem+4096) cannot meet the source [8192, 12288)
         self.assertEqual(events(f, "smem_write"), [])
 
-    def test_global_store_into_the_tensormap(self):
+    def test_global_store_into_the_tensormap(self) -> None:
         # the descriptors in a buffer of the kernel's own (`maps`, not the scratch): thread 0
         # overwrites the tensormap item 0's store reads before its wait; P1-2's tensormap
         # writes are the cp_fenceproxy ones only
@@ -437,7 +437,7 @@ WAIT:
     @%p3 cp.async.bulk.commit_group;
 """
 
-    def test_names_its_load_mbarrier(self):
+    def test_names_its_load_mbarrier(self) -> None:
         f = p12(self.BODY, threads=32)
         self.assertEqual(f.refusals, [])
         (x,) = events(f, "smem_write")
@@ -452,7 +452,7 @@ WAIT:
             names, ["smem_write", "gload", "tma_load"]
         )  # its load follows it
 
-    def test_slot_index_bound_after(self):
+    def test_slot_index_bound_after(self) -> None:
         # the load's mbarrier slot index (i & 1) is bound only after the landing, where
         # the copy's address and mbarrier are translated: the landing names no slot
         # (otherwise the P1 KIR reads that variable before its `let`)
@@ -519,7 +519,7 @@ class DeadLets(unittest.TestCase):
         self.assertEqual([s.get("var") for s in stmts], ["c", "d", None, None])
         self.assertEqual([s["var"] for s in stmts[2]["then"]], ["c"])
 
-    def test_loop_left_empty_dropped(self):
+    def test_loop_left_empty_dropped(self) -> None:
         # the loop's write (smem+8192+(4i & 15)) is pruned and its address `let` then
         # reads nothing else: the loop, left empty, goes too
         body = """

@@ -143,14 +143,14 @@ class NbarTest(unittest.TestCase):
         self.assertEqual(f.refusals, [])
         self.assertEqual(kir.validate(doc(f)), [])
 
-    def test_uniform(self):
+    def test_uniform(self) -> None:
         f = facts("    bar.sync 1, 128;\n    ret;")
         self.ok(f)
         (s,) = sites(f)
         self.assertEqual((s["status"], s["id"], s["count"], s["op"], s["role"]),
                          ("counted", 1, 128, "sync", "default"))  # fmt: skip
 
-    def test_warp_divergent_splits_the_role(self):
+    def test_warp_divergent_splits_the_role(self) -> None:
         f = facts("""
     mov.u32 %r1, %tid.x;
     setp.lt.u32 %p1, %r1, 32;
@@ -165,7 +165,7 @@ $END:
             (s["status"], s["role"], s["warps"]), ("counted", "default:w0-0", 1)
         )
 
-    def test_lane_divergent_is_certain(self):
+    def test_lane_divergent_is_certain(self) -> None:
         f = facts("""
     mov.u32 %r1, %tid.x;
     and.b32 %r2, %r1, 31;
@@ -178,7 +178,7 @@ $END:
         (s,) = sites(f)
         self.assertEqual((s["status"], s["kind"], s["certain"]), ("open", "lane", True))
 
-    def test_spin_loop_is_certain(self):
+    def test_spin_loop_is_certain(self) -> None:
         f = facts("""
     ld.param.u64 %rd1, [k_param_0];
 $LOOP:
@@ -192,7 +192,7 @@ $LOOP:
         self.assertEqual((s["status"], s["kind"], s["certain"]), ("open", "loop", True))
         self.assertIn("ld.volatile.global.u32", s["why"])
 
-    def test_carry_written_under_a_data_predicate(self):
+    def test_carry_written_under_a_data_predicate(self) -> None:
         # the threads whose predicate (a strong load) is false keep another carry, so the
         # addc that reads it outside the predicate decides the barrier on that data
         f = facts("""
@@ -211,7 +211,7 @@ $SKIP:
         self.assertEqual((s["status"], s["certain"]), ("open", True))
         self.assertIn("ld.volatile.global.u32", s["why"])
 
-    def test_counted_loop_is_exact(self):
+    def test_counted_loop_is_exact(self) -> None:
         f = facts("""
     ld.param.u32 %r1, [k_param_1];
     mov.u32 %r2, 0;
@@ -230,7 +230,7 @@ $END:
         ops = {st["op"] for r in f.roles for st in _stmts(r["body"])}
         self.assertTrue(ops & {"for", "while"}, ops)
 
-    def test_producer_consumer(self):
+    def test_producer_consumer(self) -> None:
         f = facts("""
     mov.u32 %r1, %tid.x;
     setp.lt.u32 %p1, %r1, 64;
@@ -245,7 +245,7 @@ $END:
         got = sorted((s["role"], s["op"]) for s in sites(f, "counted"))
         self.assertEqual(got, [("default:w0-1", "arrive"), ("default:w2-3", "sync")])
 
-    def test_dispatch_forks_and_padding(self):
+    def test_dispatch_forks_and_padding(self) -> None:
         f = facts(WS, threads=256)
         self.ok(f)
         self.assertTrue(f.dispatch)
@@ -261,7 +261,7 @@ $END:
         self.assertEqual(got, [("default", 2, 128), ("partition0", 3, 32)])
         self.assertEqual(sites(f, "open"), [])
 
-    def test_dispatch_without_rounds(self):
+    def test_dispatch_without_rounds(self) -> None:
         f = facts(WS_ZERO, threads=256)
         self.ok(f)
         got = sorted((s["role"], s["id"], s["count"]) for s in sites(f, "counted"))
@@ -285,7 +285,7 @@ $END:
             "run a round depends on data", g.refusals[0]["msg"] if g.refusals else ""
         )
 
-    def test_id_from_memory_is_not_certain(self):
+    def test_id_from_memory_is_not_certain(self) -> None:
         f = facts("""
     ld.param.u64 %rd1, [k_param_0];
     ld.global.u32 %r1, [%rd1];
@@ -297,7 +297,7 @@ $END:
             (s["status"], s["kind"], s["certain"]), ("open", "operand", False)
         )
 
-    def test_count_no_warps_meet(self):
+    def test_count_no_warps_meet(self) -> None:
         f = facts("    bar.sync 1, 100;\n    ret;")
         self.ok(f)
         (s,) = sites(f)
@@ -305,7 +305,7 @@ $END:
             (s["status"], s["kind"], s["certain"]), ("open", "operand", True)
         )
 
-    def test_barrier_without_a_count_says_all(self):
+    def test_barrier_without_a_count_says_all(self) -> None:
         # warps 2-3 exit, warps 0-1 sync barrier 0: without a thread count the exited
         # threads release it (PTX ISA exit; the KIR says `all`), with count 128 not
         body = """
@@ -324,7 +324,7 @@ $X:
                 [(e["count"]["v"], "all" in e) for e in bars], [(128, every)]
             )
 
-    def test_published_spin_value(self):
+    def test_published_spin_value(self) -> None:
         f = facts("""
     ld.param.u64 %rd1, [k_param_0];
 $CHECK:
@@ -342,7 +342,7 @@ $LOOP:
         (s,) = sites(f)
         self.assertEqual((s["status"], s["rep"]), ("counted", True))
 
-    def test_single_strong_read_is_certain(self):
+    def test_single_strong_read_is_certain(self) -> None:
         f = facts("""
     ld.param.u64 %rd1, [k_param_0];
     ld.acquire.gpu.global.u32 %r1, [%rd1];
@@ -357,7 +357,7 @@ $LOOP:
         (s,) = sites(f)
         self.assertEqual((s["status"], s["kind"], s["certain"]), ("open", "loop", True))
 
-    def test_split_roles_share_a_keyed_region(self):
+    def test_split_roles_share_a_keyed_region(self) -> None:
         f = facts("""
     ld.param.u64 %rd1, [k_param_0];
     ld.global.u32 %r1, [%rd1];
@@ -384,7 +384,7 @@ $END:
         self.assertEqual(keys["default:w0-0"], keys["default:w1-3"])
         self.assertNotIn("", keys["default:w0-0"])
 
-    def test_metadata_bound_is_an_exact_loop(self):
+    def test_metadata_bound_is_an_exact_loop(self) -> None:
         body = """
     ld.param.u64 %rd1, [k_param_0];
     ld.global.u32 %r1, [%rd1];
@@ -420,7 +420,7 @@ $END:
         (s,) = sites(facts(body))
         self.assertEqual((s["status"], s["rep"]), ("counted", True))
 
-    def test_a_written_tensor_is_no_metadata(self):
+    def test_a_written_tensor_is_no_metadata(self) -> None:
         f = facts(
             """
     ld.param.u64 %rd1, [k_param_0];
@@ -444,7 +444,7 @@ $END:
             (s["status"], s["kind"], s["certain"]), ("open", "loop", False)
         )
 
-    def test_ballot_of_lanes_keys_the_split_roles(self):
+    def test_ballot_of_lanes_keys_the_split_roles(self) -> None:
         f = facts("""
     ld.param.u64 %rd1, [k_param_0];
     mov.u32 %r3, %tid.x;
@@ -475,7 +475,7 @@ $END:
         self.assertEqual(keys["default:w0-0"], keys["default:w1-3"])
         self.assertTrue(keys["default:w0-0"] and "" not in keys["default:w0-0"])
 
-    def test_switch_is_lowered(self):
+    def test_switch_is_lowered(self) -> None:
         """A switch brx.idx (not the dispatch) is cfg.lower_switches' compare chain, as in
         the P0 translation: on pid.x % 4 every warp takes the same case (exact KIR ifs);
         on the warp index the role splits per warp; an index not provably in range is
@@ -515,7 +515,7 @@ J:
         h = facts(body.replace("and.b32 %r3, %r2, 3;", "and.b32 %r3, %r2, 7;"))
         self.assertIn("not provably in [0, 4)", h.refusals[0]["msg"])
 
-    def test_dead_registers_are_not_classified(self):
+    def test_dead_registers_are_not_classified(self) -> None:
         """A class loop classifies only the registers live at its header or after its
         exit: a per-thread temporary it writes and nothing reads later (the bulk of a
         real loop body) is never classified, and the verdict-relevant classes are the
@@ -550,7 +550,7 @@ $LOOP:
                and "%lane" in nbar.E.free_vars(v) and "mul" in str(v)]  # fmt: skip
         self.assertEqual(tid, [])  # %r9 = tid * 4 and %r10 are dead: not classified
 
-    def test_irreducible_cycle_is_split(self):
+    def test_irreducible_cycle_is_split(self) -> None:
         f = facts("""
     ld.param.u32 %r1, [k_param_1];
     setp.eq.s32 %p1, %r1, 0;
@@ -566,7 +566,7 @@ $B:
         self.assertTrue(f.split)
         self.assertEqual({s["status"] for s in sites(f)}, {"counted"})
 
-    def test_rotated_exit_path_is_copied_into_its_loop(self):
+    def test_rotated_exit_path_is_copied_into_its_loop(self) -> None:
         """After node splitting, a loop that exits to two blocks, one of them the start of
         a path back to its header ($X, $Y: the only edges into it from outside come
         before the loop), gets a copy of that path: the loop then exits to $OUT alone and
@@ -601,7 +601,7 @@ $OUT:
         self.assertEqual(sorted((s["status"], s["id"], s["rep"]) for s in sites(f)),
                          [("counted", 1, False)] * 2 + [("counted", 2, False)])  # fmt: skip
 
-    def test_call_is_refused(self):
+    def test_call_is_refused(self) -> None:
         f = facts("""
     call.uni (_), helper, (0);
     bar.sync 1, 128;
@@ -609,7 +609,7 @@ $OUT:
         self.assertEqual(len(f.refusals), 1)
         self.assertIn("call", f.refusals[0]["msg"])
 
-    def test_split_roles_keys_follow_their_paths(self):
+    def test_split_roles_keys_follow_their_paths(self) -> None:
         """Roles split from one role share a region key only where their conditions
         came the same way: warp 0 reads its loop bound from x[0] and the other warps from
         x[1] (a branch that holds no barrier), or warp 0 adds 1 to it (a predicate). Each
@@ -657,7 +657,7 @@ $J:"""
                 self.assertNotEqual(a, b)
                 self.assertEqual(a.split("#")[0], b.split("#")[0])
 
-    def test_split_roles_own_instances_key_apart(self):
+    def test_split_roles_own_instances_key_apart(self) -> None:
         """A value a split role holds in a form only its own warps share keys its
         regions apart from the other roles': a branch on select(warp == 0, x[0], x[1]) (its
         instance in each role is one load), a KIR `if` on warp*4 < n picking a load's
@@ -752,7 +752,7 @@ $S:
             self.assertTrue(all(keys.values()))
             self.assertEqual(len({tuple(k) for k in keys.values()}), nroles)
 
-    def test_only_the_accepted_value_is_published(self):
+    def test_only_the_accepted_value_is_published(self) -> None:
         """A spin publishes the value it accepted, also through a copy, after a rotated
         guard testing some of its bits, or where it tests a uniform entry value first (a
         repeated region on it), not a value computed from it in the loop: here one per
@@ -824,7 +824,7 @@ $D:
         (s,) = sites(facts(lanes + bounded))
         self.assertEqual((s["status"], s["certain"]), ("open", False))
 
-    def test_strong_shared_load_is_no_uniform_data(self):
+    def test_strong_shared_load_is_no_uniform_data(self) -> None:
         """A strong shared load (.volatile, .relaxed, .acquire) may read another value in
         each warp, as a strong global load: a loop around a barrier exiting on one, and a
         branch on one around a barrier, are certain divergence."""
@@ -848,7 +848,7 @@ $S:
         (s,) = sites(g)
         self.assertEqual((s["status"], s["kind"], s["certain"]), ("open", "cond", True))
 
-    def test_certain_only_under_certain_conditions(self):
+    def test_certain_only_under_certain_conditions(self) -> None:
         """An open site is certain only if every divergent condition around it is and it
         lies in no repeated region (which may run no pass): a lane condition inside a branch
         on uniform data, an elected lane inside or around a branch on data the kernel
@@ -881,7 +881,7 @@ $S:
             (s,) = sites(f)
             self.assertEqual((s["status"], s["certain"]), ("open", False))
 
-    def test_lanes_at_a_barrier_without_aligned(self):
+    def test_lanes_at_a_barrier_without_aligned(self) -> None:
         """Without .aligned each thread arrives on its own: lanes of a warp that reach a
         barrier.sync at two instructions, or only some lanes under a predicate, are open
         but not certain; the aligned bar.sync under the same predicate is certain."""
@@ -911,7 +911,7 @@ $END:
                 (s["status"], s["kind"], s["certain"]), ("open", "lane", certain)
             )
 
-    def test_barrier_cta_is_a_named_barrier(self):
+    def test_barrier_cta_is_a_named_barrier(self) -> None:
         """bar/barrier's optional .cta changes nothing (PTX ISA): barrier.cta.sync,
         bar.cta.sync and barrier.cta.arrive.aligned are counted as their plain forms."""
         self.assertEqual(nbar.ops.mnemonic("barrier.cta.sync.aligned"),
@@ -935,7 +935,7 @@ $E:
                                ("default:w0-1", "sync", 3), ("default:w2-3", "sync", 2),
                                ("default:w2-3", "sync", 3), ("default:w2-3", "sync", 4)])  # fmt: skip
 
-    def test_discarded_final_rounds_are_skipped(self):
+    def test_discarded_final_rounds_are_skipped(self) -> None:
         """A nest of loops bounded by a value read from x (uniform data: each loop is
         translated by classes, an nb_rep region): inside an enclosing loop's fixed-point
         round, whose work is discarded, a loop's final round is skipped
