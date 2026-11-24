@@ -137,7 +137,7 @@ def outcomes(r, n=3):
 
 
 class Region(unittest.TestCase):
-    def test_find(self):
+    def test_find(self) -> None:
         fn, r = region()
         self.assertEqual(r.tensor, "team")
         self.assertEqual(r.addr, ("%rd6", 0))
@@ -148,7 +148,7 @@ class Region(unittest.TestCase):
         # the region starts at the inline asm block of the first access
         self.assertEqual(r.blocks[r.entry][0].opcode, "mov.u32")
 
-    def test_rewrite_passes_the_shape_check(self):
+    def test_rewrite_passes_the_shape_check(self) -> None:
         fn, r = region()
         with self.assertRaises(C.CfgError):
             C.build(fn)  # the poll loop has three exits
@@ -160,7 +160,7 @@ class Region(unittest.TestCase):
 
 
 class Explore(unittest.TestCase):
-    def test_count_first_lets_one_cta_form_alone(self):
+    def test_count_first_lets_one_cta_form_alone(self) -> None:
         _fn, r = region(COUNT)
         got, ex = outcomes(r)
         # exit 0 aborted, 1 formed: none, all, and one CTA alone (it saw the third
@@ -169,14 +169,14 @@ class Explore(unittest.TestCase):
         self.assertTrue(ex.symmetric)
         self.assertEqual(ex.stuck, [])
 
-    def test_abort_first_agrees(self):
+    def test_abort_first_agrees(self) -> None:
         _fn, r = region(ABORT_FIRST)
         got, _ex = outcomes(r)
         # all or none
         self.assertEqual(r.exits, ["$ABORT", "$FORMED"])
         self.assertEqual(got, {"000", "111"})
 
-    def test_a_lone_cta_never_forms(self):
+    def test_a_lone_cta_never_forms(self) -> None:
         _fn, r = region(COUNT)
         got, _ex = outcomes(r, 1)
         self.assertEqual(got, {"0"})
@@ -198,34 +198,34 @@ class Refusals(unittest.TestCase):
             region(tests, body)
         self.assertIn(why, str(cm.exception))
 
-    def test_weak_load_of_the_word(self):
+    def test_weak_load_of_the_word(self) -> None:
         self.check(JOIN.replace("ld.relaxed.gpu.global.b32 %r5", "ld.global.b32 %r5"),
                    "not an atomic or a strong")  # fmt: skip
 
-    def test_access_outside_the_region(self):
+    def test_access_outside_the_region(self) -> None:
         body = JOIN.replace(
             "    ret;\n", "    ld.relaxed.gpu.global.b32 %r12, [%rd2];\n    ret;\n"
         )
         self.check(body, "protocol region")
 
-    def test_other_memory_in_the_region(self):
+    def test_other_memory_in_the_region(self) -> None:
         body = JOIN.replace("    add.s32 %r6, %r6, 1;\n",
                             "    add.s32 %r6, %r6, 1;\n    st.global.u32 [%rd4], %r6;\n")  # fmt: skip
         self.check(body, "in a protocol region")
 
-    def test_access_through_a_loaded_pointer(self):
+    def test_access_through_a_loaded_pointer(self) -> None:
         # a pointer read from memory may point at the word: an access outside the region
         body = JOIN.replace("    ret;\n", "    ld.global.u64 %rd9, [%rd4];\n"
                             "    ld.relaxed.gpu.global.b32 %r13, [%rd9];\n    ret;\n")  # fmt: skip
         self.check(body, "protocol region")
 
-    def test_predicate_live_out(self):
+    def test_predicate_live_out(self) -> None:
         body = JOIN.replace(
             "    st.global.u32 [%rd8], %r3;\n", "    @%p1 st.global.u32 [%rd8], %r3;\n"
         )
         self.check(body, "live-out register %p1 is .pred, not a 32-bit integer")
 
-    def test_provenance_of_loop_carried_registers(self):
+    def test_provenance_of_loop_carried_registers(self) -> None:
         # a least fixpoint: the order the registers are asked in does not matter
         body = """
     ld.param.u64 %rd20, [k_param_0];
@@ -244,7 +244,7 @@ $L:
             prov = proto._Provenance(fn)
             self.assertEqual([prov.params(r) for r in order], [{"k_param_0"}] * 2)
 
-    def test_divergent_branch(self):
+    def test_divergent_branch(self) -> None:
         body = JOIN.replace("    setp.ge.s32 %p3, %r6, 4;",
                             "    mov.u32 %r12, %laneid;\n    setp.ge.s32 %p3, %r12, 4;")  # fmt: skip
         _fn, r = region(COUNT, body)
@@ -258,7 +258,7 @@ class Translation(unittest.TestCase):
         return run(JOIN.replace("TESTS", tests), family="ttgir", ptrs=PTRS, scalars=(), threads=32,
                    gsync=True, protocols=[{"tensor": "team"}])  # fmt: skip
 
-    def test_outcome_and_footprint(self):
+    def test_outcome_and_footprint(self) -> None:
         f = self.facts()
         self.assertEqual(f.refusals, [])
         ((r, rec),) = f.protocols
@@ -276,12 +276,12 @@ class Translation(unittest.TestCase):
         self.assertEqual(len(loads), 1)
         self.assertNotIn("team", f.sync)
 
-    def test_without_the_policy_the_loop_shape_refuses(self):
+    def test_without_the_policy_the_loop_shape_refuses(self) -> None:
         f = run(JOIN.replace("TESTS", COUNT), family="ttgir", ptrs=PTRS, scalars=(), threads=32,
                 gsync=True)  # fmt: skip
         self.assertTrue(f.refusals)
 
-    def test_scenario_inputs(self):
+    def test_scenario_inputs(self) -> None:
         # the TTGIR assembly's inputs: one per product of the groups' reachable outcome vectors
         from ...frontend.ttgir import to_kir
 
@@ -311,7 +311,7 @@ class Translation(unittest.TestCase):
                 to_kir._with_protocols(base, self.facts().protocols,
                                        {"protocols": [{"tensor": "team"}]}, (32, 1, 1))  # fmt: skip
 
-    def test_agents_from_the_record(self):
+    def test_agents_from_the_record(self) -> None:
         f = self.facts()
         ((r, rec),) = f.protocols
         groups = proto.agents(rec, (6, 1, 1), {}, {})
@@ -372,7 +372,7 @@ def take(body=TAKE):
 
 
 class Tagged(unittest.TestCase):
-    def test_uniform_take_binds_the_value(self):
+    def test_uniform_take_binds_the_value(self) -> None:
         f = take()
         self.assertEqual(f.refusals, [])
         self.assertEqual(f.sync, {"mail": 64})
@@ -384,7 +384,7 @@ class Tagged(unittest.TestCase):
         self.assertEqual(s["value"]["v"], (1 << 32) | 7)
         self.assertEqual(kir_errors(f), [])
 
-    def test_data_value_half(self):
+    def test_data_value_half(self) -> None:
         body = TAKE.replace(
             "    mov.b32 %r2, 7;\n",
             "    mov.b32 %f1, 0f3F800000;\n    mov.b32 %r2, %f1;\n",
@@ -398,7 +398,7 @@ class Tagged(unittest.TestCase):
         self.assertTrue(s.get("data_lo"))
         self.assertEqual(s["value"]["v"], 1 << 32)
 
-    def test_exit_condition_on_the_value_half(self):
+    def test_exit_condition_on_the_value_half(self) -> None:
         f = take(TAKE.replace("setp.ne.s32 p, t, %r4;", "setp.ne.s32 p, %r5, %r4;"))
         self.assertTrue(f.refusals)
 
@@ -428,7 +428,7 @@ class Claims(unittest.TestCase):
         return run(CLAIM, family="ttgir", ptrs=("ctr", "out"), scalars=(), threads=32,
                    gsync=True, **pol)  # fmt: skip
 
-    def test_representative_claim(self):
+    def test_representative_claim(self) -> None:
         f = self.claim(claims="representative")
         self.assertEqual(f.refusals, [])
         self.assertEqual((f.sync, f.representative), ({"ctr": 32}, ["claims"]))
@@ -438,7 +438,7 @@ class Claims(unittest.TestCase):
         self.assertIn(c["var"], str(st["offsets"]))
         self.assertEqual(kir_errors(f), [])
 
-    def test_claim_without_the_policy_is_refused(self):
+    def test_claim_without_the_policy_is_refused(self) -> None:
         self.assertTrue(self.claim().refusals)
 
 
@@ -481,21 +481,21 @@ class ParsedOnce(unittest.TestCase):
         self.assertTrue(all(m is module for m in modules))
         return len(modules) // 2
 
-    def test_rounds_of_a_missed_sync_tensor(self):
+    def test_rounds_of_a_missed_sync_tensor(self) -> None:
         self.assertEqual(
             self.rounds(TAKE, ("mail", "out"), census=False, elem={"mail": 8}), 2
         )
         self.assertEqual(self.rounds(CLAIM, ("ctr", "out"), census=False,
                                      claims="representative"), 2)  # fmt: skip
 
-    def test_census_and_protocol_region(self):
+    def test_census_and_protocol_region(self) -> None:
         self.assertEqual(self.rounds(TAKE, ("mail", "out"), elem={"mail": 8}), 1)
         self.assertEqual(self.rounds(JOIN.replace("TESTS", COUNT), PTRS,
                                      protocols=[{"tensor": "team"}]), 1)  # fmt: skip
 
 
 class RingRemainder(unittest.TestCase):
-    def test_signed_remainder_slot_is_keyed_by_the_counter(self):
+    def test_signed_remainder_slot_is_keyed_by_the_counter(self) -> None:
         from ...frontend.ptx import expr as E, gsev
 
         X = E.var("c", 32)
