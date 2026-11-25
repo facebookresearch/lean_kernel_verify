@@ -25,6 +25,7 @@ an error in the second translation, refuses the variant.
 
 import sys
 import unittest
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from types import ModuleType
 from unittest import mock
@@ -111,7 +112,7 @@ MATRIX = {"put": "    stmatrix.sync.aligned.m8n8.x1.shared.b16 [%r72+128], {%r51
                  "    redux.sync.max.s32 %r62, %r63, -1;\n"}  # fmt: skip
 
 
-def run(default: str = "", **hooks):
+def run(default: str = "", **hooks: str) -> "T.Facts":
     body = BODY.format(default=default, **{**WORD, **hooks})
     text = f"""
 .version 9.3
@@ -146,10 +147,10 @@ def run(default: str = "", **hooks):
     return T.translate(text, "k", recs, pol)
 
 
-def events(f, ev: str) -> dict:
+def events(f: "T.Facts", ev: str) -> dict:
     """role name -> the `ev` events of its body, in order."""
 
-    def walk(stmts):
+    def walk(stmts: Iterable[dict]) -> Iterator[dict]:
         for s in stmts:
             if s.get("ev") == ev:
                 yield s
@@ -159,11 +160,11 @@ def events(f, ev: str) -> dict:
     return {r["name"]: list(walk(r["body"])) for r in f.roles}
 
 
-def refusal(f) -> str:
+def refusal(f: "T.Facts") -> str:
     return f.refusals[0]["msg"] if f.refusals else ""
 
 
-def kir_of(f) -> dict:
+def kir_of(f: "T.Facts") -> dict:
     """A KIR of translation f's roles (for kir.validate)."""
     return {"kir_version": 1, "kernel": "k", "source": "k.py", "ir": "ptx",
             "grid": [{"e": "const", "w": 32, "v": 1}] * 3,
@@ -178,7 +179,7 @@ def kir_of(f) -> dict:
             "case": {"name": "k", "inputs": [{"name": "a", "params": {"n": 3, "x": 0}}]}}  # fmt: skip
 
 
-def _exprs(x):
+def _exprs(x: object) -> Iterator[dict]:
     """Every dict nested in x."""
     if isinstance(x, dict):
         yield x
@@ -190,7 +191,7 @@ def _exprs(x):
 
 
 class Handoffs(unittest.TestCase):
-    def check_channel(self, f):
+    def check_channel(self, f: "T.Facts") -> None:
         self.assertEqual(f.refusals, [])
         puts, gets = events(f, "handoff_put"), events(f, "handoff_get")
         self.assertEqual([len(puts[r]) for r in ("partition0", "partition1")], [0, 2])
