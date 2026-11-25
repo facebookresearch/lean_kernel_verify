@@ -34,6 +34,7 @@ passes); and the KIRs frontend/kir.py accepts.
 
 import sys
 import unittest
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from types import ModuleType
 from unittest import mock
@@ -118,7 +119,9 @@ WS_ZERO = (
 )
 
 
-def facts(body, threads=128, family="ttgir", meta=()):
+def facts(
+    body: str, threads: int = 128, family: str = "ttgir", meta: Iterable[str] = ()
+) -> "nbar.Facts":
     params = [{"ptx": "k_param_0", "kind": "ptr", "name": "x", "size": 8, "fields": {}},
               {"ptx": "k_param_1", "kind": "scalar", "name": "n", "size": 4, "fields": {}}]  # fmt: skip
     pol = T.policy(
@@ -129,17 +132,17 @@ def facts(body, threads=128, family="ttgir", meta=()):
     return nbar.translate(kernel(body, threads=threads), "k", [rec], pol)
 
 
-def sites(f, status=None):
+def sites(f: "nbar.Facts", status: str | None = None) -> list[dict]:
     return [s for s in f.sites if status in (None, s["status"])]
 
 
-def doc(f):
+def doc(f: "nbar.Facts") -> dict:
     return nbar.document(f, "k", "k.py", "test", [{"name": "i", "params": {"n": 1, "x": 0},
                                                     "grid": [1, 1, 1]}])  # fmt: skip
 
 
 class NbarTest(unittest.TestCase):
-    def ok(self, f):
+    def ok(self, f: "nbar.Facts") -> None:
         self.assertEqual(f.refusals, [])
         self.assertEqual(kir.validate(doc(f)), [])
 
@@ -1015,14 +1018,14 @@ def _nest(depth: int) -> str:
     return out + "    ret;"
 
 
-def _keys(f) -> dict:
+def _keys(f: "nbar.Facts") -> dict:
     """role -> the keys of its nb_rep begin events (the ones Lean reads), in order."""
     return {r["name"]: [e["key"] for e in _stmts(r["body"])
                         if e.get("ev") == "nb_rep" and e["begin"]]
             for r in f.roles}  # fmt: skip
 
 
-def _stmts(stmts):
+def _stmts(stmts: Iterable[dict]) -> Iterator[dict]:
     for s in stmts:
         yield s
         for k in ("then", "else", "body"):
