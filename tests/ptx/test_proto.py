@@ -28,6 +28,7 @@ region's rewrite, never changed: the Facts are those of the text.
 import contextlib
 import sys
 import unittest
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from types import ModuleType
 from unittest import mock
@@ -121,7 +122,9 @@ PARAMS = [{"ptx": f"k_param_{i}", "kind": "ptr", "name": p, "size": 8, "fields":
           for i, p in enumerate(PTRS)]  # fmt: skip
 
 
-def region(tests=COUNT, body=JOIN):
+def region(
+    tests: str = COUNT, body: str = JOIN
+) -> "tuple[parse.Function, proto.Region]":
     fn = parse.parse(kernel(body.replace("TESTS", tests), PTRS, (), 32)).function("k")
     cfg = C.build(fn, check_exits=False)
     roles, _ = C.roles(cfg, "ttgir")
@@ -129,7 +132,7 @@ def region(tests=COUNT, body=JOIN):
     return fn, r
 
 
-def outcomes(r, n=3):
+def outcomes(r: "proto.Region", n: int = 3) -> "tuple[set[str], proto.Exploration]":
     group = [proto.Agent(c, (c, 0, 0), {r.addr[0]: proto.Ptr("team", 0), "%r3": 1}, ("team", 0))
              for c in range(n)]  # fmt: skip
     ex = proto.explore(r, group, 0, {"grid": (n, 1, 1), "block": (32, 1, 1), "warp": 0})
@@ -193,7 +196,7 @@ class Explore(unittest.TestCase):
 
 
 class Refusals(unittest.TestCase):
-    def check(self, body, why, tests=COUNT):
+    def check(self, body: str, why: str, tests: str = COUNT) -> None:
         with self.assertRaises(proto.ProtocolError) as cm:
             region(tests, body)
         self.assertIn(why, str(cm.exception))
@@ -254,7 +257,7 @@ $L:
 
 
 class Translation(unittest.TestCase):
-    def facts(self, tests=COUNT):
+    def facts(self, tests: str = COUNT) -> "T.Facts":
         return run(JOIN.replace("TESTS", tests), family="ttgir", ptrs=PTRS, scalars=(), threads=32,
                    gsync=True, protocols=[{"tensor": "team"}])  # fmt: skip
 
@@ -320,7 +323,7 @@ class Translation(unittest.TestCase):
         self.assertEqual(groups[1][0].regs["%rd6"], proto.Ptr("team", 4))
 
 
-def _lets(stmts):
+def _lets(stmts: Iterable[dict]) -> Iterator[dict]:
     for s in stmts:
         if s.get("op") == "let":
             yield s
@@ -366,7 +369,7 @@ $END:
 """
 
 
-def take(body=TAKE):
+def take(body: str = TAKE) -> "T.Facts":
     return run(body, family="ttgir", ptrs=("mail", "out"), scalars=(), threads=32,
                elem={"mail": 8}, gsync=True)  # fmt: skip
 
@@ -424,7 +427,7 @@ $END:
 
 
 class Claims(unittest.TestCase):
-    def claim(self, **pol):
+    def claim(self, **pol: object) -> "T.Facts":
         return run(CLAIM, family="ttgir", ptrs=("ctr", "out"), scalars=(), threads=32,
                    gsync=True, **pol)  # fmt: skip
 

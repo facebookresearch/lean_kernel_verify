@@ -33,6 +33,7 @@ P1-2 rule (bulk.py).
 import re
 import sys
 import unittest
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import cast
@@ -126,7 +127,7 @@ _PREDS = {"early": ("%p5", "%p8"), "default": ("%p5", "%p8"), "late": ("%p10", "
           "after": ("%p10", "%p9")}  # fmt: skip
 
 
-def kernel(cluster: int = 1, text: str = BODY, **hooks) -> str:
+def kernel(cluster: int = 1, text: str = BODY, **hooks: str) -> str:
     decl = ", ".join(_DECL[k].format(i=i) for i, (k, _n, _v) in enumerate(PARAMS))
     body = text.format(**{h: hooks.get(h, "").replace("{one}", _PREDS[h][0]).replace(
         "{elect}", _PREDS[h][1]) for h in _PREDS})  # fmt: skip
@@ -149,7 +150,7 @@ def kernel(cluster: int = 1, text: str = BODY, **hooks) -> str:
 """  # fmt: skip
 
 
-def run(cluster: int = 1, text: str = BODY, **hooks):
+def run(cluster: int = 1, text: str = BODY, **hooks: str) -> "T.Facts":
     params = []
     for i, (k, name, v) in enumerate(PARAMS):
         p = {"i": i, "ptx": f"k_param_{i}", "name": name, "kind": _KIND[k],
@@ -164,14 +165,14 @@ def run(cluster: int = 1, text: str = BODY, **hooks):
     return T.translate(kernel(cluster, text, **hooks), "k", recs, pol)
 
 
-def _statements(stmts):
+def _statements(stmts: Iterable[dict]) -> Iterator[dict]:
     for s in stmts:
         yield s
         for k in ("then", "else", "body"):
             yield from _statements(s.get(k, []))
 
 
-def refusal(f) -> str:
+def refusal(f: "T.Facts") -> str:
     return f.refusals[0]["msg"] if f.refusals else ""
 
 
@@ -231,8 +232,12 @@ OVERWRITE = "may overwrite a warp-specialize capture"
 
 class Captures(unittest.TestCase):
     def check(
-        self, write: str, overlaps: bool = True, asynchronous: bool = False, hooks=None
-    ):
+        self,
+        write: str,
+        overlaps: bool = True,
+        asynchronous: bool = False,
+        hooks: tuple[str, ...] | None = None,
+    ) -> None:
         """The write `write` at each hook: refused / Data where it overlaps, else no
         refusal (the capture forwarded); a synchronous write before the capture store
         is overwritten by it."""
