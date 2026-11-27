@@ -540,7 +540,7 @@ $LOOP:
         seen = []
         klass = nbar._Nb.klass
 
-        def spy(tr, v):
+        def spy(tr: "nbar._Nb", v: object) -> tuple:
             seen.append(v)
             return klass(tr, v)
 

@@ -218,7 +218,7 @@ def reaches_p1_2(mn: str) -> bool:
     i = SimpleNamespace(opcode=mn + ".b32",
                         operands=(("mem", None), ("mem", None), ("imm", 16)))  # fmt: skip
 
-    def hit(*_a, **_kw) -> None:
+    def hit(*_a: object, **_kw: object) -> None:
         hits.append(mn)
 
     with mock.patch.multiple(bulk, _write=hit, landing=hit, fixed=hit, _stmatrix=hit):
@@ -273,7 +273,7 @@ class Captures(unittest.TestCase):
 
         got: list[int | None] = []
 
-        def landing(i, a, nbytes, remote):
+        def landing(i: object, a: object, nbytes: int | None, remote: bool) -> None:
             got.append(nbytes)
             raise Stop
 

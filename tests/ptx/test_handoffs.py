@@ -269,7 +269,9 @@ class Handoffs(unittest.TestCase):
     def test_error_in_the_second_translation_is_an_error(self) -> None:
         load = interp.Translator._handoff_load
 
-        def boom(tr, i, mn):  # a bug in the translation with channels
+        def boom(
+            tr: "interp.Translator", i: object, mn: str
+        ) -> bool:  # a bug in the translation with channels
             if tr.k.handoffs:
                 raise KeyError("a bug")
             return load(tr, i, mn)

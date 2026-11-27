@@ -449,7 +449,9 @@ class ParsedOnce(unittest.TestCase):
     """translate.translate of a module the caller parsed under policy gsync: no parse of
     the text, the module as parsed afterwards, and the Facts of the text, twice."""
 
-    def rounds(self, body, ptrs, census=True, **pol) -> int:
+    def rounds(
+        self, body: str, ptrs: tuple[str, ...], census: bool = True, **pol: object
+    ) -> int:
         """The rounds of one translation of the module (1: the census missed nothing)."""
         kw = dict(family="ttgir", ptrs=ptrs, scalars=(), threads=32, gsync=True, **pol)
         module = parse.parse(kernel(body, ptrs, (), 32))
@@ -457,10 +459,10 @@ class ParsedOnce(unittest.TestCase):
         parsed = (list(fn.body), dict(fn.regs))
         translate, translate_round, modules = T.translate, T._translate, []
 
-        def of_module(text, entry, records, policy):
+        def of_module(text: str, entry: str, records: list, policy: dict) -> "T.Facts":
             return translate(text, entry, records, policy, module)
 
-        def counted(*args):
+        def counted(*args: object) -> None:
             modules.append(args[-1])
             return translate_round(*args)
 
